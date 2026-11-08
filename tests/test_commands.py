@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from home3d_ws.home3d import cli, commands
+from home3d_ws.home3d import cli, commands, hooks
+from home3d_ws.home3d import tools as tools_mod
 from home3d_ws.home3d.backends.base import SliceOptions
 from home3d_ws.home3d.backends.simulator import SimulatorBackend
 from home3d_ws.home3d.config import Settings
@@ -18,11 +21,19 @@ from home3d_ws.home3d.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER, MUM = "owner-id@s.whatsapp.net", "mum-id@s.whatsapp.net"
+# D4 (handlers use the pass) lives in tools.py; these checks wait until it has landed there.
+needs_handler_pass = pytest.mark.skipif("consume_pass" not in inspect.getsource(tools_mod),
+                                        reason="tools.py handlers do not consume the D4 pass yet")
 
 
 class Source:  # the bits of gateway.session.SessionSource that /home3d reads
     def __init__(self, user_id=None, chat_id="<group>@g.us", platform="whatsapp"):
         self.user_id, self.chat_id, self.platform = user_id, chat_id, platform
+
+
+class CronCtx:
+    def current_cron_execution(self):
+        return {"job_id": "x"}
 
 
 def settings(**over) -> Settings:
@@ -32,12 +43,21 @@ def settings(**over) -> Settings:
     return Settings(**base)
 
 
+@pytest.fixture(autouse=True)
+def no_cron_env(monkeypatch):
+    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.session_context", raising=False)
+    monkeypatch.delitem(sys.modules, "cron.execution_identity", raising=False)
+
+
 class Rig:
-    def __init__(self, **over):
+    def __init__(self, ctx=None, **over):
         self.be = SimulatorBackend()
         self.store = Store()
-        self.rt = Runtime(None, settings=settings(**over), store=self.store, backend=self.be)
+        self.rt = Runtime(ctx, settings=settings(**over), store=self.store, backend=self.be)
         self.cmd = commands.make_command(self.rt)
+        self.h = hooks.make_hooks(self.rt)
+        self.store.remember_sender("s-mum", MUM, "whatsapp")
 
     def queue_job(self) -> int:
         sliced = self.be.slice(1, SliceOptions(printer_preset="sim-autoeject"))
@@ -48,7 +68,15 @@ class Rig:
 
     def __call__(self, text, user=None, **kw):
         source = kw.pop("source", Source(user) if user else None)
-        return self.cmd(text, source=source, session_id=kw.get("session_id", "s1"), platform="whatsapp")
+        return self.cmd(text, source=source, session_id=kw.get("session_id", "s1"),
+                        platform=kw.get("platform", "whatsapp" if source is not None else "cli"))
+
+    def live_passes(self) -> int:
+        return len(self.store._rows("SELECT id FROM passes WHERE used=0"))
+
+    def handler(self, name, args, session):
+        return json.loads(self.cmd.command._tools[name](args, session_id=session)) if self.cmd.command._tools else \
+            json.loads({n: h for n, _s, h in tools_mod.build_tools(self.rt)}[name](args, session_id=session))
 
 
 @pytest.fixture
@@ -68,40 +96,122 @@ def test_owner_approves_and_starts_now(rig):
     reply = rig(f"approve start {qid}", OWNER)
     assert reply.startswith("▶️") and f"#{qid}" in reply and "Mum" in reply
     assert rig.be.status().state in ("PREPARE", "RUNNING")
-    assert rig.store.peek_approval("start", str(qid)) is None  # used by this start
-    assert rig.store.events(kind="approval_granted")
+    assert rig.live_passes() == 0  # the pass was for this one call
+    granted, used = rig.store.events(kind="approval_granted"), rig.store.events(kind="approval_used")
+    assert granted and used and json.loads(used[0]["payload"])["approver"] == "Owner"
+    assert not [k for k in rig.store._rows("SELECT key FROM kv") if k["key"].startswith("sender:home3d-approve-")]
 
 
 def test_non_owner_and_chat_id_cannot_approve(rig):
     qid = rig.queue_job()
     for source in (Source(MUM), Source("stranger@s.whatsapp.net"), Source(None, chat_id=OWNER),
-                   {"user_id": "", "chat_id": OWNER}):
+                   {"user_id": "", "chat_id": OWNER}, Source("local"), Source("uid:1000"),
+                   Source("auth:v1:[github,https://github.com,mallory]", platform="local")):
         reply = rig(f"approve start {qid}", source=source)
-        assert "Only the owner" in reply
-    assert rig.store.peek_approval("start", str(qid)) is None
-    assert rig.be.status().state == "IDLE"
+        assert "Only the owner" in reply, vars(source) if not isinstance(source, dict) else source
+    assert rig.be.status().state == "IDLE" and rig.live_passes() == 0
+    assert not rig.store.events(kind="approval_granted")
 
 
-def test_local_session_is_the_owner(rig):
+def test_matrix_and_email_lookalikes_cannot_approve():
+    r = Rig(owner_ids=["@sam:matrix.org", "sam@example.com"], owner_name="Sam")
+    qid = r.queue_job()
+    for uid, platform in (("@mallory:evil.org", "matrix"), ("@sam:evil.org", "matrix"), ("sam@evil.com", "email"),
+                          ("sam", "email")):
+        assert "Only the owner" in r(f"approve start {qid}", source=Source(uid, platform=platform)), uid
+    assert r.be.status().state == "IDLE"
+    assert r(f"approve start {qid}", source=Source("@SAM:matrix.org", platform="matrix")).startswith("▶️")
+
+
+def test_classic_cli_and_tui_are_the_owner(rig):
+    """No source: the classic CLI / TUI dispatch plugin commands with ``source=None``."""
     qid = rig.queue_job()
     assert rig(f"approve start #{qid}").startswith("▶️")
 
 
-def test_blocked_start_leaves_a_15_minute_approval(rig):
+def test_gateway_hosted_cli_is_the_owner(rig):
+    """Hermes 0.22.5 hosts the classic CLI in the gateway: platform local, user_id uid:<n>."""
+    qid = rig.queue_job()
+    reply = rig(f"approve start {qid}", source=Source("uid:1000", chat_id="sess-1", platform="local"),
+                platform="local")
+    assert reply.startswith("▶️")
+    who = rig("whoami", source=Source("uid:1000", platform="local"), platform="local")
+    assert "owner: yes" in who and "local session" in who
+
+
+def test_local_is_owner_off_refuses_local_sessions():
+    r = Rig(local_is_owner=False)
+    qid = r.queue_job()
+    for source in (None, Source("uid:1000", platform="local")):
+        reply = r(f"approve start {qid}", source=source, platform="local" if source else "cli")
+        assert "local_is_owner is off" in reply
+    assert r.be.status().state == "IDLE"
+    assert "owner: no" in r("whoami")
+
+
+def test_blocked_command_keeps_nothing(rig):
+    """The review: a failed approve left a 15-minute grant that a later call (anyone's) could use."""
     q1, q2 = rig.queue_job(), rig.queue_job()
     rig.be.start(q1)  # printer busy: the gate refuses q2 for now
     reply = rig(f"approve start {q2}", OWNER)
-    assert "15 min" in reply and "busy" in reply
-    assert rig.store.peek_approval("start", str(q2)) is not None
-    reply = rig(f"approve start {q2} jump", OWNER)
-    assert rig.store.peek_approval("start", f"{q2}+jump") is not None
+    assert reply.startswith("Not done") and "busy" in reply and "send the command again" in reply
+    assert rig.live_passes() == 0 and rig.store.peek_approval("start", str(q2)) is None
+    rig(f"approve start {q2} jump", OWNER)
+    assert rig.live_passes() == 0
+    rig.be.advance(600)  # q1 finishes and is pushed off: q2 could start now, but only with a fresh approval
+    assert rig.be.status().state == "FINISH"
+    d = rig.h["pre_tool_call"](tool_name="home3d_start", args={"queue_item_id": q2}, session_id="s-mum")
+    assert d["action"] == "block" and hooks.APPROVAL_MARKER in d["message"]
+
+
+def test_stale_owner_command_cannot_authorise_a_later_resume_or_clear(rig):
+    """The review's reproduction: owner `/home3d approve resume` while IDLE, later a PAUSE with a fatal HMS:
+    Mum's session resumed the print. Now nothing survives the failed command, and HMS needs the owner's ack."""
+    assert rig("approve resume", OWNER).startswith("Not done")
+    qid = rig.queue_job()
+    assert rig("approve clear", OWNER).startswith("✅")
+    rig.be.set_scenario("pause_hms")
+    rig.be.start(qid)
+    assert rig("approve clear", OWNER).startswith("Not done")  # printing: refused, nothing kept
+    rig.be.advance(60)
+    st = rig.be.status()
+    assert st.state == "PAUSE" and st.blocking_hms
+    assert rig.live_passes() == 0
+    for tool, args in (("home3d_stop", {"action": "resume"}), ("home3d_stop", {"action": "resume", "ack_hms": True}),
+                       ("home3d_clear_plate", {"action": "confirm"})):
+        d = rig.h["pre_tool_call"](tool_name=tool, args=args, session_id="s-mum")
+        assert d["action"] == "block", (tool, args)
+    reply = rig("approve resume", OWNER)
+    assert reply.startswith("Not done") and "approve resume ack" in reply and st.blocking_hms[0].code in reply
+    assert rig.be.status().state == "PAUSE"
+    assert rig("approve resume ack", OWNER).startswith("▶️")
+    assert rig.be.status().state == "RUNNING"
+
+
+@needs_handler_pass
+def test_handlers_refuse_without_a_pass(rig):
+    """ctx.dispatch_tool (another plugin) skips pre_tool_call: the handler itself needs the pass."""
+    qid = rig.queue_job()
+    assert rig("approve resume", OWNER).startswith("Not done")
+    for name, args in (("home3d_start", {"queue_item_id": qid}), ("home3d_clear_plate", {"action": "confirm"}),
+                       ("home3d_stop", {"action": "resume"})):
+        out = rig.handler(name, args, "s-mum")
+        assert out["ok"] is False and out.get("blocked") and "pass" in out["error"], name
+    assert rig.be.status().state == "IDLE"
 
 
 def test_approve_clear_and_resume(rig):
     assert rig("approve clear", OWNER).startswith("✅")
-    assert rig.store.peek_approval("clear_plate", "") is None
+    assert rig.live_passes() == 0
     reply = rig("approve resume", OWNER)
-    assert "not paused" in reply and rig.store.peek_approval("resume", "") is not None
+    assert "not paused" in reply and "send the command again" in reply and rig.live_passes() == 0
+
+
+def test_approve_never_runs_from_cron():
+    r = Rig(ctx=CronCtx())
+    qid = r.queue_job()
+    reply = r(f"approve start {qid}", OWNER)
+    assert reply.startswith("Not done") and "cron" in reply and r.be.status().state == "IDLE"
 
 
 def test_usage_and_unknown(rig):
@@ -120,6 +230,7 @@ def test_status_whoami_moments_upgrades(rig):
     assert "owner: yes" in who and OWNER in who
     who = rig("whoami", "new-person@s.whatsapp.net")
     assert "owner: no" in who and "add this id" in who
+    assert "owner: yes" in rig("whoami") and "local session" in rig("whoami")
     assert "No human-needed moments" in rig("moments")
     for _ in range(3):
         rig.store.add_human_needed("remove_part", "took it off", job_name="Box", who="Mum")
@@ -132,6 +243,7 @@ def test_turkish_replies():
     r = Rig(language="tr")
     assert "Sadece sahibi" in r("approve clear", MUM)
     assert "Kuyruk boş" in r("status")
+    assert r("approve resume", OWNER).startswith("Yapılamadı")
 
 
 def test_never_raises_on_garbage(rig):
@@ -207,3 +319,75 @@ def test_demo_turkish_keeps_its_data(tmp_path):
     assert (tmp_path / "demo" / "outbox.jsonl").is_file()
     family = [r["text"] for r in res["outbox"] if r["audience"] == "family"]
     assert family and any("Anneciğim" in t for t in family)
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+def test_the_owner_gets_out_of_the_false_positive_band(rig, monkeypatch):
+    """e2e NEW-1: after a failed print the empty plate reads 19.9 % (Bambuddy's known false-positive band).
+    `/home3d approve clear` used to refuse ("not sure") and start pointed back at it: a dead end."""
+    from home3d_ws.home3d.backends.base import PlateCheck
+
+    q1, q2 = rig.queue_job(), rig.queue_job()
+    rig.be.set_scenario("fail")
+    rig.be.start(q1)
+    rig.be.advance(600)
+    rig.be.advance(3 * 3600)  # the bed cools down
+    assert rig.be.status().state == "FAILED"
+    band = PlateCheck(is_empty=None, difference_pct=19.9, message="uncertain: band", light_ok=True,
+                      uncertain_band=True)
+    monkeypatch.setattr(rig.be, "check_plate", lambda: band)
+    reply = rig(f"approve start {q2}", OWNER)
+    assert reply.startswith("Not done") and "approve clear" in reply
+    assert rig(f"approve clear", MUM).startswith("Only the owner")
+    reply = rig("approve clear", OWNER)
+    assert reply.startswith("✅") and "19.9%" in reply and f"/home3d approve start {q2}" in reply
+    reply = rig(f"approve start {q2}", OWNER)
+    assert reply.startswith("▶️") and rig.be.status().state in ("PREPARE", "RUNNING")
+    assert rig.live_passes() == 0
+
+
+def test_approve_clear_still_refuses_an_occupied_or_dark_plate(rig, monkeypatch):
+    from home3d_ws.home3d.backends.base import PlateCheck
+
+    for plate in (PlateCheck(is_empty=False, difference_pct=40.0, light_ok=True),
+                  PlateCheck(is_empty=None, difference_pct=19.9, light_ok=False, uncertain_band=True)):
+        monkeypatch.setattr(rig.be, "check_plate", lambda p=plate: p)
+        reply = rig("approve clear", OWNER)
+        assert reply.startswith("Not done"), reply
+
+
+def test_approve_resume_ack_covers_only_the_errors_it_saw(rig, monkeypatch):
+    """safety 2: the codes the owner acknowledged travel with the pass; a new error between the gate and the
+    handler is not acknowledged."""
+    from home3d_ws.home3d.backends.base import HMSError
+
+    qid = rig.queue_job()
+    rig.be.set_scenario("pause_hms")
+    rig.be.start(qid)
+    rig.be.advance(60)
+    real = rig.be.status
+    calls = {"n": 0}
+
+    def status():
+        st = real()
+        calls["n"] += 1
+        if calls["n"] > 1:  # the handler's read: a new fatal error appeared meanwhile
+            st.hms = list(st.hms) + [HMSError(code="0300-0100-0001-0007", severity="fatal", message="heatbed")]
+        return st
+
+    monkeypatch.setattr(rig.be, "status", status)
+    reply = rig("approve resume ack", OWNER)
+    assert reply.startswith("Not done") and "0300-0100-0001-0007" in reply
+    assert real().state == "PAUSE" and rig.live_passes() == 0
+    monkeypatch.setattr(rig.be, "status", real)
+    assert rig("approve resume ack", OWNER).startswith("▶️")
+    details = [r["detail"] for r in rig.store._rows("SELECT detail FROM passes")]
+    assert details and all(d.startswith(hooks.HMS_ACK_PREFIX) for d in details)
+
+
+def test_status_says_when_the_printer_manager_waits_for_a_plate_clear():
+    data = {"ok": True, "printer": {"state": "FINISH", "awaiting_plate_clear": True}, "queue": [], "watcher": {}}
+    assert "/home3d approve clear" in commands.format_status(data, "en")
+    assert "bekliyor" in commands.format_status(data, "tr")
+    data["printer"]["awaiting_plate_clear"] = False
+    assert "approve clear" not in commands.format_status(data, "en")

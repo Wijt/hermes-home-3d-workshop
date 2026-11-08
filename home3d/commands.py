@@ -1,46 +1,62 @@
 """``/home3d`` slash command (CLI, TUI and messaging gateway; no model call).
 
-  /home3d status                 printer, queue, plate and watcher state
-  /home3d approve start <id> [jump]   owner: approve (15 min, single use) and start now if the gates pass
-  /home3d approve clear          owner: approve + mark the plate clear if the camera agrees
-  /home3d approve resume         owner: approve + resume a paused print
-  /home3d whoami                 the sender id / household person this chat maps to
-  /home3d upgrades | moments     upgrade proposals / human-needed moments (last 30 days)
+  /home3d status                        printer, queue, plate and watcher state
+  /home3d approve start <id> [jump]     owner: start queue item <id> now if the safety gate passes
+  /home3d approve clear                 owner: mark the plate clear now if the gate passes (also confirms the plate
+                                        after a failed print)
+  /home3d approve resume [ack]          owner: resume a paused print (``ack`` = resume despite a printer error)
+  /home3d whoami                        the sender id / household person this chat maps to
+  /home3d upgrades | moments            upgrade proposals / human-needed moments (last 30 days)
   /home3d help
 
-``approve`` only counts when ``source.user_id`` is an owner id, or when there is no source (a local CLI/TUI
-session is the owner at the keyboard). ``source.chat_id`` is never accepted: in a group chat it names the
-group, not the person. The printer action itself goes through the same gated tool handler the agent uses.
+``approve`` only counts for the owner: ``source.user_id`` equal (exactly, ``config.norm_id``) to an owner id, or a
+local session when ``local_is_owner`` (no source = the classic CLI / TUI; a ``local`` platform source with a
+``uid:<n>`` user = the gateway-hosted CLI). Hermes v0.22.5 also passes no source for slash commands typed in the
+TUI, Desktop and the web dashboard, so whoever can use those surfaces counts as the local owner while
+``local_is_owner`` is on (they can already edit ``config.yaml``, including ``owner_ids``); turn it off on a shared
+or remotely reachable dashboard. ``source.chat_id`` is never accepted: in a group chat it names the group,
+not the person. The command runs the same gate as the ``pre_tool_call`` hook and, when it passes, does the action
+right away; nothing is stored that could authorise a later action. When the gate or the action fails, the owner is
+told why and sends the command again when ready.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
+import uuid
 from typing import Any, Callable, Optional
 
-from .hooks import APPROVAL_TTL_S, approval_target, approve_command
+from .config import LOCAL_SENDER, norm_id
+from .hooks import TOOL_FOR_ACTION, approve_command, evaluate, is_local_platform
+
+_LOCAL_UID = re.compile(r"^uid:\d+$")
 
 _T = {
     "help": (
-        "/home3d status · approve start <id> [jump] · approve clear · approve resume · whoami · upgrades · "
+        "/home3d status · approve start <id> [jump] · approve clear · approve resume [ack] · whoami · upgrades · "
         "moments · help",
-        "/home3d status · approve start <no> [jump] · approve clear · approve resume · whoami · upgrades · "
+        "/home3d status · approve start <no> [jump] · approve clear · approve resume [ack] · whoami · upgrades · "
         "moments · help"),
     "not_owner": ("Only the owner can approve ({who} is not in owner_ids).",
                   "Sadece sahibi onaylayabilir ({who} owner_ids listesinde değil)."),
     "no_user": ("Only the owner can approve (this platform did not say who sent the command).",
                 "Sadece sahibi onaylayabilir (komutu kimin gönderdiği bilinmiyor)."),
+    "local_off": ("Only the owner can approve (local sessions are not the owner: local_is_owner is off).",
+                  "Sadece sahibi onaylayabilir (yerel oturum sahibi sayılmıyor: local_is_owner kapalı)."),
     "usage_start": ("Usage: /home3d approve start <queue id> [jump]", "Kullanım: /home3d approve start <sıra no> [jump]"),
-    "usage_approve": ("Usage: /home3d approve start <id> | clear | resume",
-                      "Kullanım: /home3d approve start <no> | clear | resume"),
+    "usage_approve": ("Usage: /home3d approve start <id> | clear | resume [ack]",
+                      "Kullanım: /home3d approve start <no> | clear | resume [ack]"),
     "started": ("▶️ Started #{qid} \"{name}\"{who}. The watcher reports the finish and the plate.",
                 "▶️ #{qid} \"{name}\" başladı{who}. Bitişi ve tablayı izleyip haber vereceğim."),
     "cleared": ("✅ Plate marked clear{extra}.", "✅ Tabla boş olarak işaretlendi{extra}."),
+    "next_job": ("Next workshop job: #{qid} \"{name}\": /home3d approve start {qid}",
+                 "Sıradaki atölye işi: #{qid} \"{name}\": /home3d approve start {qid}"),
     "resumed": ("▶️ Resumed \"{name}\".", "▶️ \"{name}\" devam ediyor."),
-    "pending": ("Approved for {ttl} min (single use), but not done now: {why}",
-                "{ttl} dk geçerli onay verildi ama şu an yapılamadı: {why}"),
+    "not_done": ("Not done: {why} Nothing was kept: send the command again when ready.",
+                 "Yapılamadı: {why} Onay saklanmadı, hazır olunca komutu tekrar gönder."),
     "unknown": ("Unknown subcommand '{sub}'.", "Bilinmeyen alt komut: '{sub}'."),
     "no_upgrades": ("No upgrade proposals yet.", "Henüz yükseltme önerisi yok."),
     "no_moments": ("No human-needed moments in the last 30 days.", "Son 30 günde elle müdahale kaydı yok."),
@@ -64,20 +80,41 @@ def _src(source: Any, key: str) -> str:
     return str(getattr(v, "value", v))  # Platform enums carry .value
 
 
-def authorize(rt, source: Any) -> tuple[bool, str, str]:
-    """(allowed, approver label, refusal text). No source = local owner session."""
+def identify(source: Any, platform: str = "") -> tuple[str, str]:
+    """(sender id as the store records it, label) of whoever sent a command. ``LOCAL_SENDER`` for a local session:
+    no source (classic CLI / TUI) or a ``local``-platform source whose user is ``uid:<n>`` (gateway-hosted CLI)."""
+    if source is None:
+        return LOCAL_SENDER, "local session"
+    uid = _src(source, "user_id").strip()
+    plat = _src(source, "platform") or platform
+    if is_local_platform(plat) and _LOCAL_UID.match(uid.lower()):
+        return LOCAL_SENDER, f"local session ({uid})"
+    if uid and norm_id(uid) == LOCAL_SENDER:  # a messaging user literally named "local" is not the local owner
+        return "", uid
+    return uid, uid
+
+
+def authorize_sender(rt, source: Any, platform: str = "") -> tuple[bool, str, str, str]:
+    """(allowed, approver label, sender id, refusal text)."""
     s = rt.settings
     lang = s.language
-    if source is None:
-        return True, f"{s.owner_name} (local)", ""
-    uid = _src(source, "user_id")
-    if not uid:
-        return False, "", _t("no_user", lang)
-    if s.is_owner(uid):
-        person = s.person_for(uid)
-        return True, person.name if person else s.owner_name, ""
-    person = s.person_for(uid)
-    return False, "", _t("not_owner", lang, who=person.name if person else uid)
+    sender, label = identify(source, platform)
+    if sender == LOCAL_SENDER:
+        if s.local_is_owner:
+            return True, f"{s.owner_name} (local)", sender, ""
+        return False, "", sender, _t("local_off", lang)
+    if not sender:
+        return False, "", "", (_t("not_owner", lang, who=label) if label else _t("no_user", lang))
+    person = s.person_for(sender)
+    if person is not None and s.is_owner(sender):
+        return True, person.name, sender, ""
+    return False, "", sender, _t("not_owner", lang, who=person.name if person else sender)
+
+
+def authorize(rt, source: Any, platform: str = "") -> tuple[bool, str, str]:
+    """(allowed, approver label, refusal text). See ``authorize_sender``."""
+    ok, approver, _sender, refusal = authorize_sender(rt, source, platform)
+    return ok, approver, refusal
 
 
 def _pretty(name: str) -> str:
@@ -113,6 +150,9 @@ def format_status(data: dict, lang: str) -> str:
     lines = [head + (f" · {', '.join(temps)}" if temps else "")]
     for h in p.get("hms") or []:
         lines.append(f"⚠️ HMS {h.get('code')}: {h.get('message') or ''}".rstrip(": "))
+    if p.get("awaiting_plate_clear") is True:
+        lines.append("⚠️ " + ("Yazıcı yöneticisi tablanın boş işaretlenmesini bekliyor: /home3d approve clear" if tr
+                              else "The printer manager waits for the plate to be marked clear: /home3d approve clear"))
     queue = data.get("queue") or []
     if queue:
         lines.append(("Kuyruk:" if tr else "Queue:"))
@@ -170,7 +210,7 @@ class _Command:
         if sub in ("status", "durum"):
             return format_status(self.tool("home3d_status", {}, session_id), lang)
         if sub in ("approve", "onay", "onayla"):
-            return self.approve(rest, source, session_id, lang)
+            return self.approve(rest, source, session_id, platform, lang)
         if sub == "whoami":
             return self.whoami(source, session_id, platform, lang)
         if sub in ("upgrades", "upgrade"):
@@ -180,42 +220,62 @@ class _Command:
         return _t("unknown", lang, sub=sub[:30]) + "\n" + _t("help", lang)
 
     # -- approve --
-    def approve(self, rest: list[str], source: Any, session_id: str, lang: str) -> str:
+    def approve(self, rest: list[str], source: Any, session_id: str, platform: str, lang: str) -> str:
         what = rest[0] if rest else ""
+        flags = {w.lower() for w in rest[1:]}
         if what in ("start", "başlat", "baslat"):
             qid = _parse_id(rest[1]) if len(rest) > 1 else None
             if qid is None:
                 return _t("usage_start", lang)
-            jump = any(w.lower() in ("jump", "--jump", "atla") for w in rest[2:])
-            action, tool, args = "start", "home3d_start", {"queue_item_id": qid, "allow_jump": jump}
+            jump = bool(flags & {"jump", "--jump", "atla"})
+            action, args = "start", {"queue_item_id": qid, "allow_jump": jump}
         elif what in ("clear", "plate", "temizle", "tabla"):
             qid, jump = None, False
-            action, tool, args = "clear_plate", "home3d_clear_plate", {"action": "confirm"}
+            action, args = "clear_plate", {"action": "confirm"}
         elif what in ("resume", "devam"):
             qid, jump = None, False
-            action, tool, args = "resume", "home3d_stop", {"action": "resume", "reason": "owner approved resume"}
+            ack = bool(flags & {"ack", "--ack", "onay", "tamam"})
+            action, args = "resume", {"action": "resume", "reason": "owner approved resume", "ack_hms": ack}
         else:
             return _t("usage_approve", lang)
-        ok, approver, refusal = authorize(self.rt, source)
+        ok, approver, sender, refusal = authorize_sender(self.rt, source, platform)
         if not ok:
             return refusal
-        store = self.rt.store
-        target = approval_target(action, qid, jump)
-        store.grant_approval(action, target, approver, ttl_s=APPROVAL_TTL_S)
-        store.add_event("approval_granted", "", {"action": action, "target": target, "approver": approver,
-                                                 "command": approve_command(action, qid, jump)})
-        res = self.tool(tool, args, session_id)
+        store, tool = self.rt.store, TOOL_FOR_ACTION[action]
+        command = approve_command(action, qid, jump, ack=bool(args.get("ack_hms")))
+        store.add_event("approval_granted", "", {"action": action, "approver": approver, "sender": sender,
+                                                 "command": command, "session": session_id[:80]})
+        ev = evaluate(self.rt, action, args)  # the same cron check + safety gate as the pre_tool_call hook
+        if not ev.ok:
+            return _t("not_done", lang, why=_sentence(ev.message or ev.reason))
+        # A private session id for this one command: the pass below can only be used by the call made right here,
+        # never by another session (a group chat shares one session id) or by a later call.
+        cmd_sid = f"home3d-approve-{uuid.uuid4().hex}"
+        store.remember_sender(cmd_sid, sender, platform or _src(source, "platform"))
+        store.issue_pass(tool, ev.target, cmd_sid, detail=ev.pass_detail)  # resume ack: the codes shown
+        try:
+            # The handler is called directly, not through ctx.dispatch_tool: Hermes' registry.dispatch skips the
+            # pre_tool_call hooks anyway (v0.22.5), so the owner check above, ``evaluate`` and the single-use pass are
+            # what authorise this call; the handler re-checks its gate and uses the pass.
+            res = self.tool(tool, args, cmd_sid)
+        finally:
+            store.consume_pass(tool, ev.target, cmd_sid)  # nothing lingers, used or not
+            store.forget_sender(cmd_sid)
         if not res.get("ok"):
-            why = res.get("message") or res.get("error") or "?"
-            return _t("pending", lang, ttl=APPROVAL_TTL_S // 60, why=why)
-        store.consume_approval(action, target)  # used right here
+            return _t("not_done", lang, why=_sentence(res.get("message") or res.get("error") or "?"))
+        store.add_event("approval_used", str(res.get("name") or res.get("job") or ""),
+                        {"action": action, "target": ev.target, "approver": approver, "tool": tool})
         if action == "start":
             who = f" ({res['requester']})" if res.get("requester") else ""
             return _t("started", lang, qid=qid, name=_pretty(str(res.get("name") or f"#{qid}")), who=who)
         if action == "clear_plate":
             plate = res.get("plate") or {}
             diff = plate.get("difference_pct")
-            return _t("cleared", lang, extra=f" ({diff:g}%)" if isinstance(diff, (int, float)) else "")
+            out = _t("cleared", lang, extra=f" ({diff:g}%)" if isinstance(diff, (int, float)) else "")
+            nxt = res.get("next_job") if isinstance(res.get("next_job"), dict) else None
+            if nxt and nxt.get("id"):
+                out += "\n" + _t("next_job", lang, qid=nxt["id"], name=_pretty(str(nxt.get("name") or "")))
+            return out
         return _t("resumed", lang, name=_pretty(str(res.get("job") or "")))
 
     # -- info --
@@ -223,20 +283,21 @@ class _Command:
         s = self.rt.settings
         uid = _src(source, "user_id")
         plat = _src(source, "platform") or platform or ("cli" if source is None else "?")
-        person = s.person_for(uid) if uid else None
-        if source is None:
-            who = f"{s.owner_name} (owner, local session)"
+        sender, _label = identify(source, platform)
+        person = s.person_for(sender) if sender else None
+        if sender == LOCAL_SENDER:
+            who = f"{s.owner_name} (owner, local session)" if person else "local session (local_is_owner is off)"
         elif person:
             who = f"{person.name} ({person.role})"
         else:
             who = "not in the household list" if lang != "tr" else "ev listesinde yok"
-        owner = source is None or (bool(uid) and s.is_owner(uid))
+        owner = bool(sender) and s.is_owner(sender)
         lines = [f"platform: {plat}", f"user_id: {uid or '-'}", f"person: {who}",
                  f"owner: {'yes' if owner else 'no'}"]
         if session_id:
             lines.append(f"session: {session_id[:40]}")
-        if uid and not person:
-            lines.append("add this id to owner_ids or household to be recognised")
+        if uid and not person and sender != LOCAL_SENDER:
+            lines.append("add this id to owner_ids or household to be recognised (ids must match exactly)")
         return "\n".join(lines)
 
     def upgrades(self, lang: str) -> str:
@@ -279,6 +340,11 @@ class _Command:
         return "\n".join(lines)
 
 
+def _sentence(text: Any) -> str:
+    t = str(text or "").strip()
+    return t if t.endswith((".", "!", "?")) else t + "."
+
+
 def _parse_id(value: str) -> Optional[int]:
     v = str(value or "").strip().lstrip("#")
     return int(v) if v.isdigit() and int(v) > 0 else None
@@ -295,4 +361,4 @@ def make_command(rt) -> Callable[..., str]:
     return home3d
 
 
-__all__ = ["make_command", "authorize", "format_status"]
+__all__ = ["make_command", "authorize", "authorize_sender", "identify", "format_status"]

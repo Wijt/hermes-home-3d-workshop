@@ -18,10 +18,15 @@ class BackendError(RuntimeError):
     """A backend call failed; ``str(exc)`` is safe to show to the owner."""
 
 
-# Normalised printer states (Bambuddy / Bambu MQTT ``gcode_state`` values map 1:1).
-IDLE, PREPARE, RUNNING, PAUSE, FINISH, FAILED, OFFLINE = (
-    "IDLE", "PREPARE", "RUNNING", "PAUSE", "FINISH", "FAILED", "OFFLINE")
+# Normalised printer states (Bambuddy / Bambu MQTT ``gcode_state`` values map 1:1). ``UNKNOWN`` is a
+# connected printer whose state is missing or not recognised: every gate treats it as "not idle" (fail
+# closed), it is never mapped to IDLE.
+IDLE, PREPARE, RUNNING, PAUSE, FINISH, FAILED, OFFLINE, UNKNOWN = (
+    "IDLE", "PREPARE", "RUNNING", "PAUSE", "FINISH", "FAILED", "OFFLINE", "UNKNOWN")
 ACTIVE_STATES = {PREPARE, RUNNING, PAUSE}
+
+# Queue item statuses that will never print again (compared lower-case).
+DONE_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "canceled", "skipped"})
 
 # HMS codes that are known-harmless warnings and never block anything (A1 X-belt resonance notice).
 IGNORED_HMS = {"0300-1000-0002-0001", "0300_1000_0002_0001"}
@@ -64,6 +69,8 @@ class PrinterStatus:
     hms: list[HMSError] = field(default_factory=list)
     trays: list[Tray] = field(default_factory=list)
     printer_name: str = ""
+    chamber_light: Optional[bool] = None  # None = the backend does not know
+    awaiting_plate_clear: Optional[bool] = None  # Bambuddy waits for "plate cleared" before the next dispatch
 
     @property
     def is_active(self) -> bool:
@@ -94,7 +101,12 @@ class QueueItem:
 
     @property
     def is_pending(self) -> bool:
-        return self.status == "pending"
+        return str(self.status or "").strip().lower() == "pending"
+
+    @property
+    def is_done(self) -> bool:
+        """Finished one way or another (completed / failed / cancelled / skipped): it will not print again."""
+        return str(self.status or "").strip().lower() in DONE_QUEUE_STATUSES
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -167,6 +179,13 @@ class PlateCheck:
     confidence: Optional[float] = None
     message: str = ""
     needs_calibration: bool = False
+    # False = the chamber light was off for the check and could not be switched on (the result is then
+    # never trusted: ``is_empty`` is None); True = the check ran lit; None = the backend does not know.
+    light_ok: Optional[bool] = None
+    # True when the ONLY doubt is the backend's known false-positive band (Bambuddy reads 18-25 % on an empty
+    # plate): the check ran, lit and calibrated, and found a small difference. The camera alone still never
+    # decides on it (``is_empty`` is None), but a person's confirmation may overrule it (``gates``).
+    uncertain_band: bool = False
 
 
 @dataclass
@@ -190,10 +209,15 @@ class Backend(ABC):
 
     @abstractmethod
     def snapshot(self, out_dir: Path, lit: bool = True) -> Snapshot:
-        """Take a camera frame (turning the chamber light on for ``lit`` and off again)."""
+        """Take a camera frame. For ``lit`` the chamber light is switched on when it is off and put back
+        to its earlier state afterwards (a light that was on is never switched off). A light that could
+        not be switched off again is reported with ``light_left_on`` in ``Snapshot.note``."""
 
     @abstractmethod
-    def check_plate(self) -> PlateCheck: ...
+    def check_plate(self) -> PlateCheck:
+        """Is the build plate empty? Fails closed: anything short of a lit, completed check that says
+        empty gives ``is_empty`` False or None. Same light rules (and ``light_left_on`` note) as
+        ``snapshot``."""
 
     @abstractmethod
     def resolve_model(self, url_or_id: str) -> ModelCard: ...
@@ -231,7 +255,9 @@ class Backend(ABC):
     def queue_remove(self, queue_item_id: int) -> None: ...
 
     @abstractmethod
-    def start(self, queue_item_id: int) -> QueueItem: ...
+    def start(self, queue_item_id: int) -> QueueItem:
+        """Start a pending queue item. A refusal (busy, filament missing or short, ...) raises
+        ``BackendError`` with a short readable reason."""
 
     @abstractmethod
     def stop(self) -> None: ...

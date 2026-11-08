@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -18,6 +19,35 @@ from . import PLUGIN_NAME
 
 SNAPSHOT_FILE = "watcher-config.json"
 API_KEY_ENV = "HOME3D_BAMBUDDY_API_KEY"
+# The recorded "sender" of a local CLI/TUI/desktop session (no messaging identity). ``Settings.is_owner(LOCAL_SENDER)``
+# is ``local_is_owner``. A messaging user whose id happens to be "local" is never recorded as this value (hooks.py).
+LOCAL_SENDER = "local"
+INJECT_MODES = ("auto", "always", "never")
+
+_WA_ID = re.compile(r"^\+?(\d+)(?::\d+)?@(?:s\.whatsapp\.net|c\.us)$")
+_LID_ID = re.compile(r"^\+?(\d+)(?::\d+)?@lid$")
+_PHONE_ID = re.compile(r"^\+?(\d+)$")
+
+
+def norm_id(sender_id: object) -> str:
+    """Canonical form of a sender id for EXACT comparison (never compare only the part before "@").
+
+    strip + lower; WhatsApp phone ids (``+90555...@s.whatsapp.net``, ``...:12@s.whatsapp.net``, ``...@c.us``) and bare
+    phone numbers become their digits; ``@lid`` ids become ``<digits>@lid`` (a separate id space: never equal to a
+    phone number); everything else (Matrix ``@sam:matrix.org``, e-mail, Telegram numeric ids, ``uid:3``) is compared
+    as is, case-insensitively.
+    """
+    s = str(sender_id if sender_id is not None else "").strip().lower()
+    m = _WA_ID.match(s) or _PHONE_ID.match(s)
+    if m:
+        return m.group(1)
+    m = _LID_ID.match(s)
+    if m:
+        return f"{m.group(1)}@lid"
+    return s
+
+
+_norm = norm_id
 
 
 @dataclass
@@ -53,6 +83,8 @@ class Settings:
     bed_type: str = "Textured PEI Plate"
     eject_cool_temp_c: float = 30.0
     watch_interval: str = "2m"
+    local_is_owner: bool = True  # a local CLI/TUI/desktop session is the owner
+    inject_context: str = "auto"  # auto | always | never (pre_llm_call context)
 
     # ---- derived helpers -------------------------------------------------------------------
     @property
@@ -71,11 +103,18 @@ class Settings:
         return out
 
     def person_for(self, sender_id: Optional[str]) -> Optional[Person]:
-        if not sender_id:
+        """The household person with EXACTLY this id (after ``norm_id``), or None.
+
+        ``LOCAL_SENDER`` is the owner when ``local_is_owner`` (and nobody otherwise); it never matches a configured id.
+        """
+        sid = norm_id(sender_id)
+        if not sid:
             return None
-        sid = str(sender_id)
+        if sid == LOCAL_SENDER:
+            return Person(id=LOCAL_SENDER, name=self.owner_name, role="owner") if self.local_is_owner else None
         for p in self.people():
-            if p.id and (p.id == sid or p.id.split("@")[0] == sid.split("@")[0]):
+            pid = norm_id(p.id)
+            if pid and pid != LOCAL_SENDER and pid == sid:
                 return p
         return None
 
@@ -137,6 +176,9 @@ def load_settings(ctx: Any = None, overrides: Optional[Mapping[str, Any]] = None
         base.backend = "simulator"
     if base.language not in {"tr", "en"}:
         base.language = "en"
+    base.inject_context = str(base.inject_context or "").strip().lower()
+    if base.inject_context not in INJECT_MODES:
+        base.inject_context = "auto"
     return base
 
 

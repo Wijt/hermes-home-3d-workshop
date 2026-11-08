@@ -260,3 +260,26 @@ def test_against_the_simulator(tmp_path):
     planned, phases, events = run("eject_miss", "sim-autoeject")
     assert phases[-2:] == ["verifying", "needs_human"] and events == ["finished", "plate_not_clear"]
     assert run("ok", "") == (False, ["printing", "needs_human"], ["finished", "plate_not_clear"])
+
+
+def test_a_dark_plate_check_never_clears_the_plate():
+    """A check taken with the chamber light off (light_ok False) is not "empty", even if a backend says so."""
+    from home3d_ws.home3d.eject import says_empty
+
+    dark_empty = PlateCheck(is_empty=True, difference_pct=0.0, light_ok=False)
+    assert not says_empty(dark_empty) and not says_empty(None) and not says_empty(UNSURE)
+    assert says_empty(EMPTY) and says_empty(PlateCheck(is_empty=True, light_ok=True))
+    s = PlateState("needs_human", job_name="Gift box", finished_ts=T0, reason="no auto-eject planned")
+    s2, ev = step(s, st("FINISH", bed=24), T0 + 30 * MIN, eject_planned=False, plate=dark_empty)
+    assert s2.phase == "needs_human" and ev == [] and s2.last_check["light_ok"] is False
+    s3, ev3 = step(s, st("FINISH", bed=24), T0 + 30 * MIN, eject_planned=False,
+                   plate=PlateCheck(is_empty=True, light_ok=True))
+    assert s3.phase == "clear" and ev3 == ["plate_clear"] and s3.last_check["light_ok"] is True
+
+
+def test_unknown_state_changes_nothing_and_asks_for_no_check():
+    for phase in ("printing", "needs_human", "clear", "verifying"):
+        s = PlateState(phase, job_name="Gift box", finished_ts=T0)
+        s2, ev = step(s, st("UNKNOWN", bed=24), T0 + 30 * MIN, eject_planned=True, plate=None)
+        assert s2.phase == phase and ev == []
+        assert not needs_plate_check(s, st("UNKNOWN", bed=24), T0 + 30 * MIN)

@@ -646,7 +646,7 @@ class SimulatorBackend(Backend):
         job = st["job"]
         if not job:
             return PrinterStatus(state=IDLE, bed_temp=ROOM_C, bed_target=0.0, nozzle_temp=ROOM_C,
-                                 trays=trays, printer_name=PRINTER_NAME)
+                                 trays=trays, printer_name=PRINTER_NAME, chamber_light=False)
         p = job["params"]
         total = int(p["total_layers"])
         name = _stem(job["name"])
@@ -661,7 +661,7 @@ class SimulatorBackend(Backend):
                                  layer=layer_at(prog) if job["part_placed"] else 0, total_layers=total,
                                  bed_temp=_cool(p["bed_temp"], dt, BED_TAU_S), bed_target=0.0,
                                  nozzle_temp=_cool(p["nozzle_temp"], dt, NOZZLE_TAU_S),
-                                 trays=trays, printer_name=PRINTER_NAME)
+                                 trays=trays, printer_name=PRINTER_NAME, chamber_light=False)
         phase, prog, el = self._phase(job, t)
         dur = float(job["duration_s"])
         if phase == PREPARE:
@@ -675,7 +675,8 @@ class SimulatorBackend(Backend):
         return PrinterStatus(state=PAUSE if job["paused_at"] is not None else phase, job_name=name,
                              progress=round(prog, 1), remaining_min=remaining, layer=layer, total_layers=total,
                              bed_temp=bed, bed_target=float(p["bed_temp"]), nozzle_temp=nozzle,
-                             hms=[HMSError(**h) for h in job["hms"]], trays=trays, printer_name=PRINTER_NAME)
+                             hms=[HMSError(**h) for h in job["hms"]], trays=trays, printer_name=PRINTER_NAME,
+                             chamber_light=False)
 
     # ---- settings hints (no Settings object reaches a backend) ------------------------------
     @staticmethod
@@ -742,13 +743,15 @@ class SimulatorBackend(Backend):
         with self._state() as st:
             self._require_online(st, "check plate")
             part = st["plate"]
+        # The simulated check is always "lit" (light_ok=True); the light itself stays off between uses
+        # (status.chamber_light False), as on the real printer.
         if not part:
             return PlateCheck(is_empty=True, difference_pct=1.8, confidence=0.95,
-                              message="Build plate appears empty (simulated)")
+                              message="Build plate appears empty (simulated)", light_ok=True)
         w, d = part["dims"][:2]
         diff = round(min(90.0, 30.0 + 400.0 * (w * d) / (PLATE_MM * PLATE_MM)), 1)
         return PlateCheck(is_empty=False, difference_pct=diff, confidence=0.9,
-                          message="Objects detected on the build plate (simulated)")
+                          message="Objects detected on the build plate (simulated)", light_ok=True)
 
     def resolve_model(self, url_or_id: str) -> ModelCard:
         mid = parse_model_id(url_or_id)

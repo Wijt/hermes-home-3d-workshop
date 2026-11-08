@@ -64,8 +64,9 @@ One short line to the requester per step that matters, not per tool call.
    models with fit or breakage complaints. Let them choose. Only when they say "just pick one", choose the
    best fit (A1 profile, many prints, matches the goal) and say why (`references/makerworld.md`).
 5. **Import.** `home3d_import model_id=<id> profile_id=<a1_profiles[].profile_id> requester=<who>
-   request_text=<their words> channel=<text|voice|photo|link>`. The request is recorded, so the watcher
-   later tells the right person.
+   request_text=<2-3 words naming the thing, in their language> channel=<text|voice|photo|link>`, for
+   example `request_text="çiçek kutusu"`, not their whole sentence. The request is recorded, so the watcher
+   later tells the right person, and family messages name the print by these words.
 6. **Customise if asked.** Say the current size, propose the new one ("now 10 x 8 x 5 cm, make it
    12 x 10 x 5?"), wait for yes, then `home3d_customize` with `scale` or `target_size_mm`. Lids, threads,
    snaps and hinges stop fitting when scaled: the tool asks for `confirm_mechanism`, so ask the requester
@@ -81,12 +82,13 @@ One short line to the requester per step that matters, not per tool call.
    queue" means only this. Do not start.
 10. **Start only on a clear written yes** ("bas", "print it", "start"). A start word heard only in a voice
     note needs a written confirmation: quote what you heard and ask. A heart reaction or "nice" is not a yes.
-    Then `home3d_start queue_item_id=<id>`:
-    - It refuses when the printer is busy or has an error, the plate is not verified empty, or someone
-      else's job is ahead. Never set `allow_jump` unless the owner says so.
+    Then `home3d_start queue_item_id=<id>` (see "Approvals" below):
+    - It refuses when the printer is busy or has an error, the camera does not think the plate is empty, the
+      last print failed and nobody confirmed the plate, or someone else's job is ahead. Never set
+      `allow_jump` unless the owner says so.
     - Owner speaking: Hermes asks the owner to approve. That is expected.
     - Family member speaking: blocked with "owner approval needed". Tell them in one line that you asked the
-      owner. The owner sends `/home3d approve start <id>` (single use, 15 min); it starts if the checks pass.
+      owner. The owner sends `/home3d approve start <id>`: it runs the same checks and starts right away.
     - Late in the evening, offer the morning for a long print instead of running it overnight, unless the
       owner said otherwise.
 11. **Let the watcher watch.** It reports start, finish, pause, failure, the eject outcome and "ready for
@@ -103,13 +105,39 @@ One short line to the requester per step that matters, not per tool call.
 - "bekle", "wait", "1 dk" about a running print: `home3d_stop action=pause`.
 - Nothing printing: stop your own steps and touch nothing.
 - Then report the state in one line with a photo (`home3d_camera`). Resume needs the owner
-  (`/home3d approve resume`).
+  (`/home3d approve resume`, or `/home3d approve resume ack` while a printer error is still shown).
+
+## Approvals: who may start, clear and resume
+Starting a print, confirming the plate clear (`home3d_clear_plate action=confirm`) and resuming
+(`home3d_stop action=resume`) are decided by code, not by you. Stop and pause are never gated.
+- The hook checks, in order: a scheduled (cron) run is always refused; the safety gate (printer state,
+  errors, plate, queue order); then who is speaking. The tool itself refuses unless that check let this very
+  call through, so another session, tool or plugin cannot get around a block. Never try.
+- **The owner's chat** (or a local CLI/TUI/desktop session while `local_is_owner` is on): Hermes asks the
+  owner to approve. Approve once: "always" does not carry over to the next print.
+- **A family member**: blocked. Tell them you asked the owner; the block names the owner's command.
+- **Nobody known** (an unconfigured chat, a subagent without a known parent session): blocked the same way.
+- **`/home3d approve start <id> [jump] | clear | resume [ack]`** (owner only, no model call) runs the same
+  checks and does it right away. If a check fails nothing is kept: the owner sends it again when ready.
+  Never say an approval "is waiting", "stays valid" or "was saved".
+  - `jump`: start even though someone else's job is ahead in the queue (owner's call only).
+  - `clear`: a person looked at the plate. After a failed print this is required before the next start.
+  - `resume ack`: resume although the printer still shows an error (for example a filament run-out whose
+    spool was just replaced). From the owner's own chat you may pass `ack_hms=true` to `home3d_stop`
+    only after the owner said the cause is fixed.
+- `/home3d whoami` shows how a chat is identified. Ids are compared exactly (`owner_ids`, `household`).
 
 ## Safety rules
 The tools and hooks enforce these. Don't look for ways around a block; report it.
 - Never start, clear the plate or resume from a scheduled (cron) job. Report and wait for a person.
 - A start needs: printer connected and idle, no blocking HMS error, the plate checked empty by the camera,
-  nobody else's job ahead. A FAILED or FINISH printer needs a cleared plate first.
+  nobody else's job ahead. After FINISH the camera must think the plate is empty; after a failed print (also
+  one that was cancelled or lost power) the owner must also confirm it (`/home3d approve clear`), even when
+  the printer has been restarted since.
+- Kanban cards, `chat -q`, `-z` and other runs with nobody present cannot start, resume or clear: report and
+  give the owner's `/home3d approve ...` command.
+- Say "the camera thinks the plate is empty", never "verified": the camera misses thin parts and first
+  layers. Attach the photo when you tell the owner.
 - Check the right material and colour is loaded (`home3d_status` AMS trays vs the slice's suggested tray).
   Wrong or empty spool: say so and don't start.
 - Never clear printer errors yourself. HMS repair steps only from the official Bambu wiki page for that
@@ -125,7 +153,8 @@ The tools and hooks enforce these. Don't look for ways around a block; report it
 The watcher already told the owner (technical + photo) and the requester (one plain line) and logged the
 moment. When someone asks:
 1. Look: `home3d_status` (state, layer, HMS) and `home3d_camera`. Describe what the photo shows. Don't guess.
-2. Paused for filament run-out: a person loads the spool; resuming needs the owner.
+2. Paused for filament run-out: a person loads the spool; resuming needs the owner
+   (`/home3d approve resume ack` while the run-out error is still shown).
 3. Paused after an extrusion problem: resume at most once, and only if the photo shows a clean partial
    print. If it pauses again, the part is deformed or the nozzle hits it: stop.
 4. Failed (spaghetti, detached part, broken arm): find the cause by measuring, not guessing (footprint and
@@ -141,8 +170,11 @@ moment. When someone asks:
 - **Without one, or when the push missed,** a person takes the part off. Then
   `home3d_clear_plate action=check` (lit photo, plate check, bed temperature) and `action=confirm` (owner
   approval, or the owner sends `/home3d approve clear`). Never confirm a plate you have not checked.
+  The confirm refuses while the bed is still hot or its temperature is unknown.
 - The camera plate check gives false "not empty" readings on an empty plate (18-25 % difference). The tools
   report that as "unsure", never "empty": look at the photo yourself, and ask a person when you can't tell.
+  Only the owner can overrule "unsure" by confirming the plate (`/home3d approve clear`); after that the next
+  start accepts it. "Not empty" (26 % or more) and a check in the dark are never overruled.
 - The part was already taken off by hand: don't push. Check the photo and say truthfully it was removed by hand.
 - The confirm step refuses while auto-start queue items are pending: marking the plate clear would start them.
 - After many pushes and hand removals the plate gets greasy and thin parts lift. Ask for a wash with dish

@@ -1,0 +1,75 @@
+1
+00:00:00,300 --> 00:00:03,300
+Annem CAD bilmez,
+3D yazıcı da bilmez.
+
+2
+00:00:03,400 --> 00:00:06,700
+Sadece Mıstık'la konuşur.
+
+3
+00:00:07,200 --> 00:00:10,900
+Annem: Mıstık, bana çiçekler için
+küçük bir hediye kutusu basabilir misin?
+
+4
+00:00:27,600 --> 00:00:30,800
+Kurallar kodda.
+Sadece sahibi başlatır, herkes durdurur.
+
+5
+00:00:31,300 --> 00:00:34,300
+Bir izleyici yazıcıya
+iki dakikada bir bakar.
+
+6
+00:00:34,400 --> 00:00:36,800
+Model çağırmaz, token harcamaz.
+
+7
+00:00:36,900 --> 00:00:39,700
+Sadece bir şey olunca yazar.
+
+8
+00:00:47,200 --> 00:00:51,600
+Tabla soğuyunca yazıcı
+parçayı kendisi iter.
+
+9
+00:00:52,300 --> 00:00:55,600
+Ondan tablayı insansız
+boşaltmasını istedik.
+
+10
+00:00:55,700 --> 00:00:59,000
+Parçayı itmeyi denedi,
+parça önde takıldı.
+
+11
+00:00:59,100 --> 00:01:03,400
+Eğik bir taban buldu
+ve kendi yükseltmesini kendisi bastı.
+
+12
+00:01:03,500 --> 00:01:05,800
+Eklenti bunu kurala çevirir:
+
+13
+00:01:05,900 --> 00:01:09,800
+bir insan işi tekrar edince
+yükseltme önerir.
+
+14
+00:01:10,500 --> 00:01:13,800
+Yazıcınız yok mu?
+Simülatörle deneyin.
+
+15
+00:01:14,000 --> 00:01:18,500
+Tek komut:
+hermes home3d demo
+
+16
+00:01:20,300 --> 00:01:24,500
+Mıstık.
+Evin 3D atölyesi.

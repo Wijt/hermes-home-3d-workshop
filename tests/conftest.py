@@ -40,3 +40,11 @@ def data_dir(tmp_path, monkeypatch):
 @pytest.fixture
 def pkg():
     return sys.modules[PACKAGE]
+
+
+@pytest.fixture(autouse=True)
+def no_unattended_markers(monkeypatch):
+    """Hermes' "nobody is present" markers (runtime.unattended_markers) must not leak in from the shell."""
+    for name in ("HERMES_KANBAN_TASK", "HERMES_SINGLE_QUERY_SESSION", "HERMES_SESSION_SOURCE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.session_finite", raising=False)

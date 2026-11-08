@@ -11,6 +11,11 @@ Flow (``eject_planned``: the sliced file ends with the auto-eject block that coo
   Without an eject plan FINISH goes straight to needs_human ("take the part off") unless a check says
   empty. FAILED (or a print that ends without FINISH) -> needs_human with a ``failed`` event.
   needs_human re-checks the plate every ``RECHECK_S`` and becomes clear when a check says empty.
+  "Says empty" means ``is_empty is True`` from a check that was not run in the dark (``light_ok`` not
+  False). The phase "clear" is the camera's opinion only: after a ``failed`` event (FAILED, or a print that
+  ended in IDLE) the watcher records the failure (``Store.record_failure``) and ``gates.start_gate`` still
+  wants a person's confirmation (``plate_confirmed`` / ``after_failure``), even after a power cycle.
+  An UNKNOWN or OFFLINE printer state never changes the phase and never asks for a plate check.
 """
 
 from __future__ import annotations
@@ -58,7 +63,12 @@ class PlateState:
 def _record(plate: PlateCheck, now: float) -> dict:
     return {"ts": now, "is_empty": plate.is_empty, "difference_pct": plate.difference_pct,
             "confidence": plate.confidence, "message": plate.message,
-            "needs_calibration": plate.needs_calibration}
+            "needs_calibration": plate.needs_calibration, "light_ok": getattr(plate, "light_ok", None)}
+
+
+def says_empty(plate: Optional[PlateCheck]) -> bool:
+    """A plate check that explicitly says empty and was not taken in the dark."""
+    return plate is not None and plate.is_empty is True and getattr(plate, "light_ok", None) is not False
 
 
 def _bed_cool(status: PrinterStatus, cool_temp_c: float, elapsed: Optional[float]) -> bool:
@@ -121,7 +131,7 @@ def step(prev: PlateState, status: PrinterStatus, now: float, *, eject_planned: 
         s.last_check = _record(plate, now)
     if s.phase == "clear":
         return s, events
-    if plate is not None and plate.is_empty is True:
+    if says_empty(plate):
         s.phase, s.reason, s.checks = "clear", "", 0
         return s, events + ["plate_clear"]
     if s.phase == "needs_human":

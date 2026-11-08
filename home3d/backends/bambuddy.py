@@ -1,7 +1,10 @@
 """Bambuddy backend: a Bambu Lab printer managed by a Bambuddy server on the LAN (REST API ``/api/v1``).
 
 Stdlib only (``urllib.request``); Pillow is used lazily to re-encode camera frames. Every failure surfaces
-as ``BackendError("<METHOD> <path>: <status> <short body>")``. See docs/DESIGN.md "Bambuddy mapping".
+as ``BackendError("<METHOD> <path>: <status> <short body>")`` (an HTTP error status is the subclass
+``BambuddyHTTPError``); a refused start reads ``"Bambuddy refused to start queue item N: <reason> (HTTP 409)"``.
+Parsing fails closed (unknown state -> UNKNOWN, ``connected`` must be literally true, unlit or failed plate
+checks are never "empty"). See docs/DESIGN.md "Bambuddy mapping".
 """
 
 from __future__ import annotations
@@ -19,9 +22,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import (FAILED, FINISH, IDLE, OFFLINE, PAUSE, PREPARE, RUNNING, Backend, BackendError, HMSError,
-                   LibraryFile, ModelCard, ModelInstance, PlateCheck, PrinterStatus, QueueItem, SliceOptions,
-                   SliceResult, Snapshot, Tray)
+from .base import (DONE_QUEUE_STATUSES, FAILED, FINISH, IDLE, OFFLINE, PAUSE, PREPARE, RUNNING, UNKNOWN, Backend,
+                   BackendError, HMSError, LibraryFile, ModelCard, ModelInstance, PlateCheck, PrinterStatus,
+                   QueueItem, SliceOptions, SliceResult, Snapshot, Tray)
 
 API_PREFIX = "/api/v1"
 MAKERWORLD_MODEL_URL = "https://makerworld.com/en/models/{id}"
@@ -31,7 +34,7 @@ HMS_WIKI_URL = "https://wiki.bambulab.com/en/a1/troubleshooting/hmscode/{code}"
 # so "not empty" below this is treated as uncertain, never as a decision.
 PLATE_FALSE_POSITIVE_MAX_PCT = 26.0
 
-DONE_QUEUE_STATES = {"completed", "cancelled", "canceled", "failed", "skipped"}
+DONE_QUEUE_STATES = DONE_QUEUE_STATUSES
 PRESET_SOURCES = ("local", "standard", "cloud", "orca_cloud")
 # Same markers as gcode.EJECT_MARKERS (kept local so the backend has no sibling imports).
 EJECT_MARKERS = ("HOME3D AUTO-EJECT", "HERMES AUTO-EJECT")
@@ -53,6 +56,16 @@ _STATE_ALIASES = {"SLICING": PREPARE, "INIT": PREPARE, "PRINTING": RUNNING, "PAU
                   "FINISHED": FINISH, "COMPLETED": FINISH, "ERROR": FAILED}
 _HMS_SEVERITY = {1: "fatal", 2: "serious", 3: "common", 4: "info"}
 _JFIF_APP0 = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+
+
+class BambuddyHTTPError(BackendError):
+    """Bambuddy answered with an HTTP error status. Still a ``BackendError``; ``status`` is the HTTP code and
+    ``detail`` the short, readable reason (without the method/path prefix)."""
+
+    def __init__(self, message: str, status: int, detail: str):
+        super().__init__(message)
+        self.status = int(status)
+        self.detail = detail
 
 
 def _urlopen(req: urllib.request.Request, timeout: float):
@@ -80,6 +93,46 @@ def _short(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _grams(v: Any) -> str:
+    f = _float(v)
+    return "?" if f is None else f"{f:.0f}" if f >= 10 else f"{f:.1f}"
+
+
+def _slot_label(ams_id: Any, tray_id: Any) -> str:
+    """Bambu naming: AMS units A, B, ... with slots 1-4; 255 = the external spool; 128+ = AMS HT units."""
+    a, t = _int(ams_id), _int(tray_id)
+    if a is None:
+        return ""
+    if a >= 255:
+        return "external spool"
+    if a >= 128:
+        return f"AMS HT {a - 127}"
+    return f"AMS {chr(65 + a) if a < 26 else a} slot {(t or 0) + 1}"
+
+
+def _structured_detail(detail: dict) -> str:
+    """Readable text for Bambuddy's structured refusals (queue start: 409 insufficient / unmatched filament)."""
+    code = str(detail.get("code") or "")
+    if code == "insufficient_filament":
+        parts = []
+        for d in detail.get("deficit") or []:
+            if not isinstance(d, dict):
+                continue
+            where = _slot_label(d.get("ams_id"), d.get("tray_id"))
+            what = str(d.get("filament_type") or "filament") + (f" in {where}" if where else "")
+            left = d.get("remaining_grams")
+            parts.append(f"{what} needs {_grams(d.get('required_grams'))} g, "
+                         + ("amount left unknown" if left is None else f"{_grams(left)} g left"))
+        return "not enough filament" + (": " + "; ".join(parts) if parts else "")
+    if code == "unmatched_filament":
+        missing = [str(m) for m in detail.get("missing") or [] if str(m).strip()]
+        return "no loaded filament matches what the job needs" + (": " + ", ".join(missing) if missing else "")
+    msg = detail.get("message") or detail.get("detail") or detail.get("error")
+    if isinstance(msg, str) and msg.strip():
+        return msg
+    return code.replace("_", " ") if code else json.dumps(detail, ensure_ascii=False)
+
+
 def _error_detail(body: bytes) -> str:
     raw = body.decode("utf-8", "replace") if body else ""
     try:
@@ -90,6 +143,8 @@ def _error_detail(body: bytes) -> str:
         detail = data.get("detail", data.get("message", data.get("error", data)))
         if isinstance(detail, list):  # FastAPI 422: [{"loc": [...], "msg": "..."}]
             detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
+        elif isinstance(detail, dict):
+            detail = _structured_detail(detail)
         return _short(detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False))
     return _short(raw)
 
@@ -122,21 +177,50 @@ def preset_ref(value: str) -> dict:
 
 
 def _hms_code(raw: Any) -> str:
-    code = str(raw or "").strip().upper().replace("_", "").replace("-", "")
+    """``XXXX-XXXX-XXXX-XXXX`` (or ``XXXX-XXXX`` for short print errors) where the value allows it; ints are
+    read as the numeric code. Anything else is kept as given (it still blocks: only known codes are ignored)."""
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        code = f"{raw:016X}" if raw >= 1 << 32 else f"{raw:08X}"
+        return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
+    code = str(raw if raw is not None else "").strip().upper().replace("_", "").replace("-", "")
+    if code.startswith("HMS"):
+        code = code[3:]
     if code.startswith("0X"):
         code = code[2:]
     if re.fullmatch(r"[0-9A-F]{16}|[0-9A-F]{8}", code):
         return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
-    return str(raw or "").strip()
+    return str(raw if raw is not None else "").strip()
+
+
+def _wiki(code: str) -> str:
+    return HMS_WIKI_URL.format(code=code.replace("-", "_")) if len(code) == 19 else ""
 
 
 def _parse_hms(h: dict) -> HMSError:
-    code = _hms_code(h.get("full_code") or h.get("code") or "")
+    code = _hms_code(h.get("full_code") or h.get("code") or "") or "unknown"
     sev = h.get("severity")
     severity = _HMS_SEVERITY.get(sev, "") if isinstance(sev, int) else str(sev or "")
-    wiki = HMS_WIKI_URL.format(code=code.replace("-", "_")) if len(code) == 19 else ""
     return HMSError(code=code, severity=severity, message=str(h.get("description") or h.get("message") or ""),
-                    wiki_url=str(h.get("wiki_url") or wiki))
+                    wiki_url=str(h.get("wiki_url") or _wiki(code)))
+
+
+def _parse_hms_list(raw: Any) -> list[HMSError]:
+    """``hms_errors`` -> HMSError list. Fails closed: dicts, bare string / int codes and anything else that
+    is not empty become entries (an unreadable one is code ``unknown``, which blocks), never silently dropped."""
+    if raw is None or raw == "" or raw == []:
+        return []
+    out: list[HMSError] = []
+    for h in raw if isinstance(raw, list) else [raw]:
+        if h is None or h == "":
+            continue
+        if isinstance(h, dict):
+            out.append(_parse_hms(h))
+        elif isinstance(h, (str, int)) and not isinstance(h, bool):
+            code = _hms_code(h) or "unknown"
+            out.append(HMSError(code=code, wiki_url=_wiki(code)))
+        else:
+            out.append(HMSError(code="unknown", message=_short(json.dumps(h, default=str), 120)))
+    return out
 
 
 def _tray_color(raw: Any) -> str:
@@ -154,26 +238,39 @@ def _parse_tray(t: dict, slot: int) -> Tray:
 
 
 def _parse_state(raw: Any) -> str:
-    s = str(raw or "").strip().upper()
-    if not s:
-        return IDLE
+    """Bambu ``gcode_state`` -> normalised state. Missing, null or unrecognised -> UNKNOWN (never IDLE): every
+    gate blocks on it, so nothing starts on top of a printer whose state we cannot read."""
+    s = str(raw if raw is not None else "").strip().upper()
     if s in _KNOWN_STATES or s == OFFLINE:
         return s
-    # Unknown state: assume the printer is busy so nothing starts on top of it.
-    return _STATE_ALIASES.get(s, PREPARE)
+    return _STATE_ALIASES.get(s, UNKNOWN)
+
+
+def _list(v: Any) -> list:
+    return v if isinstance(v, list) else []
+
+
+def _bool_or_none(v: Any) -> Optional[bool]:
+    return v if isinstance(v, bool) else None
 
 
 def parse_status(d: dict) -> PrinterStatus:
-    temps = d.get("temperatures") or {}
-    connected = d.get("connected") is not False
+    """Bambuddy ``PrinterStatus`` JSON -> PrinterStatus. Fails closed: the printer counts as connected only when
+    ``connected`` is literally true; a missing or unknown state is UNKNOWN; HMS entries are never dropped."""
+    temps = d.get("temperatures")
+    temps = temps if isinstance(temps, dict) else {}
+    connected = d.get("connected") is True
     trays: list[Tray] = []
-    for unit in d.get("ams") or []:
+    for unit in _list(d.get("ams")):
+        if not isinstance(unit, dict):
+            continue
         uid = _int(unit.get("id")) or 0
-        for t in unit.get("tray") or []:
-            tid = _int(t.get("id")) or 0
-            trays.append(_parse_tray(t, uid * 4 + tid if uid < 16 else uid))  # AMS HT units are 128+
-    for t in d.get("vt_tray") or []:  # external spool (ams_mapping 254)
-        if t.get("tray_type"):
+        for t in _list(unit.get("tray")):
+            if isinstance(t, dict):
+                tid = _int(t.get("id")) or 0
+                trays.append(_parse_tray(t, uid * 4 + tid if uid < 16 else uid))  # AMS HT units are 128+
+    for t in _list(d.get("vt_tray")):  # external spool (ams_mapping 254)
+        if isinstance(t, dict) and t.get("tray_type"):
             trays.append(_parse_tray(t, _int(t.get("id")) or 254))
     return PrinterStatus(
         state=_parse_state(d.get("state")) if connected else OFFLINE,
@@ -186,9 +283,11 @@ def parse_status(d: dict) -> PrinterStatus:
         bed_temp=_float(temps.get("bed")),
         bed_target=_float(temps.get("bed_target")),
         nozzle_temp=_float(temps.get("nozzle")),
-        hms=[_parse_hms(h) for h in d.get("hms_errors") or [] if isinstance(h, dict)],
+        hms=_parse_hms_list(d.get("hms_errors")),
         trays=trays,
         printer_name=str(d.get("name") or ""),
+        chamber_light=_bool_or_none(d.get("chamber_light")),
+        awaiting_plate_clear=_bool_or_none(d.get("awaiting_plate_clear")),
     )
 
 
@@ -211,21 +310,32 @@ def parse_queue_item(d: dict) -> QueueItem:
 
 
 def parse_plate_check(d: dict) -> PlateCheck:
+    """Bambuddy check-plate JSON -> PlateCheck. Fails closed: ``is_empty`` stays True only for a check that ran
+    (no ``failure_reason``: Bambuddy then reports empty so that its own prints are not blocked), with the
+    chamber light on (no ``light_warning``: an unlit frame cannot be compared with the lit references) and
+    calibrated. "Not empty" inside the known false-positive band is uncertain, never a decision."""
     raw = d.get("is_empty")
     is_empty: Optional[bool] = raw if isinstance(raw, bool) else None
     diff = _float(d.get("difference_percent"))
     needs_cal = bool(d.get("needs_calibration"))
-    msg = str(d.get("message") or d.get("failure_reason") or "")
-    if needs_cal:
+    failure = str(d.get("failure_reason") or "").strip()
+    light_warning = bool(d.get("light_warning"))
+    msg = str(d.get("message") or "").strip()
+    band = False  # the only doubt is the false-positive band (a person may overrule it, see gates)
+    if failure:
+        is_empty = None
+        msg = f"uncertain: the plate check could not run ({failure}). {msg}".strip()
+    elif needs_cal:
         is_empty, msg = None, f"plate detection needs calibration. {msg}".strip()
     elif is_empty is False and diff is not None and diff < PLATE_FALSE_POSITIVE_MAX_PCT:
-        is_empty = None
+        is_empty, band = None, True
         msg = (f"uncertain: {diff:.1f}% difference is inside the known false-positive band "
                f"(<{PLATE_FALSE_POSITIVE_MAX_PCT:.0f}%); look at the photo. {msg}").strip()
-    if d.get("light_warning"):
-        msg = f"{msg} (chamber light was off)".strip()
+    if light_warning:
+        is_empty, band = None, False
+        msg = f"uncertain: the chamber light was off, the camera cannot judge the plate. {msg}".strip()
     return PlateCheck(is_empty=is_empty, difference_pct=diff, confidence=_float(d.get("confidence")),
-                      message=msg, needs_calibration=needs_cal)
+                      message=msg, needs_calibration=needs_cal, light_ok=not light_warning, uncertain_band=band)
 
 
 def _strip_html(text: str, limit: int = 600) -> str:
@@ -396,7 +506,8 @@ class BambuddyBackend(Backend):
                 detail = _error_detail(e.read())
             except Exception:
                 detail = ""
-            raise BackendError(f"{label}: {e.code} {detail or e.reason}".strip()) from None
+            reason = detail or _short(e.reason or "")
+            raise BambuddyHTTPError(f"{label}: {e.code} {reason}".strip(), e.code, reason) from None
         except urllib.error.URLError as e:
             raise BackendError(f"{label}: {_short(getattr(e, 'reason', e))}") from None
         except (OSError, ValueError, http.client.HTTPException) as e:  # timeouts, resets, bad URL
@@ -437,41 +548,63 @@ class BambuddyBackend(Backend):
     def queue(self, include_done: bool = False) -> list[QueueItem]:
         rows = self._get("/queue/", params={"printer_id": self.printer_id}) or []
         items = [parse_queue_item(r) for r in rows if isinstance(r, dict)]
-        live = [q for q in items if q.status.lower() not in DONE_QUEUE_STATES]
-        live.sort(key=lambda q: (q.status != "printing", q.position if q.position is not None else 1 << 30, q.id))
+        live = [q for q in items if not q.is_done]
+        live.sort(key=lambda q: (q.status.strip().lower() != "printing",
+                                 q.position if q.position is not None else 1 << 30, q.id))
         if not include_done:
             return live
-        return live + [q for q in items if q.status.lower() in DONE_QUEUE_STATES]
+        return live + [q for q in items if q.is_done]
 
+    # ---- chamber light ----------------------------------------------------------------------------
+    # The A1's AI failure detection and Bambuddy's own camera use the chamber light, and a person may have
+    # switched it on: we only ever switch OFF a light that the printer status reported as off before we
+    # switched it on, and never touch a light whose state we cannot read.
     def _light(self, on: bool) -> None:
         self._check_success(self._post(f"{self._printer}/chamber-light", params={"on": "true" if on else "false"}),
                             f"chamber light {'on' if on else 'off'}")
 
+    def _light_state(self) -> Optional[bool]:
+        """The chamber light right now (``chamber_light`` in the printer status); None when unknown."""
+        try:
+            d = self._get(f"{self._printer}/status")
+        except BackendError:
+            return None
+        return _bool_or_none(d.get("chamber_light")) if isinstance(d, dict) else None
+
     def _light_off_safely(self) -> str:
-        """Always restore the chamber light to off (we cannot know whether a person turned it on)."""
+        """Put the light back off after we switched it on (two tries). Returns "" or a note that carries the
+        ``light_left_on`` flag so callers can tell the owner."""
         for attempt in range(2):
             try:
                 self._light(False)
                 return ""
             except BackendError as e:
                 if attempt:
-                    return f"chamber light may still be on ({e})"
+                    return f"light_left_on: the chamber light could not be switched off again ({e})"
         return ""
 
     def snapshot(self, out_dir: Path, lit: bool = True) -> Snapshot:
         notes: list[str] = []
         lit_ok = False
+        restore_off = False
         try:
             if lit:
-                try:
-                    self._light(True)
-                    lit_ok = True
-                    self._sleep(self.light_wait_s)
-                except BackendError as e:
-                    notes.append(f"light on failed ({e})")
+                before = self._light_state()
+                if before is True:
+                    lit_ok = True  # already on: leave it exactly as it is
+                elif before is False:
+                    restore_off = True  # a failed "on" may still have switched it on
+                    try:
+                        self._light(True)
+                        lit_ok = True
+                        self._sleep(self.light_wait_s)
+                    except BackendError as e:
+                        notes.append(f"light on failed ({e})")
+                else:
+                    notes.append("chamber light state unknown: photo taken without switching the light")
             data, _ = self._get(f"{self._printer}/camera/snapshot", raw=True, timeout=30.0)
         finally:
-            if lit:
+            if restore_off:
                 off_note = self._light_off_safely()
                 if off_note:
                     notes.append(off_note)
@@ -487,24 +620,49 @@ class BambuddyBackend(Backend):
         return Snapshot(path=path, lit=lit_ok, note="; ".join(notes))
 
     def check_plate(self, lit: bool = True) -> PlateCheck:
-        """Bambuddy plate check. When it warns that the chamber light was off, re-check with the light on
-        (references are taken lit) and switch it off again afterwards."""
+        """Bambuddy plate check. Its references are taken lit, so when it warns that the chamber light was
+        off the check is repeated with the light on, and the light is put back off afterwards. An unlit
+        result, a failed lit re-check or a light that did not come on gives ``is_empty=None`` and
+        ``light_ok=False`` (never "empty")."""
         path = f"{self._printer}/camera/check-plate"
-        d = self._get(path, timeout=30.0) or {}
-        if lit and isinstance(d, dict) and d.get("light_warning"):
-            try:
-                self._light(True)
-                self._sleep(self.light_wait_s)
-                d = self._get(path, timeout=30.0) or d
-            except BackendError as e:
-                d = dict(d, message=f"{d.get('message') or ''} (lit re-check failed: {e})".strip())
-            finally:
-                off_note = self._light_off_safely()
-                if off_note:
-                    d = dict(d, message=f"{d.get('message') or ''} ({off_note})".strip())
+        d = self._get(path, timeout=30.0)
         if not isinstance(d, dict):
             raise BackendError(f"GET {path}: unexpected response")
-        return parse_plate_check(d)
+        if not lit or not d.get("light_warning"):
+            return parse_plate_check(d)
+        # Bambuddy saw the light off. The status may say "on" (a person switched it on meanwhile, or the
+        # report lags): then do not touch it, just look again.
+        before = self._light_state()
+        if before is None:  # never touch a light whose state we cannot read (it may be on for a print)
+            pc = parse_plate_check(d)  # light_warning: uncertain, light_ok False
+            pc.message = (f"{pc.message} (chamber light state unknown: not switched, no lit re-check)").strip()
+            return pc
+        switch = before is False
+        notes: list[str] = []
+        lit_d: Any = None
+        try:
+            if switch:
+                self._light(True)
+            self._sleep(self.light_wait_s)
+            lit_d = self._get(path, timeout=30.0)
+        except BackendError as e:
+            notes.append(f"lit re-check failed: {e}")
+        finally:
+            if switch:
+                off_note = self._light_off_safely()
+                if off_note:
+                    notes.append(off_note)
+        if isinstance(lit_d, dict):
+            pc = parse_plate_check(lit_d)
+            if lit_d.get("light_warning"):
+                notes.insert(0, "the chamber light did not come on for the re-check")
+        else:
+            if not any(n.startswith("lit re-check failed") for n in notes):
+                notes.insert(0, "lit re-check failed: no usable answer")
+            pc = parse_plate_check(d)  # light_warning: uncertain, light_ok False
+        if notes:
+            pc.message = f"{pc.message} ({'; '.join(notes)})".strip()
+        return pc
 
     def resolve_model(self, url_or_id: str) -> ModelCard:
         url = makerworld_url(url_or_id)
@@ -709,7 +867,14 @@ class BambuddyBackend(Backend):
 
     def start(self, queue_item_id: int) -> QueueItem:
         qid = int(queue_item_id)
-        d = self._check_success(self._post(f"/queue/{qid}/start"), f"start queue item {qid}")
+        try:
+            d = self._post(f"/queue/{qid}/start")
+        except BambuddyHTTPError as e:
+            if 400 <= e.status < 500:  # 409 filament short / unmatched, 400 not pending, 403, 404
+                raise BackendError(f"Bambuddy refused to start queue item {qid}: {e.detail or e.status} "
+                                   f"(HTTP {e.status})") from None
+            raise
+        d = self._check_success(d, f"start queue item {qid}")
         if isinstance(d, dict) and _int(d.get("id")) == qid and d.get("status"):
             return parse_queue_item(d)
         return parse_queue_item(self._get(f"/queue/{qid}") or {})

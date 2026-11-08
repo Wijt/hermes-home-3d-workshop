@@ -418,3 +418,25 @@ def test_snapshot_png(sim, tmp_path):
     assert min(_png_info(full.path.read_bytes())[4]) > 180  # light part in the middle
     dark = sim.snapshot(tmp_path / "media", lit=False)
     assert not dark.lit and max(_png_info(dark.path.read_bytes())[4]) < 80
+
+
+def test_simulator_mirrors_light_fields(sim):
+    st = sim.status()
+    assert st.state == IDLE and st.chamber_light is False and st.connected is True
+    pc = sim.check_plate()
+    assert pc.is_empty is True and pc.light_ok is True  # the simulated check is always lit
+    res, item = _queued(sim, STD)
+    sim.start(item.id)
+    sim.advance(3)
+    assert sim.status().chamber_light is False and sim.check_plate().light_ok is True
+    sim.set_scenario("offline")
+    assert sim.status().chamber_light is None
+
+
+def test_simulator_queue_items_use_lower_case_statuses_and_is_done(sim):
+    res, item = _queued(sim, STD)
+    assert item.is_pending and not item.is_done
+    sim.start(item.id)
+    _run_to_finish(sim, res)
+    done = sim.queue(include_done=True)[0]
+    assert done.status == "completed" and done.is_done and not done.is_pending

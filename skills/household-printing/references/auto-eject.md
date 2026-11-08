@@ -51,7 +51,8 @@ push baked into the end G-code, sturdy parts slide off into a box and the printe
    - Empty: "dropped off" to the owner and the requester; ready for the next job.
    - Not empty: a person is needed (a `remove_part` moment); the family hears "it stayed on the plate".
    - Unsure: "could not verify"; look at the photo yourself.
-4. Nothing new starts until the plate is verified empty.
+4. Nothing new starts until the camera thinks the plate is empty (after a failed print the owner also
+   confirms it with `/home3d approve clear`). Say "the camera thinks it is empty", not "verified".
 
 ## Plate check quirks
 - The camera needs the chamber light on long enough for auto-exposure. With a 2-3 s wait an empty plate

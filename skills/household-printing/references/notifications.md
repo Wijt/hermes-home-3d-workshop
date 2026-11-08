@@ -7,7 +7,7 @@ Two audiences, two tones. Examples use the placeholder names "Mum" (a family mem
 | | Family (requester) | Owner |
 |---|---|---|
 | Tone | warm, plain, 1-2 lines, by name | technical, still short |
-| Content | done / stuck / what happens next | state, layer, temperatures, HMS code + wiki link, preview link, approval command |
+| Content | done / stuck / what happens next | state, layer, temperatures, HMS code + wiki link, preview link, the `/home3d approve ...` command |
 | Photo | only with a finished part | with every finish or problem |
 | Language | household `language`, no foreign words | household `language` (technical terms are fine) |
 
@@ -88,9 +88,17 @@ Approval needed:
 - tr: "Fırçalık (Anne için) sırada (#12). Başlatmak için: /home3d approve start 12"
 - en: "Brush holder for Mum is queued (#12). To start it: /home3d approve start 12"
 
-Pause with an HMS code:
-- tr: "⏸️ Duraklatıldı: Fırçalık · katman 112/300 · %37 · HMS 0700-2000-0002-0001 (filament bitti) · <wiki link> · foto ekte"
-- en: "⏸️ Paused: Brush holder · layer 112/300 · 37% · HMS 0700-2000-0002-0001 (filament ran out) · <wiki link> · photo attached"
+Pause with an HMS code (the owner resumes with a command, never a tool name):
+- tr: "⏸️ Duraklatıldı: Fırçalık · katman 112/300 · %37 · HMS 0700-2000-0002-0001 (filament bitti) · <wiki link> · foto ekte. Makara takılınca: /home3d approve resume ack"
+- en: "⏸️ Paused: Brush holder · layer 112/300 · 37% · HMS 0700-2000-0002-0001 (filament ran out) · <wiki link> · photo attached. Once the spool is in: /home3d approve resume ack"
+
+After a failed print:
+- tr: "❌ Fırçalık %40'ta yarıda kaldı, foto ekte. Tablayı temizleyip /home3d approve clear yazınca sıradaki iş başlayabilir."
+- en: "❌ Brush holder failed at 40%, photo attached. Clean the plate and send /home3d approve clear; then the next job can start."
+
+An approval that did not go through (nothing is kept):
+- tr: "Yapılamadı: kameraya göre tabla boş değil. Onay saklanmadı; tabla boşalınca komutu tekrar gönder."
+- en: "Not done: the camera thinks the plate is not empty. Nothing was kept; send the command again once it is clear."
 
 Upgrade proposal (once, when it appears):
 - tr: "Son 30 günde 3 kez biten parçayı elle almak gerekti. Öneri: yazıcıyı basılı bir tabanla öne ~15° eğip sağlam PLA parçalar için otomatik düşürmeyi açmak. Parçalar: https://makerworld.com/en/models/2335000. Basayım mı?"

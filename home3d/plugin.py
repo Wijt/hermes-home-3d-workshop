@@ -21,7 +21,8 @@ SKILL_DESCRIPTION = ("Household 3D printing with a persona: family requests, Mak
 TOOL_EMOJI = "🧰"
 COMMAND_NAME = "home3d"
 COMMAND_DESCRIPTION = "3D workshop: printer status, owner approvals, human-needed moments, upgrades"
-COMMAND_ARGS_HINT = "status | approve start <id> | approve clear | whoami | upgrades | moments | help"
+COMMAND_ARGS_HINT = ("status | approve start <id> [jump] | approve clear | approve resume [ack] | whoami | upgrades | "
+                     "moments | help")
 CLI_HELP = "Household 3D workshop (watcher setup, status, doctor, simulator, demo)"
 CLI_DESCRIPTION = ("home-3d-workshop: a household 3D-printing service with a character.\n"
                    "Try it without hardware: hermes home3d demo")

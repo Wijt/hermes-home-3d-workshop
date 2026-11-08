@@ -146,11 +146,65 @@ def test_status_offline_when_not_connected(http, backend):
     assert st.state == "OFFLINE" and st.connected is False and not st.is_active
 
 
-@pytest.mark.parametrize("raw,expected", [(None, "IDLE"), ("FINISH", "FINISH"), ("FAILED", "FAILED"),
-                                          ("SLICING", "PREPARE"), ("SOMETHING_NEW", "PREPARE")])
+@pytest.mark.parametrize("raw,expected", [(None, "UNKNOWN"), ("", "UNKNOWN"), ("FINISH", "FINISH"),
+                                          ("failed", "FAILED"), ("SLICING", "PREPARE"), ("idle", "IDLE"),
+                                          ("SOMETHING_NEW", "UNKNOWN"), (7, "UNKNOWN")])
 def test_status_state_normalisation(http, backend, raw, expected):
     http.add("GET", "/printers/1/status", dict(STATUS_RUNNING, state=raw, hms_errors=[], ams=[]))
     assert backend.status().state == expected
+
+
+def test_status_missing_state_is_never_idle_and_blocks_a_start():
+    from home3d_ws.home3d.gates import clear_plate_gate, start_gate
+    from home3d_ws.home3d.backends.base import PlateCheck, QueueItem
+
+    st = bb.parse_status({"connected": True, "temperatures": {"bed": 24.0}})
+    assert st.state == "UNKNOWN" and st.connected and not st.is_active
+    g = start_gate(st, [QueueItem(id=1, status="pending")], 1, plate=PlateCheck(is_empty=True, light_ok=True),
+                   in_cron=False, own_item_ids={1})
+    assert not g.ok and "state_unknown" in g.codes
+    c = clear_plate_gate(st, PlateCheck(is_empty=True, light_ok=True), in_cron=False, cool_temp_c=30.0,
+                         auto_start_pending=[])
+    assert not c.ok and "state_unknown" in c.codes
+
+
+@pytest.mark.parametrize("payload", [{}, {"state": "IDLE"}, {"state": "IDLE", "connected": None},
+                                     {"state": "IDLE", "connected": "true"}, {"state": "IDLE", "connected": 1}])
+def test_status_connected_must_be_literally_true(payload):
+    st = bb.parse_status(payload)
+    assert st.connected is False and st.state == "OFFLINE"
+
+
+def test_status_survives_odd_shapes():
+    st = bb.parse_status({"connected": True, "state": "IDLE", "temperatures": [], "ams": [None, "x", {"tray": "y"}],
+                          "vt_tray": [None], "hms_errors": None})
+    assert st.state == "IDLE" and st.bed_temp is None and st.trays == [] and st.hms == []
+
+
+def test_status_hms_strings_ints_and_junk_are_never_dropped():
+    st = bb.parse_status({"connected": True, "state": "PAUSE", "hms_errors": [
+        "0700_2000_0002_0001", 0x0700200000020001, "HMS_0300_1000_0002_0001", "0500C010", None, "",
+        ["weird"], {"severity": 2}, True]})
+    codes = [h.code for h in st.hms]
+    assert codes == ["0700-2000-0002-0001", "0700-2000-0002-0001", "0300-1000-0002-0001", "0500-C010",
+                     "unknown", "unknown", "unknown"]
+    assert st.hms[0].wiki_url.endswith("/hmscode/0700_2000_0002_0001") and st.hms[3].wiki_url == ""
+    assert st.hms[2].ignorable  # the X-belt notice stays harmless in any spelling
+    assert [h.code for h in st.blocking_hms] == ["0700-2000-0002-0001", "0700-2000-0002-0001", "0500-C010",
+                                                 "unknown", "unknown", "unknown"]
+    single = bb.parse_status({"connected": True, "state": "PAUSE", "hms_errors": "0700-2000-0002-0001"})
+    assert [h.code for h in single.blocking_hms] == ["0700-2000-0002-0001"]
+    one_dict = bb.parse_status({"connected": True, "state": "PAUSE",
+                                "hms_errors": {"full_code": "0700200000020001", "severity": 2}})
+    assert one_dict.hms[0].code == "0700-2000-0002-0001" and one_dict.hms[0].severity == "serious"
+
+
+def test_status_chamber_light_and_plate_clear_flags():
+    st = bb.parse_status(dict(STATUS_RUNNING, chamber_light=True, awaiting_plate_clear=False))
+    assert st.chamber_light is True and st.awaiting_plate_clear is False
+    st = bb.parse_status({k: v for k, v in STATUS_RUNNING.items() if k != "chamber_light"})
+    assert st.chamber_light is None and st.awaiting_plate_clear is None
+    assert bb.parse_status(dict(STATUS_RUNNING, chamber_light="on")).chamber_light is None
 
 
 def test_short_print_error_code_is_kept(http, backend):
@@ -203,35 +257,126 @@ def plate(is_empty, diff, **kw):
     (plate(True, 0.25), True),
     (plate(False, 35.0, needs_calibration=True), None),
     (plate(None, None), None),
+    (plate("true", 0.25), None),  # only a real boolean counts
+    (plate(True, 0.0, failure_reason="no_camera_frame"), None),  # Bambuddy says "empty" when it could not look
 ])
 def test_check_plate_mapping(http, backend, resp, expected):
     http.add("GET", "/printers/1/camera/check-plate", resp)
     pc = backend.check_plate()
     assert pc.is_empty is expected
     assert pc.difference_pct == resp["difference_percent"]
+    assert pc.light_ok is True
     if resp.get("difference_percent") == 20.03:
         assert pc.message.startswith("uncertain")
+    if resp.get("failure_reason"):
+        assert "could not run (no_camera_frame)" in pc.message
     assert http.paths("POST") == []  # light already on: no light toggling
+
+
+def status_light(on):
+    return dict(STATUS_RUNNING, state="FINISH", chamber_light=on)
+
+
+def test_parse_plate_check_light_warning_is_never_empty():
+    pc = bb.parse_plate_check(plate(True, 0.0, light_warning=True))  # the live "empty, 0 %, light off" answer
+    assert pc.is_empty is None and pc.light_ok is False and "chamber light was off" in pc.message
+    assert bb.parse_plate_check(plate(False, 60.0, light_warning=True)).is_empty is None
 
 
 def test_check_plate_rechecks_lit_and_turns_light_off(http, backend):
     http.add("GET", "/printers/1/camera/check-plate", plate(False, 40.0, light_warning=True))
     http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.5))
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     pc = backend.check_plate()
-    assert pc.is_empty is True
+    assert pc.is_empty is True and pc.light_ok is True
+    assert http.paths() == ["GET /printers/1/camera/check-plate", "GET /printers/1/status",
+                            "POST /printers/1/chamber-light", "GET /printers/1/camera/check-plate",
+                            "POST /printers/1/chamber-light"]
     lights = [c.query["on"] for c in http.calls if c.path.endswith("chamber-light")]
     assert lights == ["true", "false"]
     assert backend.sleeps == [backend.light_wait_s]
 
 
-def test_check_plate_lit_recheck_failure_still_turns_light_off(http, backend):
-    http.add("GET", "/printers/1/camera/check-plate", plate(False, 40.0, light_warning=True))
+def test_check_plate_lit_recheck_failure_is_uncertain_and_turns_light_off(http, backend):
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.0, light_warning=True))
     http.add("GET", "/printers/1/camera/check-plate", {"detail": "camera busy"}, status=503)
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     pc = backend.check_plate()
-    assert pc.is_empty is False and "lit re-check failed" in pc.message
+    assert pc.is_empty is None and pc.light_ok is False
+    assert "lit re-check failed" in pc.message and "chamber light was off" in pc.message
     assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false"]
+
+
+def test_check_plate_light_on_failure_is_uncertain(http, backend):
+    """The e2e finding: the light cannot be switched on -> the unlit "empty" must not survive."""
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.0, light_warning=True))
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"detail": "printer offline"}, status=500)
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    pc = backend.check_plate()
+    assert pc.is_empty is None and pc.light_ok is False and "lit re-check failed" in pc.message
+    assert http.paths("GET").count("GET /printers/1/camera/check-plate") == 1  # no second, unlit look
+    assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false"]
+
+
+def test_check_plate_light_that_never_comes_on_is_uncertain(http, backend):
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.0, light_warning=True))
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    pc = backend.check_plate()  # the re-check still reports light_warning
+    assert pc.is_empty is None and pc.light_ok is False
+    assert "did not come on" in pc.message
+
+
+def test_check_plate_never_switches_off_a_light_that_is_on(http, backend):
+    # check-plate saw the light off, but the status says it is on (a person switched it on / report lag)
+    http.add("GET", "/printers/1/camera/check-plate", plate(False, 40.0, light_warning=True))
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.5))
+    http.add("GET", "/printers/1/status", status_light(True))
+    pc = backend.check_plate()
+    assert pc.is_empty is True and pc.light_ok is True
+    assert http.paths("POST") == [] and backend.sleeps == [backend.light_wait_s]
+
+
+def test_check_plate_light_left_on_is_flagged(http, backend):
+    http.add("GET", "/printers/1/camera/check-plate", plate(False, 40.0, light_warning=True))
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.5))
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    http.add("POST", "/printers/1/chamber-light", {"detail": "mqtt down"}, status=500)
+    pc = backend.check_plate()
+    assert pc.is_empty is True  # the lit result is kept
+    assert "light_left_on" in pc.message and "mqtt down" in pc.message
+    assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false", "false"]
+
+
+def test_check_plate_with_unknown_light_state_does_not_touch_it(http, backend):
+    """Fix round 2: a light whose state cannot be read is never switched (it may be on for a print, and the
+    "off" afterwards would switch it off): the unlit answer stays uncertain."""
+    status = dict(STATUS_RUNNING, state="FINISH")
+    status.pop("chamber_light", None)
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.0, light_warning=True))
+    http.add("GET", "/printers/1/status", status)
+    pc = backend.check_plate()
+    assert pc.is_empty is None and pc.light_ok is False and not pc.uncertain_band
+    assert "light state unknown" in pc.message
+    assert http.paths("POST") == [] and backend.sleeps == []
+
+
+def test_only_the_false_positive_band_is_marked_overrulable():
+    assert bb.parse_plate_check(plate(False, 19.9)).uncertain_band is True
+    for resp in (plate(False, 30.0), plate(True, 0.5), plate(False, 19.9, light_warning=True),
+                 plate(False, 19.9, needs_calibration=True), plate(None, None),
+                 plate(False, 19.9, failure_reason="no_camera_frame")):
+        assert bb.parse_plate_check(resp).uncertain_band is False, resp
+
+
+def test_check_plate_unlit_mode_does_not_touch_the_light(http, backend):
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.0, light_warning=True))
+    pc = backend.check_plate(lit=False)
+    assert pc.is_empty is None and pc.light_ok is False and http.paths() == ["GET /printers/1/camera/check-plate"]
 
 
 # ---- snapshot ---------------------------------------------------------------------------------------
@@ -246,11 +391,12 @@ def _jpeg_bytes() -> bytes:
 
 
 def test_snapshot_lit_reencodes_and_switches_light_off(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
     snap = backend.snapshot(tmp_path / "media")
-    assert http.paths() == ["POST /printers/1/chamber-light", "GET /printers/1/camera/snapshot",
-                            "POST /printers/1/chamber-light"]
+    assert http.paths() == ["GET /printers/1/status", "POST /printers/1/chamber-light",
+                            "GET /printers/1/camera/snapshot", "POST /printers/1/chamber-light"]
     assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false"]
     assert backend.sleeps == [backend.light_wait_s]
     data = snap.path.read_bytes()
@@ -263,6 +409,7 @@ def test_snapshot_lit_reencodes_and_switches_light_off(http, backend, tmp_path):
 
 
 def test_snapshot_failure_still_turns_light_off(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     http.add("GET", "/printers/1/camera/snapshot", {"detail": "Camera stream unavailable"}, status=503)
     with pytest.raises(BackendError) as ei:
@@ -272,6 +419,7 @@ def test_snapshot_failure_still_turns_light_off(http, backend, tmp_path):
 
 
 def test_snapshot_light_on_failure_still_shoots_and_turns_off(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"detail": "printer offline"}, status=500)
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
@@ -285,6 +433,38 @@ def test_snapshot_unlit_does_not_touch_light(http, backend, tmp_path):
     http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
     snap = backend.snapshot(tmp_path, lit=False)
     assert http.paths("POST") == [] and snap.lit is False
+    assert http.paths() == ["GET /printers/1/camera/snapshot"]
+
+
+def test_snapshot_leaves_a_light_that_is_on_alone(http, backend, tmp_path):
+    """Mid-print photos must not switch off the light the A1's AI failure detection relies on."""
+    http.add("GET", "/printers/1/status", dict(STATUS_RUNNING, chamber_light=True))
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
+    snap = backend.snapshot(tmp_path)
+    assert snap.lit is True and http.paths("POST") == [] and backend.sleeps == []
+
+
+def test_snapshot_with_unknown_light_state_does_not_touch_it(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", {"detail": "boom"}, status=500)
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
+    snap = backend.snapshot(tmp_path)
+    assert snap.lit is False and http.paths("POST") == [] and "light state unknown" in snap.note
+    http.calls.clear()
+    http.routes.clear()
+    http.add("GET", "/printers/1/status", {k: v for k, v in STATUS_RUNNING.items() if k != "chamber_light"})
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
+    assert backend.snapshot(tmp_path).lit is False and http.paths("POST") == []
+
+
+def test_snapshot_light_left_on_is_flagged_and_photo_kept(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    http.add("POST", "/printers/1/chamber-light", {"success": False, "message": "no ack"})
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes())
+    snap = backend.snapshot(tmp_path)
+    assert snap.path.exists() and snap.lit is True
+    assert "light_left_on" in snap.note and "no ack" in snap.note
+    assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false", "false"]
 
 
 def test_snapshot_without_pillow_adds_jfif_header(http, backend, tmp_path, monkeypatch):
@@ -292,6 +472,7 @@ def test_snapshot_without_pillow_adds_jfif_header(http, backend, tmp_path, monke
 
     monkeypatch.setitem(sys.modules, "PIL", None)  # import PIL -> ImportError
     raw = b"\xff\xd8\xff\xdb\x00\x43" + b"\x01" * 80 + b"\xff\xd9"
+    http.add("GET", "/printers/1/status", status_light(False))
     http.add("POST", "/printers/1/chamber-light", {"success": True})
     http.add("GET", "/printers/1/camera/snapshot", raw=raw)
     snap = backend.snapshot(tmp_path)
@@ -414,6 +595,41 @@ def test_start_remove_and_printer_commands(http, backend):
     assert http.paths() == ["POST /queue/95/start", "GET /queue/95", "DELETE /queue/96",
                             "POST /printers/1/print/stop", "POST /printers/1/print/pause",
                             "POST /printers/1/print/resume", "POST /printers/1/clear-plate"]
+
+
+def test_start_refusals_are_readable(http, backend):
+    http.add("POST", "/queue/95/start", {"detail": {"code": "insufficient_filament", "deficit": [
+        {"slot_id": 2, "ams_id": 0, "tray_id": 1, "filament_type": "PLA", "required_grams": 30.94,
+         "remaining_grams": 12.0},
+        {"slot_id": 3, "ams_id": 255, "tray_id": 0, "filament_type": "PETG", "required_grams": 4.25,
+         "remaining_grams": None}]}}, status=409)
+    with pytest.raises(BackendError) as ei:
+        backend.start(95)
+    msg = str(ei.value)
+    assert msg.startswith("Bambuddy refused to start queue item 95: not enough filament: ")
+    assert "PLA in AMS A slot 2 needs 31 g, 12 g left" in msg
+    assert "PETG in external spool needs 4.2 g, amount left unknown" in msg and msg.endswith("(HTTP 409)")
+    assert "{" not in msg
+
+    http.add("POST", "/queue/96/start", {"detail": {"code": "unmatched_filament",
+                                                    "missing": ["PLA (Red)", "PETG (Black)"]}}, status=409)
+    with pytest.raises(BackendError, match=r"queue item 96: no loaded filament matches what the job needs: "
+                                           r"PLA \(Red\), PETG \(Black\) \(HTTP 409\)"):
+        backend.start(96)
+
+    http.add("POST", "/queue/97/start", {"detail": "Can only start pending items, current status: 'printing'"},
+             status=400)
+    with pytest.raises(BackendError, match="refused to start queue item 97: Can only start pending items"):
+        backend.start(97)
+
+    http.add("POST", "/queue/98/start", {"detail": {"code": "something_new"}}, status=409)
+    with pytest.raises(BackendError, match="queue item 98: something new"):
+        backend.start(98)
+
+    http.add("POST", "/queue/99/start", {"detail": "boom"}, status=500)  # server errors keep the raw form
+    with pytest.raises(BackendError, match=r"^POST /queue/99/start: 500 boom$") as ei:
+        backend.start(99)
+    assert isinstance(ei.value, bb.BambuddyHTTPError) and ei.value.status == 500
 
 
 def test_success_false_raises(http, backend):

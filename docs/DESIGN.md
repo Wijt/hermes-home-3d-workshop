@@ -372,3 +372,107 @@ third one, an upgrade proposal).
   holds no private values itself: generic patterns (real-looking group/user ids, keys, tokens, any private
   IPv4 except `192.168.1.50`) plus an optional `PRIVATE_SCAN_PATTERNS` repo secret for names / the real address.
   `tests/test_end_to_end.py` drives the whole loop through hooks → handlers → `watcher.run_once`.
+
+## Fix round 1 (review r0: safety, hermes-api, e2e)
+The review found that approvals could linger and be used by someone else, that some paths failed open, and that
+the demo hid too much. These decisions supersede the "approval" paragraphs above where they disagree.
+
+- **Identity (D1, `config.py`).** `Settings.person_for()` compares ids EXACTLY after `norm_id()`: strip + lower;
+  WhatsApp phone ids (`@s.whatsapp.net`, `@c.us`, device suffix `:N`) and bare phone numbers become their digits;
+  `@lid` ids become `<digits>@lid` (another id space, never equal to a phone number); everything else (Matrix,
+  e-mail, Telegram, `uid:N`) as is. Never the part before "@". New settings `local_is_owner` (default true) and
+  `inject_context` (`auto` | `always` | `never`); `LOCAL_SENDER = "local"` is the recorded sender of a local
+  session and is the owner exactly when `local_is_owner`.
+- **Session identity (D2, `hooks.pre_llm_call`, `store`).** An empty `sender_id` on a local platform, or a
+  `uid:<n>` sender on one (the gateway-hosted classic CLI), records `LOCAL_SENDER`; a child session with a
+  `parent_session_id` inherits the parent's sender. With `inject_context: auto` only household members and the
+  local owner get the persona/printer context (first turn, printer change, printing-related message, or the
+  persona's name); other chats get nothing.
+- **Approvals (D3/D4, `hooks`, `commands`, `store`, `tools`).** For start, clear-plate confirm and resume the
+  hook decides in this order: cron (fails closed: `current_cron_execution` raising, or Hermes' cron markers in the
+  environment, count as cron) → safety gate → sender. Unknown sender and family members are blocked with the
+  owner's command; the owner gets Hermes' approval prompt with a per-call `rule_key` ("always" can never carry
+  over). On approve the hook issues a single-use **handler pass** bound to (tool, target, session); the handler
+  consumes it first and refuses without one, so `ctx.dispatch_tool` (which skips hooks) cannot bypass the check.
+  `Store.consume_pass` is atomic across processes (`BEGIN IMMEDIATE` + `UPDATE ... WHERE used=0`). Stop and pause
+  are never gated. `/home3d approve start <id> [jump] | clear | resume [ack]` (owner only) runs the same
+  `hooks.evaluate()` and, on success, issues a pass for its own one-off session and calls the handler directly;
+  on any failure nothing is kept and the owner sends the command again. No stored approval authorises a later
+  call any more. Resume with a blocking HMS needs the owner's acknowledgement (`resume ack` / `ack_hms=true` from
+  an owner session).
+- **Plate truth (D5, `gates`, `backends`).** Status parsing fails closed (missing/unknown state = `UNKNOWN`,
+  `connected` must be literally true, string/int HMS codes are parsed). A light warning or a failed lit re-check
+  makes the plate *uncertain* (blocks); the chamber light is restored to its previous state. After a FAILED print
+  a start needs the owner's plate confirmation (`/home3d approve clear` → `store.confirm_plate`); after FINISH a
+  camera-only "empty" is allowed with a warning. The jump check counts every not-done item that is not one of
+  our active jobs (case-insensitive). Clearing with an unknown bed temperature is blocked. Messages say "the
+  camera thinks the plate is empty", never "verified".
+- **Store and watcher (D6/D7).** `job_by_name` matches exact normalised names (no `LIKE`), preferring queued or
+  printing jobs; the watcher attributes a print to the backend queue item that is printing first. `ready_next`
+  announces our first pending job and names foreign items ahead. Family texts name the job by the request text.
+- **CLI, script, CI (D8, `cli.py`, `scripts/home3d_watch.py`, `.github/workflows/ci.yml`).**
+  - `hermes home3d demo` is English unless `--lang tr`, prints a one-line `--lang` hint and a legend: every
+    scripted stand-in (what people say and do, the model's chat replies, the canned web search, approval taps,
+    simulator scenarios) is labelled `[staged]`; everything else is the real hooks, tools, gates, watcher and
+    messages. The run now also shows a customise step (scale to a target size), a filament run-out pause (the
+    owner's agent is refused a resume without `ack`, then `/home3d approve resume ack`), a failed print (the next
+    start is refused until `/home3d approve clear`), the persona's owner and family notices at each step, and a
+    recap of everything that was blocked. `DEMO_MILESTONES` grew accordingly; `run_demo()` also returns
+    `seconds` (about 3-4 s in-process, deterministic: simulated time only moves through `advance()`).
+  - The installed cron script checks `$HERMES_HOME/config.yaml` the way the plugin loader does
+    (`plugins.enabled` must list the plugin's manifest name or `<category>/<dir>` key, `plugins.disabled` wins;
+    no config = nothing enabled). Disabled or removed (plugin directory gone) → prints nothing, exits 0; a
+    present but broken plugin still exits 1. It reads YAML with PyYAML or ruamel.yaml when the interpreter has
+    one, else a small stdlib parser that refuses (and then keeps watching) anything it cannot read for sure.
+  - `hermes home3d teardown [--print-only]` removes every `home3d-watch` cron job (parsed from
+    `hermes cron list --all`, by name or by script) and then the installed script; the data dir is kept.
+    If a job cannot be removed the script stays, so the job does not fail on every tick.
+  - CI gains `hermes-validate`: clone Hermes `v0.22.5`, `uv sync --frozen --python 3.14`, then
+    `hermes plugins validate . --install-deps` with `HERMES_HOME=$(mktemp -d)`. The demo step runs both languages.
+- **Details the bullets above leave out.**
+  - Bambuddy reports `is_empty: true` together with `failure_reason` or `light_warning` so that a print is not
+    blocked; the backend reads either one as *uncertain* (`is_empty=None`, `light_ok=False`). A chamber light that
+    cannot be switched off again adds `light_left_on` to `Snapshot.note` / `PlateCheck.message`; the watcher
+    tells the owner (owner only, at most every 6 h, message kind `light_left_on`).
+  - A 4xx on start becomes a readable `BackendError` (`BambuddyHTTPError` with `.status`/`.detail`), for example
+    "not enough filament: PLA in AMS A slot 2 needs 31 g, 12 g left (HTTP 409)"; the agent and the owner see it as is.
+  - Gate codes added: `after_failure` (FAILED and no plate confirmation), `camera_only` (warning after FINISH),
+    `plate_dark`, `bed_unknown`; `resume_gate` blocks when not paused, offline, in cron, or on a blocking HMS
+    without the owner's ack. A plate confirmation counts for that job name only, until the next start, at most 24 h.
+  - `Runtime.plate_check()` caches only a confident "empty" for 90 s (keyed by printer state and job), so the hook
+    and the handler of one call share one camera check and an "occupied" answer is always re-checked.
+  - `post_tool_call` drops a pass the handler did not use (a denied prompt, another plugin's veto), so a pass
+    never outlives the call it was issued for.
+
+## Fix round 2 (re-verification of round 1)
+The re-check found no regression, but three gaps where the household could still be misled or stuck.
+
+- **A failure the printer forgets (`store`, `gates`, `watcher`, `hooks`, `tools`).** A print that ends RUNNING →
+  IDLE (cancel, power loss), or a FAILED printer that is power-cycled to IDLE, no longer reports FAILED, so the
+  camera alone decided again. The watcher now records every `failed` event (and a FAILED printer on its first pass)
+  with `Store.record_failure`; `Store.unconfirmed_failure()` stays set until a person confirms the plate
+  (`confirm_plate`, i.e. `/home3d approve clear`) or a new print starts (watcher). `start_gate(after_failure=...)`
+  blocks with `after_failure` whatever the printer says now; the watcher's plate / "next job" notices ask for the
+  confirmation the same way.
+- **The false-positive dead end (`backends`, `gates`).** Bambuddy reads an empty plate at 18-25 %. That stays
+  *uncertain* for the camera alone, but `PlateCheck.uncertain_band` now marks a check whose only doubt is that band
+  (lit, calibrated, the check ran). The owner's `/home3d approve clear` (or an approved owner-session confirm) accepts
+  it with a warning, and a start accepts it once that confirmation is recorded for the last job. "Occupied"
+  (≥ 26 %), a dark check, a check that could not run and a missing calibration are never overruled. The approval
+  prompt says "the camera is NOT sure ... you confirm it yourself". The clear reply names the next workshop job.
+- **HMS ack bound to what the owner saw (`hooks`, `commands`, `store`, `tools`).** A resume pass carries a
+  `detail` (`hms_ack:<sorted codes>`, new `passes.detail` column, migrated in place); the handler accepts the ack
+  only when the printer's current blocking codes are a subset of those. A new error that appears while the prompt
+  waits blocks the resume.
+- **Nobody present (`runtime.unattended_markers`, `hooks`).** Kanban workers, `chat -q`, `-z` and `--source tool`
+  runs are local `cli` sessions with a `uid:<n>` sender, i.e. the local owner. The hook now blocks every gated call
+  when one of Hermes' markers is set (`HERMES_KANBAN_TASK`, `HERMES_SINGLE_QUERY_SESSION`,
+  `HERMES_SESSION_SOURCE` in {kanban, tool}, `gateway.session_finite.finite_turn_required() is True` or
+  `unattended_turn()`); like the cron check it reads modules only from `sys.modules` and fails closed.
+- **Smaller fixes.** No camera check (and no chamber-light switching) when the printer alone already blocks
+  (`gates.printer_blocks`; `plate_skipped` can never open a gate). The backend never switches a light whose state
+  it cannot read. A light left on by a hook/handler check is handed to the watcher (`light_left_on:pending`) and
+  named in the approval prompt / handler warnings. Workshop jobs whose queue item was cancelled, or removed on two
+  passes in a row, in the printer manager become `cancelled` (no longer "ours"). `awaiting_plate_clear` from
+  Bambuddy blocks a start until `/home3d approve clear`. `home3d_import` needs `request_text` (2-3 words in the
+  requester's language) for a new request, so family texts never fall back to the English MakerWorld title.

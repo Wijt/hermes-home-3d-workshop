@@ -16,7 +16,8 @@ FULL = dict(persona="Mıstık", owner="Sam", job="Gül kutusu", queue_item_id=12
             next_job="Kalemlik", next_id=13, upgrade_title="Otomatik düşürme", upgrade_id=1,
             upgrade_label="parça alma", evidence=3, window_days=30,
             model_ref="https://makerworld.com/en/models/2335000",
-            preview_url="http://192.168.1.50:8000/gcode-viewer?library_file=5&plate=1", offline_min=12)
+            preview_url="http://192.168.1.50:8000/gcode-viewer?library_file=5&plate=1", offline_min=12,
+            foreign=[{"id": 73, "name": "Soap dish", "since": "2025-11-04"}])
 
 # English words / jargon that must never show up in a Turkish family line
 _ENGLISH = re.compile(r"\b(auto|eject\w*|plate|print\w*|hms|layer|queue|failed|finish\w*|done|the|owner|"
@@ -122,3 +123,76 @@ def test_missing_job_name_and_unknown_kind_do_not_break():
     assert M.render("finished", "family", "tr").startswith("✅ Baskı bitti")
     assert M.render("mystery", "family", "tr", job="X") == ""
     assert "mystery" in M.render("mystery", "owner", "tr", job="X")
+
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+@pytest.mark.parametrize("kind", [k for k in M.KINDS if k not in M.OWNER_ONLY])
+def test_family_names_the_print_by_the_request_not_the_file(kind):
+    ctx = dict(FULL, job="ROSE BOX v3 final red skirt", family_job="çiçek kutusu")
+    text = M.render(kind, "family", "tr", **ctx)
+    assert "çiçek kutusu" in text and "ROSE" not in text, text
+    owner = M.render(kind, "owner", "tr", **ctx)
+    assert "çiçek kutusu" not in owner  # the owner keeps the file name
+
+
+def test_family_job_falls_back_to_the_file_name_and_is_shortened():
+    assert '"Vazo"' in M.render("finished", "family", "tr", job="Vazo", family_job="")
+    long = "Mıstık, çiçekler için küçük ama çok şık bir hediye kutusu basar mısın lütfen"
+    short = M.short_text(long)
+    assert len(short) <= M.FAMILY_JOB_MAX and short.endswith("…") and not short.endswith(" …")
+    assert short in M.render("finished", "family", "tr", job="x", family_job=long)
+    assert M.short_text('  "bir   vazo"  ') == "bir vazo" and M.short_text(None) == ""
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_paused_owner_text_gives_the_approve_command_never_a_tool_name(lang):
+    with_hms = M.render("paused", "owner", lang, **FULL)
+    assert "/home3d approve resume" in with_hms and "/home3d approve resume ack" in with_hms
+    assert "home3d_stop" not in with_hms
+    no_hms = M.render("paused", "owner", lang, job="Vazo", progress=30)
+    assert "/home3d approve resume" in no_hms and " ack" not in no_hms and "home3d_stop" not in no_hms
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_plate_texts_say_the_camera_thinks_never_verified(lang):
+    for kind in ("plate_clear", "ready_next", "finished_ejected"):
+        text = M.render(kind, "owner", lang, **FULL)
+        assert ("ameraya göre tabla boş" if lang == "tr" else "amera thinks the plate is empty") in text, text
+        assert "verified" not in text.lower() and "doğrula" not in text.lower()
+    assert "%1.8" in M.render("plate_clear", "owner", "tr", plate_diff=1.8)
+    photo = M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13, photo=True)
+    assert ("Fotoğrafa" if lang == "tr" else "Check the photo") in photo
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_ready_next_names_foreign_jobs_ahead_and_the_jump_command(lang):
+    ahead = [{"id": 73, "name": "sabun tabagi v2"}]
+    text = M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13, ahead=ahead)
+    assert '"sabun tabagi v2" (#73)' in text and text.rstrip().endswith("/home3d approve start 13 jump")
+    assert "approve start 73" not in text
+    plain = M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13)
+    assert plain.rstrip().endswith("/home3d approve start 13")
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_confirm_first_after_a_failed_print(lang):
+    for kind in ("ready_next", "plate_clear"):
+        text = M.render(kind, "owner", lang, next_job="Kalemlik", next_id=13, confirm_first=True)
+        assert "/home3d approve clear" in text
+        assert "/home3d approve clear" not in M.render(kind, "owner", lang, next_job="Kalemlik", next_id=13)
+
+
+def test_queue_foreign_is_owner_only_and_never_suggests_a_start():
+    text = M.render("queue_foreign", "owner", "en", foreign=[{"id": 73, "name": "Soap dish", "since": "2025-11-04"}])
+    assert '"Soap dish" (#73, added 2025-11-04)' in text and "approve start" not in text
+    assert "eklenme 2025-11-04" in M.render("queue_foreign", "owner", "tr", **FULL)
+    assert M.render("queue_foreign", "owner", "en") == ""
+    assert M.render("queue_foreign", "family", "tr", **FULL) == ""
+
+
+def test_eject_unverified_tells_the_owner_how_to_confirm_an_empty_plate():
+    """e2e NEW-1: the camera may stay unsure on an empty plate; the owner's way out is /home3d approve clear."""
+    for lang, word in (("en", "if it is empty"), ("tr", "boşsa")):
+        text = M.render("eject_unverified", "owner", lang, persona="Mıstık", owner="Sam", job="kutu",
+                        reason="plate check inconclusive after 3 checks", plate_diff=19.9)
+        assert "/home3d approve clear" in text and word in text

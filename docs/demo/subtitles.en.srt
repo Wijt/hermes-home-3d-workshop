@@ -1,0 +1,116 @@
+1
+00:00:00,300 --> 00:00:03,300
+My mum doesn't know CAD
+or 3D printers.
+
+2
+00:00:03,400 --> 00:00:06,700
+She just talks to Mıstık.
+
+3
+00:00:07,200 --> 00:00:10,300
+Mum: Mıstık, can you print me
+a little gift box for flowers?
+
+4
+00:00:10,400 --> 00:00:13,400
+Mıstık: Mum, I found two.
+1) Flower box, about 2 h 16 min
+
+5
+00:00:13,500 --> 00:00:15,600
+2) Plant pot, about 4 h 34 min.
+Which one?
+
+6
+00:00:15,700 --> 00:00:17,400
+Mum: The first one, a white box.
+
+7
+00:00:17,500 --> 00:00:20,800
+Mıstık: Queued (#7).
+It starts when the owner approves.
+
+8
+00:00:21,200 --> 00:00:23,200
+Mum: Lovely, print it please!
+
+9
+00:00:23,300 --> 00:00:25,000
+[Blocked: owner approval needed]
+
+10
+00:00:25,100 --> 00:00:27,500
+Owner: /home3d approve start 7
+Started #7.
+
+11
+00:00:27,600 --> 00:00:30,800
+The rules are in code.
+Only the owner starts. Anyone can stop.
+
+12
+00:00:31,300 --> 00:00:34,300
+A watcher checks the printer
+every two minutes.
+
+13
+00:00:34,400 --> 00:00:36,800
+No model calls, no tokens.
+
+14
+00:00:36,900 --> 00:00:39,700
+It writes only when something happens.
+
+15
+00:00:40,300 --> 00:00:44,300
+Mıstık: Mum, the flower box is done.
+Pushed off: pick it up from the box.
+
+16
+00:00:44,500 --> 00:00:46,800
+[To the owner: layers, temps, photo]
+
+17
+00:00:47,200 --> 00:00:51,600
+When the bed cools, the printer
+pushes the part off by itself.
+
+18
+00:00:52,300 --> 00:00:55,600
+We asked it to clear the plate
+without a person.
+
+19
+00:00:55,700 --> 00:00:59,000
+It tried a push,
+and the part got stuck at the front.
+
+20
+00:00:59,100 --> 00:01:03,400
+It found a tilted base
+and printed its own upgrade.
+
+21
+00:01:03,500 --> 00:01:05,800
+The plugin makes this a rule:
+
+22
+00:01:05,900 --> 00:01:09,800
+when a human task repeats,
+it proposes an upgrade.
+
+23
+00:01:10,500 --> 00:01:13,800
+No printer?
+Try it with the simulator.
+
+24
+00:01:14,000 --> 00:01:18,500
+One command:
+hermes home3d demo
+
+25
+00:01:20,300 --> 00:01:24,500
+Mıstık.
+The home's 3D workshop.

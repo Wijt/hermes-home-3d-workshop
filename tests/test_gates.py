@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from home3d_ws.home3d.backends.base import HMSError, PlateCheck, PrinterStatus, QueueItem
-from home3d_ws.home3d.gates import Gate, clear_plate_gate, describe, start_gate
+from home3d_ws.home3d.backends.base import UNKNOWN, HMSError, PlateCheck, PrinterStatus, QueueItem
+from home3d_ws.home3d.gates import Gate, clear_plate_gate, describe, resume_gate, start_gate
 
 EMPTY = PlateCheck(is_empty=True, difference_pct=2.0, confidence=0.9)
 OCCUPIED = PlateCheck(is_empty=False, difference_pct=45.0, confidence=0.9, message="Objects detected")
@@ -49,6 +49,10 @@ def test_start_blocked_when_active():
 
 def test_start_blocked_on_unknown_state():
     assert "state_unknown" in gate(idle(state="SLICING")).codes
+    g = gate(idle(state=UNKNOWN))
+    assert not g.ok and "state_unknown" in g.codes
+    assert "bilinmiyor" in describe(g, "tr") and "unknown" in describe(g, "en")
+    assert "state_unknown" in gate(idle(state="")).codes
 
 
 def test_start_blocked_on_hms_but_x_belt_notice_passes():
@@ -74,10 +78,38 @@ def test_start_requires_explicitly_empty_plate():
 
 
 def test_start_after_finish_or_failure_needs_cleared_plate():
-    g = gate(idle(state="FAILED"), plate=OCCUPIED)
+    g = gate(idle(state="FAILED"), plate=OCCUPIED, plate_confirmed=True)
     assert {"plate_occupied", "after_job"} <= set(g.codes)
     assert "after_job" in gate(idle(state="FINISH"), plate=None).codes
-    assert gate(idle(state="FINISH"), plate=EMPTY).ok  # verified empty after a finish: fine
+    finish = gate(idle(state="FINISH"), plate=EMPTY)
+    assert finish.ok  # camera says empty after a finish: allowed, but flagged as camera-only
+    assert "camera_only" in [i["code"] for i in finish.items] and "2%" in finish.warnings[0]
+    assert "nobody has confirmed" in describe(finish, "en") and "%2" in describe(finish, "tr")
+    confirmed = gate(idle(state="FINISH"), plate=EMPTY, plate_confirmed=True)
+    assert confirmed.ok and confirmed.warnings == []
+
+
+def test_start_after_failure_needs_a_person_not_just_the_camera():
+    g = gate(idle(state="FAILED"), plate=EMPTY)
+    assert not g.ok and g.codes == ["after_failure"]
+    assert "/home3d approve clear" in g.reasons[0]
+    assert "/home3d approve clear" in describe(g, "tr") and "yarıda kaldı" in describe(g, "tr")
+    assert gate(idle(state="FAILED"), plate=EMPTY, plate_confirmed=True).ok
+    # confirmed, but the camera disagrees: still blocked
+    assert "plate_occupied" in gate(idle(state="FAILED"), plate=OCCUPIED, plate_confirmed=True).codes
+    # no duplicate "after_job" when the failure itself already blocks
+    both = gate(idle(state="FAILED"), plate=OCCUPIED)
+    assert "after_failure" in both.codes and "after_job" not in both.codes
+
+
+def test_start_blocked_when_plate_check_ran_in_the_dark():
+    dark = PlateCheck(is_empty=None, difference_pct=0.0, message="chamber light was off", light_ok=False)
+    g = gate(plate=dark)
+    assert not g.ok and g.codes == ["plate_dark"]
+    assert "kabin ışığı" in describe(g, "tr") and "chamber light" in describe(g, "en")
+    # even a (buggy) backend that says empty without light is not trusted
+    assert "plate_dark" in gate(plate=PlateCheck(is_empty=True, light_ok=False)).codes
+    assert gate(plate=PlateCheck(is_empty=True, light_ok=True)).ok
 
 
 def test_start_never_jumps_someone_elses_job():
@@ -91,10 +123,27 @@ def test_start_never_jumps_someone_elses_job():
 def test_start_may_pass_own_items_and_items_behind():
     assert gate(queue=[q(5, position=1), q(10, position=2)], own={5, 10}).ok  # ours ahead
     assert gate(queue=[q(10, position=1), q(5, position=2)]).ok  # theirs behind
-    assert gate(queue=[q(5, status="printing", position=1), q(10, position=2)]).ok  # not pending
+    for done in ("completed", "Failed", "CANCELLED", "canceled", "skipped"):
+        assert gate(queue=[q(5, status=done, position=1), q(10, position=2)]).ok, done  # done items
     # no positions: list order decides
     assert "jump" in gate(queue=[q(5), q(10)]).codes
     assert gate(queue=[q(10), q(5)]).ok
+
+
+def test_jump_check_is_case_insensitive_and_counts_every_unfinished_status():
+    for status in ("Pending", "PENDING", "printing", "paused", "on_hold", ""):
+        g = gate(queue=[q(5, status=status, position=1, name="Phone stand"), q(10, position=2)])
+        assert not g.ok and g.codes == ["jump"], status
+    # our own item may also be written "Pending"
+    assert gate(queue=[q(10, status="Pending", position=1)]).ok
+
+
+def test_jump_check_only_trusts_active_own_ids():
+    # own_item_ids is the set of the workshop's ACTIVE jobs: an id not in it is somebody else's
+    queue = [q(5, position=1, name="Phone stand"), q(10, position=2)]
+    assert "jump" in gate(queue=queue, own={10}).codes
+    assert gate(queue=queue, own={5, 10}).ok
+    assert gate(queue=queue, own={"5", "10"}).ok  # ids may come back from JSON as strings
 
 
 def test_start_warnings_voice_not_ours_auto_start_calibration():
@@ -145,9 +194,56 @@ def test_clear_blocked_cron_active_plate():
     assert "offline" in cgate(idle(state="OFFLINE")).codes
 
 
-def test_clear_unknown_bed_is_a_warning():
+def test_clear_unknown_bed_blocks():
     g = cgate(idle(state="FINISH", bed_temp=None))
-    assert g.ok and any("bed temperature" in w for w in g.warnings)
+    assert not g.ok and g.codes == ["bed_unknown"] and "bed temperature" in g.reasons[0]
+    assert "tabla sıcaklığı bilinmiyor" in describe(g, "tr")
+
+
+def test_clear_blocked_on_unknown_state_and_dark_plate_check():
+    assert "state_unknown" in cgate(idle(state=UNKNOWN, bed_temp=24.0)).codes
+    assert "offline" in cgate(idle(state="FINISH", bed_temp=24.0, connected=False)).codes
+    assert "plate_dark" in cgate(plate=PlateCheck(is_empty=None, light_ok=False)).codes
+
+
+# ---- resume_gate ------------------------------------------------------------------------------------
+RUNOUT = HMSError(code="0700-2000-0002-0001", message="AMS A Slot 1 filament has run out.")
+
+
+def rgate(status=None, *, in_cron=False, ack=False):
+    return resume_gate(status or idle(state="PAUSE"), in_cron=in_cron, hms_acknowledged=ack)
+
+
+def test_resume_ok_when_paused_without_errors():
+    g = rgate()
+    assert g.ok and g.action == "resume" and g.needs_owner
+    assert describe(g, "en").startswith("Resume possible") and describe(g, "tr").startswith("Devam ettirilebilir")
+
+
+def test_resume_blocked_when_not_paused_offline_or_in_cron():
+    for state in ("IDLE", "RUNNING", "FINISH", "FAILED", UNKNOWN):
+        g = rgate(idle(state=state))
+        assert not g.ok and "not_paused" in g.codes, state
+    assert "offline" in rgate(idle(state="OFFLINE")).codes
+    assert "offline" in rgate(idle(state="PAUSE", connected=False)).codes
+    assert "in_cron" in rgate(in_cron=True).codes
+    assert describe(rgate(idle(state="RUNNING")), "en").startswith("Cannot resume: ")
+    assert describe(rgate(idle(state="RUNNING")), "tr").startswith("Devam ettiremem: ")
+
+
+def test_resume_with_blocking_hms_needs_acknowledgement():
+    paused = idle(state="PAUSE", hms=[RUNOUT])
+    g = rgate(paused)
+    assert not g.ok and g.codes == ["hms_unacknowledged"]
+    assert "0700-2000-0002-0001" in g.reasons[0] and "/home3d approve resume ack" in g.reasons[0]
+    assert "/home3d approve resume ack" in describe(g, "tr")
+    acked = rgate(paused, ack=True)
+    assert acked.ok and "0700-2000-0002-0001" in acked.warnings[0]
+    # the harmless X-belt notice never needs an acknowledgement
+    harmless = rgate(idle(state="PAUSE", hms=[HMSError(code="0300-1000-0002-0001")]))
+    assert harmless.ok and "hms_ignored" in [i["code"] for i in harmless.items]
+    # acknowledging does not make an idle printer resumable
+    assert "not_paused" in rgate(idle(state="IDLE", hms=[RUNOUT]), ack=True).codes
 
 
 # ---- describe ---------------------------------------------------------------------------------------
@@ -174,3 +270,74 @@ def test_describe_is_short_and_handles_hand_made_gates():
     assert describe(Gate(ok=True), "tr") == "Tamam."
     d = g.to_dict()
     assert d["ok"] is False and d["items"][0]["code"] == "in_cron"
+
+
+def test_every_code_renders_in_both_languages():
+    from home3d_ws.home3d.gates import _TEXT
+
+    params = {"state": "FAILED", "job": "Gift box", "codes": "0700-2000-0002-0001", "item": 7, "status": "printing",
+              "pct": 21.0, "msg": "uncertain", "name": "Phone stand", "other": 5, "bed": 41.0, "limit": 30.0,
+              "names": "Gift box"}
+    for code in _TEXT:
+        for lang in ("en", "tr"):
+            g = Gate(ok=False, action="resume")
+            g.block(code, **params)
+            text = describe(g, lang)
+            assert "{" not in text and "}" not in text, (code, lang, text)
+    for code in ("after_failure", "camera_only", "plate_dark", "not_paused", "hms_unacknowledged",
+                 "hms_acknowledged", "bed_unknown"):
+        assert code in _TEXT
+
+
+# ---- fix round 2 ------------------------------------------------------------------------------------
+BAND = PlateCheck(is_empty=None, difference_pct=19.9, message="uncertain: inside the false-positive band",
+                  light_ok=True, uncertain_band=True)
+
+
+def test_an_unconfirmed_failure_blocks_even_when_the_printer_forgot_it():
+    """Safety 6 / e2e NEW-2: FAILED -> power cycle -> IDLE, or RUNNING -> IDLE (cancel): the camera alone never
+    decides; ``after_failure`` comes from the store and blocks even with plate_confirmed for the current name."""
+    g = gate(idle(state="IDLE", job_name=""), after_failure=True)
+    assert not g.ok and "after_failure" in g.codes and "/home3d approve clear" in describe(g, "en")
+    assert "after_failure" in gate(idle(state="IDLE"), after_failure=True, plate_confirmed=True).codes
+    assert gate(idle(state="IDLE"), after_failure=False).ok
+
+
+def test_a_person_can_overrule_only_the_false_positive_band():
+    """e2e NEW-1: an empty plate read at 18-25 % used to dead-end both /home3d approve clear and start."""
+    c = clear_plate_gate(idle(state="FAILED", bed_temp=26.0), BAND, in_cron=False, cool_temp_c=30.0,
+                         auto_start_pending=[], person_confirms=True)
+    assert c.ok and "plate_unsure_person" in [i["code"] for i in c.items]
+    assert "19.9" in describe(c, "en") and "kamera emin değil" in describe(c, "tr")
+    assert not cgate(plate=BAND).ok  # nobody is confirming: still uncertain
+    s = gate(idle(state="FAILED", job_name="clip"), plate=BAND, plate_confirmed=True)
+    assert s.ok and "plate_unsure_confirmed" in [i["code"] for i in s.items]
+    assert "plate_uncertain" in gate(idle(state="FINISH"), plate=BAND).codes  # the camera alone: blocked
+    for plate in (OCCUPIED, UNSURE,  # occupied / a doubt that is not the band
+                  PlateCheck(is_empty=None, difference_pct=19.9, light_ok=False, uncertain_band=True),
+                  PlateCheck(is_empty=None, difference_pct=19.9, needs_calibration=True, uncertain_band=True)):
+        assert not gate(idle(state="FINISH"), plate=plate, plate_confirmed=True).ok, plate
+        assert not clear_plate_gate(idle(state="FINISH", bed_temp=26.0), plate, in_cron=False, cool_temp_c=30.0,
+                                    auto_start_pending=[], person_confirms=True).ok, plate
+
+
+def test_a_skipped_plate_check_never_opens_a_gate():
+    from home3d_ws.home3d.gates import printer_blocks
+
+    busy = idle(state="RUNNING", job_name="x")
+    assert printer_blocks(busy) and printer_blocks(idle(connected=False))
+    assert printer_blocks(idle(hms=[HMSError(code="0700-2000-0002-0001")]))
+    assert not printer_blocks(idle(hms=[HMSError(code="0700-2000-0002-0001")]), "clear_plate")
+    assert not printer_blocks(idle()) and not printer_blocks(idle(state="FAILED"))
+    g = gate(busy, plate=None, plate_skipped=True)
+    assert not g.ok and g.codes == ["busy"]  # no noisy "no plate check yet"
+    g = gate(idle(), plate=None, plate_skipped=True)  # a caller that skips on an idle printer: still blocked
+    assert not g.ok and "plate_unknown" in g.codes
+    c = clear_plate_gate(idle(), None, in_cron=False, cool_temp_c=30.0, auto_start_pending=[], plate_skipped=True)
+    assert not c.ok and "plate_unknown" in c.codes
+
+
+def test_start_waits_for_the_printer_managers_plate_clear_flag():
+    g = gate(idle(awaiting_plate_clear=True))
+    assert not g.ok and "awaiting_plate_clear" in g.codes and "/home3d approve clear" in describe(g, "en")
+    assert gate(idle(awaiting_plate_clear=False)).ok and gate(idle(awaiting_plate_clear=None)).ok

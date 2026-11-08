@@ -1,0 +1,46 @@
+# DRAFT catalog entry for NousResearch/hermes-agent: plugin-catalog/home-3d-workshop.yaml
+# Do not open the PR before the owner approves. Before you copy this file:
+#   1. Replace <SHA40> with the full 40-character commit that the README and this entry describe.
+#   2. Make "version" equal to "version" in plugin.yaml at that commit.
+#   3. Re-read the last sentence of "description" and the known_issues: update the real-printer status.
+#   4. Run: HERMES_HOME=$(mktemp -d) hermes plugins validate <checkout at SHA40> --install-deps
+# Remove these comment lines in the copy for the PR.
+name: home-3d-workshop
+title: Home 3D Workshop
+repo: https://github.com/Wijt/hermes-home-3d-workshop
+sha: "<SHA40>"
+version: "0.1.0"
+description: "A household 3D-printing workshop with a character (Mıstık by default; the name and the tr/en message language are settings). Family members ask in plain words; the agent finds MakerWorld models through Bambuddy or scales one, slices, and queues with manual start. A print starts only with the owner's approval. A zero-token cron watcher tells the owner (technical, with a photo) and the family (one plain line, by name) about finish, failure, pause, HMS errors and the build plate. Each moment a person had to step in is logged, and repeats become upgrade proposals (for example a printed tilted base for auto-eject). Works with a Bambu Lab printer managed by Bambuddy, or with a built-in simulated printer (hermes home3d demo). Disclosure — Talks only to the one Bambuddy URL you set, over HTTP on your LAN. When HOME3D_BAMBUDDY_API_KEY is set, it is sent as X-API-Key, unencrypted over plain http. MakerWorld lookups and downloads go through Bambuddy; the plugin makes no other network calls. Import, scale, slice and queue add write to the Bambuddy library and queue without a prompt; queued items are always manual start. A camera photo switches the chamber light on for about 12 s and then restores its earlier state. Start, resume and plate-clear confirm: pre_tool_call blocks them in cron (the check fails closed), when a safety gate fails (printer busy or offline, active HMS error, plate not judged empty, another person's job ahead, plate not confirmed after a failed print, bed hot or of unknown temperature for a plate clear), and for unknown or non-owner senders, who are told to ask the owner for /home3d approve. Only an owner session gets the Hermes approve prompt. The owner is any id in owner_ids, plus any local CLI, TUI or Desktop session while local_is_owner is true (the default). The tool handler also needs a single-use pass from that hook or from /home3d approve, so a call that skips the hook is refused. /home3d approve runs the gate and the action at once and stores nothing for later. yolo and approvals off skip the prompt in an owner session. Each rule_key is unique, so always does not carry over, and each always answer adds one unused command_allowlist line to config.yaml. Stop and pause need no approval and are never blocked: anyone who can reach the agent can stop or pause a print. Subprocesses: hermes send for notices (with -p send_profile when set); hermes cron create, list and remove from hermes home3d setup and teardown; openscad for the name-tag and label-box templates when it is installed. hermes home3d setup writes HERMES_HOME/scripts/home3d_watch.py and creates one hermes cron create --no-agent --script job, every 2 minutes by default (720 runs a day, no daily cap). The job calls no model, and empty output sends nothing. The script reads HERMES_HOME/config.yaml and stays silent while the plugin is disabled or removed. The job and the script stay until hermes home3d teardown (after an uninstall: hermes cron remove and delete the script). Data stays local under HERMES_HOME/plugin-data/home-3d-workshop: a SQLite database (requests, jobs, household sender ids and names, audit events), outbox.jsonl with every message, camera photos, model files, a watcher log and a settings snapshot without secrets. pre_llm_call adds up to 900 characters of context (persona, speaker, printer state): for household members and the local owner on the first turn, on printing turns and on printer state changes, else one speaker line; for other senders only on printing turns; inject_context: never turns it off. The tools are on for every surface, and while the plugin is enabled its skill adds one line to the skills index of every session. Tested on Linux with Hermes 0.22.5. On a real Bambuddy 1.3.0 with an A1, only read-only calls are verified so far; the full real-printer loop is planned."
+maintainer: Wijt
+tier: community
+category: tools
+requires_hermes: ">=0.22.5"
+docs_url: https://github.com/Wijt/hermes-home-3d-workshop#readme
+known_issues:
+  - "Bambu Lab printers through Bambuddy only (tested with Bambuddy 1.3.0 and an A1). The default backend is a simulated printer."
+  - "Real-printer status: read-only calls verified; start, eject and notices on real hardware are planned."
+  - "Auto-eject needs your own tilted base and an end G-code preset; the plugin ships no G-code."
+  - "Tested on Linux only."
+# image: https://raw.githubusercontent.com/Wijt/hermes-home-3d-workshop/<SHA40>/docs/catalog/banner.png
+platforms: []
+capabilities:
+  provides_tools:
+  - home3d_status
+  - home3d_camera
+  - home3d_find_models
+  - home3d_import
+  - home3d_customize
+  - home3d_slice
+  - home3d_queue
+  - home3d_start
+  - home3d_stop
+  - home3d_clear_plate
+  - home3d_household
+  - home3d_human_needed
+  - home3d_upgrades
+  provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  provides_middleware: []
+  requires_env: []

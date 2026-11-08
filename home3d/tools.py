@@ -2,8 +2,14 @@
 envelope (``{"ok": true, ...}`` / ``{"ok": false, "error": ...}``) and never raises.
 
 Who asked is resolved from ``kwargs["session_id"]`` (the ``pre_llm_call`` hook maps session -> sender) and
-recorded in the store with every request / job. Safety: start / clear-plate / resume are gated by the
-``pre_tool_call`` hook (owner approval); the handlers re-check the pure gates as defence in depth.
+recorded in the store with every request / job. An unknown sender is never the owner.
+
+Safety: start, clear-plate confirm and resume need an approval PASS. The ``pre_tool_call`` hook issues one
+(bound to tool, target and session) only for an owner session whose gate passed, and ``/home3d approve``
+issues one for its own call. The handler uses it up FIRST (``store.consume_pass``) and refuses without it:
+Hermes' ``ctx.dispatch_tool`` / ``registry.dispatch`` skip ``pre_tool_call``, so another plugin could
+otherwise call these handlers directly. The handlers then re-check the pure gates. Stop and pause need no
+pass: stopping must always work.
 """
 
 from __future__ import annotations
@@ -17,8 +23,9 @@ from typing import Any, Callable, Optional
 
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
-from .gates import clear_plate_gate, describe, start_gate
+from .gates import clear_plate_gate, describe, printer_blocks, resume_gate, start_gate
 from .gcode import assess_eject, inspect_gcode, material_family
+from .hooks import LIGHT_FLAG, acked_codes, approval_target
 
 Tool = tuple[str, dict, Callable[..., str]]
 
@@ -122,12 +129,79 @@ def _who(rt, kw: dict, explicit: str = "") -> tuple[str, str]:
 
 
 def _is_owner(rt, sender: str) -> bool:
-    """Owner, or a local CLI/TUI session (no messaging sender)."""
-    return not sender or rt.settings.is_owner(sender)
+    """The recorded sender is the owner (a local CLI/TUI session is recorded as ``LOCAL_SENDER`` and counts when
+    ``local_is_owner``). An unknown sender ('') is never the owner."""
+    return bool(sender) and rt.settings.is_owner(sender)
 
 
 def _own_item_ids(rt) -> set[int]:
-    return {int(j["queue_item_id"]) for j in rt.store.jobs(limit=1000) if j.get("queue_item_id") is not None}
+    """Queue ids of the workshop's ACTIVE jobs (queued or printing): what "ours" means in the queue."""
+    return {int(i) for i in rt.store.active_job_ids()}
+
+
+_NO_PASS_TR = "Bu işlem için sahibinin onayı gerekiyor (/home3d approve); onay bulunamadı, hiçbir şey yapılmadı."
+
+
+def _use_pass(rt, tool: str, target: str, kw: dict) -> Optional[dict]:
+    """Use the approval pass for this call FIRST; a refusal envelope when there is none (fails closed)."""
+    return _take_pass(rt, tool, target, kw)[0]
+
+
+def _take_pass(rt, tool: str, target: str, kw: dict) -> tuple[Optional[dict], str]:
+    """(refusal envelope or None, the pass detail). Uses the pass once; fails closed."""
+    sid = str(kw.get("session_id") or "")
+    granted = None
+    try:
+        if sid:
+            take = getattr(rt.store, "take_pass", None)
+            if callable(take):
+                granted = take(tool, target, sid)
+            elif rt.store.consume_pass(tool, target, sid):
+                granted = {"detail": ""}
+    except Exception:  # a store we cannot read authorises nothing
+        granted = None
+    if granted is not None:
+        return None, str(granted.get("detail") or "")
+    error = (f"{tool} must be approved through Hermes (pre_tool_call) or /home3d approve; no approval pass found "
+             "(nothing was done)")
+    out = {"ok": False, "blocked": True, "error": error, "codes": ["no_pass"]}
+    try:
+        if rt.settings.language == "tr":
+            out["message"] = _NO_PASS_TR
+    except Exception:
+        pass
+    return out, ""
+
+
+def _plate_check(rt, status):
+    """The plate check shared with the ``pre_tool_call`` hook (``rt.plate_check`` caches a confident "empty" so a
+    start costs one camera check)."""
+    try:
+        return rt.plate_check(status=status)
+    except TypeError:  # a runtime without the ``status`` shortcut
+        return rt.plate_check()
+
+
+def _plate_confirmed(store, job_name: str) -> bool:
+    try:
+        return bool(store.plate_confirmed(job_name or ""))
+    except Exception:
+        return False  # fail closed: after a failed print the start gate then wants a confirmation
+
+
+def _after_failure(store) -> bool:
+    """A failed print nobody has confirmed since (survives a power cycle / cancel to IDLE). Fails closed."""
+    try:
+        fn = getattr(store, "unconfirmed_failure", None)
+        return bool(callable(fn) and fn() is not None)
+    except Exception:
+        return True
+
+
+def _light_warning(plate) -> list[str]:
+    if plate is not None and LIGHT_FLAG in str(getattr(plate, "message", "") or ""):
+        return ["the chamber light could not be switched off again after the plate check (light_left_on)"]
+    return []
 
 
 def _model_id(value: Any) -> int:
@@ -204,6 +278,8 @@ def _printer_summary(st) -> dict:
                 for h in st.blocking_hms],
         "ignored_hms": [h.code for h in st.hms if h.ignorable],
         "trays": [_tray_dict(t) for t in st.trays],
+        "awaiting_plate_clear": getattr(st, "awaiting_plate_clear", None),
+        "chamber_light": getattr(st, "chamber_light", None),
     }
 
 
@@ -211,14 +287,21 @@ def _plate_dict(p) -> Optional[dict]:
     if p is None:
         return None
     return {"is_empty": p.is_empty, "difference_pct": p.difference_pct, "confidence": p.confidence,
-            "message": p.message, "needs_calibration": p.needs_calibration}
+            "message": p.message, "needs_calibration": p.needs_calibration,
+            "light_ok": getattr(p, "light_ok", None), "uncertain_band": bool(getattr(p, "uncertain_band", False)),
+            "note": "the camera's opinion only: thin or first-layer parts can be missed"}
 
 
-def _queue_entry(item, job: Optional[dict]) -> dict:
+def _queue_entry(item, job: Optional[dict], active: set) -> dict:
+    """``ours`` = an active workshop job; a stored job for a finished item is shown as history. A pending item whose
+    id matches an old (cancelled / finished) workshop job is NOT ours."""
+    ours = item.id in active
+    if not ours and not item.is_done:
+        job = None
     d = {"id": item.id, "status": item.status, "name": item.name, "position": item.position,
          "manual_start": item.manual_start,
          "print_time_min": round(item.print_time_s / 60) if item.print_time_s else None,
-         "ours": job is not None}
+         "ours": ours}
     if job:
         d.update(requester=job.get("requester", ""), eject_planned=bool(job.get("eject_planned")),
                  request_id=job.get("request_id"))
@@ -238,10 +321,10 @@ def _job_summary(j: dict) -> dict:
 
 def _kv_age_s(store, key: str) -> Optional[float]:
     try:
-        rows = store._rows("SELECT updated FROM kv WHERE key=?", (key,))
+        updated = store.kv_updated(key)
     except Exception:
         return None
-    return (time.time() - float(rows[0]["updated"])) if rows else None
+    return (time.time() - float(updated)) if updated is not None else None
 
 
 def _request_for_file(store, library_file_id: int) -> Optional[dict]:
@@ -303,8 +386,9 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
     except BackendError as e:
         out["printer"] = {"state": "OFFLINE", "connected": False, "error": str(e)}
     jobs = {int(j["queue_item_id"]): j for j in store.jobs(limit=200)}
+    active = _own_item_ids(rt)
     try:
-        out["queue"] = [_queue_entry(q, jobs.get(q.id)) for q in be.queue()]
+        out["queue"] = [_queue_entry(q, jobs.get(q.id), active) for q in be.queue()]
     except BackendError as e:
         out["queue"], out["queue_error"] = [], str(e)
     out["jobs"] = [_job_summary(j) for j in store.jobs(limit=8)]
@@ -394,6 +478,10 @@ def _h_import(rt, a: dict, kw: dict) -> dict:
     be, store = rt.backend, rt.store
     if a.get("model_id") in (None, ""):
         raise ArgError("'model_id' is required")
+    if _int(a, "request_id") is None and not _str(a, "request_text"):
+        # family messages name the print by it: never fall back to the (English) MakerWorld title
+        raise ArgError("'request_text' is required for a new request: 2-3 words naming the thing in the "
+                       "requester's own language, e.g. 'çiçek kutusu' (or pass request_id)")
     mid = _model_id(a.get("model_id"))
     profile_id = _int(a, "profile_id")
     requester, sender = _who(rt, kw, _str(a, "requester"))
@@ -420,7 +508,7 @@ def _h_import(rt, a: dict, kw: dict) -> dict:
         warnings.append(f"request {request_id} not found: recorded a new one")
         request_id = None
     if request_id is None:
-        text = _str(a, "request_text") or (card.title if card else "")
+        text = _str(a, "request_text")
         request_id = store.add_request(requester=requester, text=text, channel=_str(a, "channel") or "text",
                                        sender_id=sender, model_ref=url)
     store.update_request(request_id, library_file_id=lib_id, model_ref=url)
@@ -603,8 +691,9 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
     who, sender = _who(rt, kw)
     if action == "list":
         jobs = {int(j["queue_item_id"]): j for j in store.jobs(limit=500)}
+        active = _own_item_ids(rt)
         items = be.queue(include_done=_bool(a, "include_done"))
-        return {"ok": True, "items": [_queue_entry(q, jobs.get(q.id)) for q in items]}
+        return {"ok": True, "items": [_queue_entry(q, jobs.get(q.id), active) for q in items]}
 
     if action == "remove":
         qid = _int(a, "queue_item_id", required=True)
@@ -684,35 +773,46 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
         own = _own_item_ids(rt)
         items = be.queue()
         idx = next((i for i, q in enumerate(items) if q.id == item.id), len(items))
-        ahead = [{"id": q.id, "name": q.name, "ours": q.id in own} for q in items[:idx] if q.status in
-                 ("pending", "printing")]
+        ahead = [{"id": q.id, "name": q.name, "ours": q.id in own} for q in items[:idx] if not q.is_done]
     except BackendError:
         pass
     return {"ok": True, "queue_item_id": item.id, "name": item.name, "status": item.status, "manual_start": True,
             "ams_mapping": mapping, "eject_planned": planned, "requester": requester,
             "request_id": req["id"] if req else None, "ahead": ahead, "warnings": warnings,
-            "next": (f"Starting needs the owner's approval: home3d_start queue_item_id={item.id} "
-                     "(never jump someone else's job).")}
+            "next": (f"Starting needs the owner's approval: home3d_start queue_item_id={item.id} from the owner's "
+                     f"chat, or the owner sends /home3d approve start {item.id} (never jump someone else's job).")}
 
 
 def _h_start(rt, a: dict, kw: dict) -> dict:
     s, be, store = rt.settings, rt.backend, rt.store
     qid = _int(a, "queue_item_id", required=True)
+    jump = _bool(a, "allow_jump")
+    refused = _use_pass(rt, "home3d_start", approval_target("start", qid, jump), kw)
+    if refused:
+        return refused
     who, sender = _who(rt, kw)
     status, queue = be.status(), be.queue()
     plate, warnings = None, []
-    try:
-        plate = be.check_plate()
-    except BackendError as e:
-        warnings.append(f"plate check failed: {e}")
+    skipped = printer_blocks(status, "start")  # the printer already blocks: no camera / chamber light
+    if not skipped:
+        try:
+            plate = _plate_check(rt, status)
+        except BackendError as e:
+            warnings.append(f"plate check failed: {e}")
+    warnings += _light_warning(plate)
     req = store.request_for_queue_item(qid)
     gate = start_gate(status, queue, qid, plate=plate, in_cron=rt.in_cron(), own_item_ids=_own_item_ids(rt),
-                      allow_jump=_bool(a, "allow_jump"), voice_request=bool(req and req.get("channel") == "voice"))
+                      allow_jump=jump, voice_request=bool(req and req.get("channel") == "voice"),
+                      plate_confirmed=_plate_confirmed(store, status.job_name),
+                      after_failure=_after_failure(store), plate_skipped=skipped)
     if not gate.ok:
         return {"ok": False, "blocked": True, "error": describe(gate, "en"), "message": describe(gate, s.language),
                 "codes": gate.codes, "reasons": gate.reasons, "warnings": warnings + gate.warnings,
                 "plate": _plate_dict(plate)}
     item = be.start(qid)
+    forget = getattr(rt, "forget_plate_check", None)
+    if callable(forget):
+        forget()  # the plate is in use now
     store.upsert_job(qid, state="printing", started_ts=rt.now())
     if req:
         store.update_request(req["id"], status="printing")
@@ -726,8 +826,13 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
 
 
 def _h_stop(rt, a: dict, kw: dict) -> dict:
-    be, store = rt.backend, rt.store
+    s, be, store = rt.settings, rt.backend, rt.store
     action = _choice(a, "action", ("stop", "pause", "resume"), "stop")
+    pass_detail = ""
+    if action == "resume":  # stop / pause need no pass: stopping must always work
+        refused, pass_detail = _take_pass(rt, "home3d_stop", approval_target("resume"), kw)
+        if refused:
+            return refused
     reason = _str(a, "reason")
     who, sender = _who(rt, kw)
     by = who or "owner"
@@ -761,21 +866,32 @@ def _h_stop(rt, a: dict, kw: dict) -> dict:
         return {"ok": True, "action": action, "job": st.job_name, "by": by, "reason": reason,
                 "progress": payload["progress"],
                 "next": "Check the plate with home3d_camera before anything else." if action == "stop" else
-                "Resume needs the owner's approval: home3d_stop action=resume."}
-    # resume (approval enforced by the pre_tool_call hook)
-    if rt.in_cron():
-        return {"ok": False, "error": "never resume from a scheduled job: a person must be present"}
-    if st.state != PAUSE:
-        return {"ok": False, "error": f"the printer is not paused (state {st.state})", "state": st.state}
-    warnings = [f"HMS still active: {h.code} {h.message}".strip() for h in st.blocking_hms]
+                "Resume needs the owner's approval: home3d_stop action=resume from the owner's chat, or the owner "
+                "sends /home3d approve resume."}
+    # resume: the pass was used above; re-check the gate (an active printer error needs the owner's ack). The ack
+    # only covers the error codes the owner was shown when approving (recorded in the pass): a printer error that
+    # appeared while the prompt waited is not acknowledged.
+    shown = acked_codes(pass_detail)
+    now_codes = {str(h.code or "").strip().upper() for h in st.blocking_hms}
+    ack = _bool(a, "ack_hms") and _is_owner(rt, sender) and bool(shown) and now_codes <= shown
+    gate = resume_gate(st, in_cron=rt.in_cron(), hms_acknowledged=ack)
+    if not gate.ok:
+        return {"ok": False, "blocked": True, "error": describe(gate, "en"), "message": describe(gate, s.language),
+                "codes": gate.codes, "reasons": gate.reasons, "warnings": gate.warnings, "state": st.state}
     be.resume()
+    if ack and st.blocking_hms:
+        payload["hms_acknowledged"] = [h.code for h in st.blocking_hms]
     store.add_event("resume_request", st.job_name, payload)
-    return {"ok": True, "action": "resume", "job": st.job_name, "by": by, "warnings": warnings}
+    return {"ok": True, "action": "resume", "job": st.job_name, "by": by, "warnings": gate.warnings}
 
 
 def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
     s, be, store = rt.settings, rt.backend, rt.store
     action = _choice(a, "action", ("check", "confirm"), "check")
+    if action == "confirm":
+        refused = _use_pass(rt, "home3d_clear_plate", approval_target("clear_plate"), kw)
+        if refused:
+            return refused
     who, sender = _who(rt, kw)
     st = be.status()
     out: dict = {"ok": True, "action": action, "state": st.state, "bed_temp": st.bed_temp,
@@ -789,14 +905,17 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
             out["photo_error"] = str(e)
     plate = None
     try:
-        plate = be.check_plate()
+        plate = be.check_plate() if action == "check" else _plate_check(rt, st)
     except BackendError as e:
         out["plate_error"] = str(e)
-    auto = [q for q in be.queue() if q.is_pending and not q.manual_start]
+    queue = be.queue()
+    auto = [q for q in queue if q.is_pending and not q.manual_start]
+    # a confirm is always the owner's own statement (approved through the hook or /home3d approve), and "check"
+    # reports whether such a confirm could pass
     gate = clear_plate_gate(st, plate, in_cron=rt.in_cron(), cool_temp_c=s.eject_cool_temp_c,
-                            auto_start_pending=auto)
-    out.update(plate=_plate_dict(plate), can_confirm=gate.ok, reasons=gate.reasons, warnings=gate.warnings,
-               message=describe(gate, s.language))
+                            auto_start_pending=auto, person_confirms=True)
+    out.update(plate=_plate_dict(plate), can_confirm=gate.ok, reasons=gate.reasons,
+               warnings=gate.warnings + _light_warning(plate), message=describe(gate, s.language))
     if action == "check":
         return out
     if not gate.ok:
@@ -804,11 +923,19 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
         return out
     be.mark_plate_cleared()
     by = who or "owner"
+    store.confirm_plate(st.job_name or "", by)  # a person looked: after a failed print the next start may go
     for j in store.jobs(state="finished", limit=20):
         store.upsert_job(j["queue_item_id"], state="cleared")
     store.add_event("plate_clear_confirmed", st.job_name,
-                    {"who": by, "sender": sender, "plate": _plate_dict(plate)})
-    out.update(cleared=True, by=by)
+                    {"who": by, "sender": sender, "plate": _plate_dict(plate), "after_state": st.state})
+    out.update(cleared=True, by=by, confirmed_for=st.job_name or "")
+    try:  # the watcher may stay quiet (camera unsure): say which workshop job is next
+        own = _own_item_ids(rt)
+        nxt = next((q for q in queue if q.is_pending and q.manual_start and q.id in own), None)
+        if nxt is not None:
+            out["next_job"] = {"id": nxt.id, "name": nxt.name}
+    except Exception:
+        pass
     return out
 
 
@@ -957,7 +1084,10 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
       "profile_id": {"type": "integer", "description": "Print profile id from a card's a1_profiles "
                                                       "(a #profileId-N URL fragment is NOT a profile id)."},
       "requester": {"type": "string", "description": "Who asked (defaults to the person talking)."},
-      "request_text": {"type": "string", "description": "What they asked for, in their words."},
+      "request_text": {"type": "string", "description": "Required for a new request: 2-3 words naming the thing, "
+                                                           "in the requester's own language (e.g. 'çiçek kutusu', not "
+                                                           "their whole sentence); family messages name the print by "
+                                                           "it."},
       "channel": {"type": "string", "enum": ["text", "voice", "photo", "link", "cli"]},
       "request_id": {"type": "integer", "description": "Existing request to attach to."}},
      ["model_id"], _h_import),
@@ -996,19 +1126,24 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
      ["action"], _h_queue),
     ("home3d_start",
      "Start a queued 3D print (owner approval required). Re-checks the safety gates (printer idle, no HMS "
-     "error, plate verified empty, nobody else's job ahead) before starting.",
+     "error, the camera thinks the plate is empty, after a failed print the owner confirmed the plate, nobody "
+     "else's job ahead) before starting. Only works when approved through Hermes or /home3d approve.",
      {"queue_item_id": {"type": "integer"},
       "allow_jump": {"type": "boolean", "description": "Owner explicitly allows skipping jobs ahead."}},
      ["queue_item_id"], _h_start),
     ("home3d_stop",
      "Stop, pause or resume the current 3D print. Anyone may stop or pause (\"dur\" = stop now); the reason "
-     "and who asked are logged. Resume needs the owner's approval.",
+     "and who asked are logged. Resume needs the owner's approval; with an active printer error (HMS) the "
+     "owner must also acknowledge it (ack_hms=true).",
      {"action": {"type": "string", "enum": ["stop", "pause", "resume"]},
-      "reason": {"type": "string", "description": "Why, in a few words."}},
+      "reason": {"type": "string", "description": "Why, in a few words."},
+      "ack_hms": {"type": "boolean", "description": "Resume only, owner only: resume although a printer error "
+                                                    "(HMS) is still active."}},
      ["action"], _h_stop),
     ("home3d_clear_plate",
      "Check or confirm the 3D printer build plate is clear. check = photo + plate check + bed temperature; "
-     "confirm = tell the printer manager the plate is clear (gated, owner approval).",
+     "confirm = tell the printer manager the plate is clear and record that a person confirmed it (needed "
+     "before the next start after a failed print; gated, owner approval).",
      {"action": {"type": "string", "enum": ["check", "confirm"]}}, ["action"], _h_clear_plate),
     ("home3d_household",
      "Recall who asked for which 3D prints at home. who = household members and who is talking; history = "

@@ -42,7 +42,7 @@ class FakeBackend(Backend):
         return self.st
 
     def queue(self, include_done=False):
-        return [q for q in self.items if include_done or q.status in ("pending", "printing")]
+        return [q for q in self.items if include_done or q.status.lower() in ("pending", "printing")]
 
     def snapshot(self, out_dir, lit=True):
         self.snaps += 1
@@ -172,11 +172,14 @@ def test_auto_eject_job_full_loop(rig):
     assert box[-1]["media"] == part_photo
     assert rig.store.human_needed() == []
 
-    # a manual job is waiting: tell the owner once, never start it
+    # a manual workshop job is waiting: tell the owner once (with a fresh photo), never start it
+    rig.store.upsert_job(8, name="Kalemlik.gcode.3mf", requester="Dad", state="queued")
     rig.b.items = [QueueItem(id=8, status="pending", name="Kalemlik.gcode.3mf", manual_start=True)]
+    snaps = rig.b.snaps
     (ready,) = rig.run(2)
     assert ready["kind"] == "ready_next" and "/home3d approve start 8" in ready["owner_text"]
-    assert ready["family_text"] == ""
+    assert "Kameraya göre tabla boş" in ready["owner_text"] and "jump" not in ready["owner_text"]
+    assert ready["family_text"] == "" and ready["owner_media"] and rig.b.snaps == snaps + 1
     assert rig.run(2) == []
 
 
@@ -212,8 +215,8 @@ def test_failed_print_resolves_requester_from_request(rig):
     rig.status(FAILED, job_name="Vazo", progress=40, layer=16, total_layers=40, bed_temp=55)
     (r,) = rig.run(2)
     assert r["kind"] == "failed"
-    assert r["family_text"] == '⚠️ Anneciğim, yazıcı durdu, "Vazo" yarıda kaldı (%40). Sam\'a haber verdim.'
-    assert "katman 16/40" in r["owner_text"] and r["owner_media"]
+    assert r["family_text"] == '⚠️ Anneciğim, yazıcı durdu, "bir vazo" yarıda kaldı (%40). Sam\'a haber verdim.'
+    assert "katman 16/40" in r["owner_text"] and '"Vazo" (#9)' in r["owner_text"] and r["owner_media"]
     assert rig.store.get_job(9)["state"] == "failed"
     assert rig.store.get_request(rid)["status"] == "failed"
     assert [m["kind"] for m in rig.store.human_needed()] == ["failure_check"]
@@ -239,6 +242,19 @@ def test_filament_runout_pause_once_and_new_hms_owner_only(rig):
     (h,) = rig.run(2)
     assert h["kind"] == "hms" and h["family_text"] == "" and "0300-0D00-0001-0003" in h["owner_text"]
     assert rig.run(2) == []
+
+
+def test_light_left_on_is_told_to_the_owner_once(rig):
+    rig.b.plate = PlateCheck(is_empty=True, difference_pct=1.8, light_ok=True,
+                             message="empty; light_left_on: the chamber light could not be switched off again (500)")
+    rig.store.upsert_job(13, name="Vazo", requester="Mum", eject_planned=0, state="queued")
+    rig.status(RUNNING, job_name="Vazo", progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(FINISH, job_name="Vazo", progress=100, layer=10, total_layers=10, bed_temp=26)
+    out = rig.run(16) + rig.run(16)
+    light = [r for r in out if r["kind"] == "light_left_on"]
+    assert len(light) == 1 and light[0]["family_text"] == "" and "ışığı" in light[0]["owner_text"]
+    assert not [r for r in rig.run(16) if r["kind"] == "light_left_on"]  # at most once every LIGHT_ALERT_S
 
 
 def test_harmless_hms_is_ignored(rig):
@@ -272,7 +288,9 @@ def test_first_pass_on_a_failed_printer_is_quiet_until_plate_clears():
     rig.b.plate = EMPTY
     assert rig.run(5) == []  # re-checks only every 15 min
     (c,) = rig.run(11)
-    assert c["kind"] == "plate_clear" and c["family_text"] == "" and "Tabla boş" in c["owner_text"]
+    assert c["kind"] == "plate_clear" and c["family_text"] == "" and "Kameraya göre tabla boş" in c["owner_text"]
+    assert "/home3d approve clear" in c["owner_text"]  # after a failure a person must confirm the plate
+    assert c["owner_media"] and Path(c["owner_media"]).is_file()
 
 
 def test_eject_miss_asks_a_person_and_logs_remove_part(rig):
@@ -388,11 +406,14 @@ def test_cron_script_template_copied_anywhere(tmp_path, monkeypatch):
     assert template.count("__PLUGIN_DIR__") == 1
     home = tmp_path / "hermes-home" / "scripts"
     home.mkdir(parents=True)
+    # the profile has the plugin switched on, so the installed copy really runs a watcher pass
+    (home.parent / "config.yaml").write_text("plugins:\n  enabled:\n    - home-3d-workshop\n", encoding="utf-8")
     script = home / "home3d_watch.py"
     script.write_text(template.replace("__PLUGIN_DIR__", str(ROOT)), encoding="utf-8")
     proc = _run_script(script)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""
+    assert (Store().kv_get(watcher.KV_KEY) or {}).get("initialized"), "the installed script ran no watcher pass"
 
 
 def test_cron_script_runs_in_place_and_fails_loudly_on_a_bad_plugin_dir(tmp_path):
@@ -401,3 +422,232 @@ def test_cron_script_runs_in_place_and_fails_loudly_on_a_bad_plugin_dir(tmp_path
     assert proc.returncode == 0 and proc.stdout == "", proc.stderr
     proc = _run_script(ROOT / "scripts" / "home3d_watch.py", {"HOME3D_PLUGIN_DIR": str(tmp_path / "nope")})
     assert proc.returncode == 1 and "cannot load the plugin" in proc.stderr
+
+
+# ---- fix round 1: whose job, what is next, honest plate wording ------------------------------------
+def _finish_and_clear(rig, name="Bardak", qid=50):
+    """One workshop print (no auto-eject) runs, finishes and is taken off: the plate phase is "clear"."""
+    rig.store.upsert_job(qid, name=name, requester="Dad", eject_planned=0, state="queued")
+    rig.status(RUNNING, job_name=name, progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(FINISH, job_name=name, progress=100, layer=10, total_layers=10, bed_temp=26)
+    rig.b.plate = OCCUPIED
+    rig.run(2)
+    rig.b.plate = EMPTY
+    out = rig.run(16)
+    assert "plate_clear" in kinds(out), out
+    return out
+
+
+def test_ready_next_announces_our_job_not_a_stale_foreign_one_ahead(rig):
+    rig.store.upsert_job(12, name="Kalemlik.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=73, status="pending", name="sabun_tabagi_v2.gcode.3mf", manual_start=True,
+                             position=1, created_at="2025-11-04T10:00:00Z"),
+                   QueueItem(id=12, status="pending", name="Kalemlik.gcode.3mf", manual_start=True, position=2)]
+    out = _finish_and_clear(rig)
+    ready = next(r for r in out if r["kind"] == "ready_next")
+    text = ready["owner_text"]
+    assert "/home3d approve start 12 jump" in text and '"sabun tabagi v2" (#73)' in text
+    assert "approve start 73" not in text and ready["owner_media"]
+    assert "queue_foreign" not in kinds(out)  # the foreign item was named in the same text
+    assert rig.run(2) == [] and rig.run(30) == []  # once per item
+
+
+def test_foreign_jobs_alone_are_announced_once_owner_only(rig):
+    rig.b.items = [QueueItem(id=73, status="pending", name="sabun_tabagi_v2.gcode.3mf", manual_start=True,
+                             created_at="2025-11-04T10:00:00Z")]
+    out = _finish_and_clear(rig)
+    (foreign,) = [r for r in out if r["kind"] == "queue_foreign"]
+    assert "ready_next" not in kinds(out)
+    assert '"sabun tabagi v2" (#73, eklenme 2025-11-04)' in foreign["owner_text"]
+    assert "approve start" not in foreign["owner_text"] and foreign["family_text"] == ""
+    assert rig.run(5) == []
+    # a second foreign item later: announced once too; our own job: ready_next with the jump hint
+    rig.b.items.append(QueueItem(id=74, status="Pending", name="kanca.gcode.3mf", manual_start=True))
+    assert kinds(rig.run(2)) == ["queue_foreign"]
+    rig.store.upsert_job(75, name="Vazo.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items.append(QueueItem(id=75, status="pending", name="Vazo.gcode.3mf", manual_start=True))
+    (ready,) = rig.run(2)
+    assert ready["kind"] == "ready_next" and "/home3d approve start 75 jump" in ready["owner_text"]
+    assert "#73" in ready["owner_text"] and "#74" in ready["owner_text"]
+
+
+def test_old_cancelled_workshop_id_is_not_ours(rig):
+    rig.store.upsert_job(73, name="eski", requester="Mum", state="cancelled")
+    rig.b.items = [QueueItem(id=73, status="pending", name="sabun_tabagi.gcode.3mf", manual_start=True)]
+    out = _finish_and_clear(rig)
+    assert "ready_next" not in kinds(out) and "queue_foreign" in kinds(out)
+
+
+def test_ready_next_after_a_failed_print_asks_for_the_plate_confirmation(rig):
+    rig.store.upsert_job(9, name="Vazo", requester="Mum", state="queued")
+    rig.status(RUNNING, job_name="Vazo", progress=30, layer=12, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.b.plate = OCCUPIED
+    rig.status(FAILED, job_name="Vazo", progress=40, layer=16, total_layers=40, bed_temp=26)
+    assert kinds(rig.run(2)) == ["failed"]
+    rig.store.upsert_job(10, name="Kalemlik.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=10, status="pending", name="Kalemlik.gcode.3mf", manual_start=True)]
+    rig.b.plate = EMPTY
+    out = rig.run(16)
+    assert kinds(out) == ["plate_clear", "ready_next"]
+    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+    assert "/home3d approve start 10" in out[1]["owner_text"]
+    rig.store.confirm_plate("Vazo", "Sam")  # the owner looked and confirmed: the next notice does not ask again
+    rig.store.upsert_job(11, name="Saksı.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=11, status="pending", name="Saksı.gcode.3mf", manual_start=True)]
+    (again,) = rig.run(2)
+    assert again["kind"] == "ready_next" and "/home3d approve clear" not in again["owner_text"]
+
+
+def test_idle_plate_check_in_the_dark_is_not_empty(rig):
+    rig.store.upsert_job(12, name="Kalemlik.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=12, status="pending", name="Kalemlik.gcode.3mf", manual_start=True)]
+    rig.b.plate = PlateCheck(is_empty=True, difference_pct=0.0, light_ok=False, message="light warning")
+    assert rig.run(16) == [] and rig.b.checks == 1
+    rig.b.plate = EMPTY
+    assert kinds(rig.run(16)) == ["ready_next"]
+
+
+def test_job_attribution_prefers_the_printing_queue_item(rig):
+    # an old workshop job and a new one share the name: the queue item that is printing decides
+    rig.store.upsert_job(5, name="kutu.gcode.3mf", requester="Mum", state="queued")
+    rig.store.upsert_job(6, name="kutu.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=5, status="pending", name="kutu.gcode.3mf"),
+                   QueueItem(id=6, status="printing", name="kutu.gcode.3mf")]
+    rig.status(RUNNING, job_name="kutu", progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(2)
+    assert rig.store.get_job(6)["state"] == "printing" and rig.store.get_job(5)["state"] == "queued"
+    rig.b.items[1].status = "completed"  # the queue moves on: the remembered item still decides
+    rig.status(FINISH, job_name="kutu", progress=100, layer=10, total_layers=10, bed_temp=26)
+    rig.b.plate = OCCUPIED
+    (fin,) = [r for r in rig.run(2) if r["kind"] == "finished"]
+    assert "Dad" in fin["family_text"] and rig.store.get_job(6)["state"] == "finished"
+    assert rig.store.get_job(5)["state"] == "queued"
+
+
+def test_a_foreign_print_is_nobodys_even_with_a_matching_old_name(rig):
+    rig.store.upsert_job(5, name="kutu.gcode.3mf", requester="Mum", state="queued")
+    mums = QueueItem(id=5, status="pending", name="kutu.gcode.3mf")  # Mum's job, still waiting in the queue
+    rig.b.items = [QueueItem(id=99, status="printing", name="kutu.gcode.3mf"), mums]  # 99: queued in Bambuddy
+    rig.status(RUNNING, job_name="kutu", progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(FAILED, job_name="kutu", progress=60, layer=6, total_layers=10, bed_temp=50)
+    (r,) = rig.run(2)
+    assert r["kind"] == "failed" and r["family_text"] == "" and rig.store.get_job(5)["state"] == "queued"
+    # a print started outside the queue: only an exact name counts ("kutu" is not "kutuphane_rafi")
+    rig.b.items = [mums]
+    rig.status(RUNNING, job_name="kutuphane_rafi", progress=10, layer=1, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(FINISH, job_name="kutuphane_rafi", progress=100, layer=10, total_layers=10, bed_temp=50)
+    (fin,) = [x for x in rig.run(2) if x["kind"] == "finished"]
+    assert fin["family_text"] == "" and rig.store.get_job(5)["state"] == "queued"
+
+
+def test_family_texts_use_the_request_words_owner_texts_the_file(rig):
+    rid = rig.store.add_request(requester="Mum", text="  çiçekler için küçük ama çok şık bir hediye kutusu lütfen ")
+    rig.store.upsert_job(14, request_id=rid, name="ROSE_BOX_v3_final.gcode.3mf", requester="Mum",
+                         eject_planned=0, state="queued")
+    rig.status(RUNNING, job_name="ROSE_BOX_v3_final", progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(PAUSE, job_name="ROSE_BOX_v3_final", progress=60, layer=6, total_layers=10, bed_temp=60,
+               hms=[RUNOUT])
+    (p,) = rig.run(2)
+    assert "ROSE" not in p["family_text"] and "çiçekler için küçük ama çok şık bir…" in p["family_text"]
+    assert '"ROSE BOX v3 final" (#14)' in p["owner_text"]
+    assert "/home3d approve resume" in p["owner_text"] and "resume ack" in p["owner_text"]
+    assert "home3d_stop" not in p["owner_text"]
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+def test_a_print_that_ends_in_idle_needs_the_owners_confirmation(rig):
+    """safety 6: RUNNING -> IDLE (cancel, power loss) raises "failed"; the camera then says empty. The plate
+    notice and "next job ready" must ask for /home3d approve clear first, and the failure is recorded for the
+    start gate (``Store.unconfirmed_failure``)."""
+    rig.store.upsert_job(9, name="Vazo", requester="Mum", state="queued")
+    rig.status(RUNNING, job_name="Vazo", progress=30, layer=12, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.b.plate = OCCUPIED
+    rig.status(IDLE, job_name="", bed_temp=26)
+    assert kinds(rig.run(2)) == ["failed"]
+    assert rig.store.unconfirmed_failure()["job_name"] == "Vazo"
+    rig.store.upsert_job(10, name="Kalemlik.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=10, status="pending", name="Kalemlik.gcode.3mf", manual_start=True)]
+    rig.b.plate = EMPTY
+    out = rig.run(16)
+    assert kinds(out) == ["plate_clear", "ready_next"]
+    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+
+
+def test_a_power_cycle_after_a_failure_does_not_forget_it(rig):
+    """e2e NEW-2: FAILED -> OFFLINE -> IDLE with an "empty" camera reading."""
+    rig.store.upsert_job(6, name="clip", requester="Mum", state="printing")
+    rig.status(RUNNING, job_name="clip", progress=30, layer=3, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.b.plate = OCCUPIED
+    rig.status(FAILED, job_name="clip", progress=31, layer=3, total_layers=40, bed_temp=50)
+    assert kinds(rig.run(2)) == ["failed"]
+    rig.status(OFFLINE, connected=False)
+    rig.run(2)
+    rig.store.upsert_job(7, name="seven", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=7, status="pending", name="seven", manual_start=True)]
+    rig.b.plate = EMPTY
+    rig.status(IDLE, job_name="", bed_temp=24)
+    out = rig.run(16)
+    assert "ready_next" in kinds(out)
+    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+    assert rig.store.unconfirmed_failure() is not None
+    rig.store.confirm_plate("", "Sam")
+    assert rig.store.unconfirmed_failure() is None
+
+
+def test_a_new_print_settles_an_old_failure(rig):
+    rig.store.record_failure("old", "watcher")
+    rig.status(RUNNING, job_name="started at the printer", progress=1, layer=1, total_layers=40, bed_temp=60)
+    rig.run(2)
+    assert rig.store.unconfirmed_failure() is None
+
+
+def test_first_pass_on_a_failed_printer_records_the_failure():
+    rig = Rig()
+    rig.b.plate = OCCUPIED
+    rig.status(FAILED, job_name="eski iş", progress=0, layer=75, total_layers=75, bed_temp=24)
+    rig.run()
+    assert rig.store.unconfirmed_failure()["job_name"] == "eski iş"
+
+
+def test_jobs_removed_or_cancelled_in_the_printer_manager_stop_being_ours(rig):
+    """safety 7: a store job left "queued" after its item was removed in the Bambuddy UI counted as ours
+    forever (a reused queue id would then pass the jump check)."""
+    rig.store.upsert_job(5, name="kutu", requester="Mum", state="queued", request_id=None)
+    rid = rig.store.add_request(requester="Mum", text="kutu")
+    rig.store.upsert_job(6, name="vazo", requester="Mum", state="queued", request_id=rid)
+    rig.store.upsert_job(8, name="klips", requester="Mum", state="queued")
+    rig.store.upsert_job(9, name="tabak", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=8, status="pending", name="klips", manual_start=True),
+                   QueueItem(id=6, status="cancelled", name="vazo"), QueueItem(id=9, status="completed", name="tabak")]
+    rig.run(2)
+    assert rig.store.get_job(6)["state"] == "cancelled"  # cancelled there: at once
+    assert rig.store.get_job(9)["state"] == "finished"  # printed while nobody watched
+    assert rig.store.get_request(rid)["status"] == "cancelled"
+    assert rig.store.get_job(5)["state"] == "queued"  # missing once: maybe an odd read
+    rig.run(2)
+    assert rig.store.get_job(5)["state"] == "cancelled" and "removed" in rig.store.get_job(5)["outcome"]
+    assert rig.store.get_job(8)["state"] == "queued" and rig.store.active_job_ids() == {8}
+
+
+def test_a_flaky_queue_read_cancels_nothing(rig):
+    rig.store.upsert_job(5, name="kutu", requester="Mum", state="queued")
+    rig.b.items = []
+    rig.run(2)
+    rig.b.items = [QueueItem(id=5, status="pending", name="kutu", manual_start=True)]
+    rig.run(2)
+    rig.b.items = []
+    rig.run(2)
+    assert rig.store.get_job(5)["state"] == "queued"
+
+
+def test_a_light_left_on_by_the_hook_reaches_the_owner(rig):
+    rig.store.kv_set("light_left_on:pending", {"ts": T0, "note": "light_left_on: could not switch off (500)"})
+    (r,) = rig.run(2)
+    assert r["kind"] == "light_left_on" and r["family_text"] == "" and rig.store.kv_get("light_left_on:pending") is None

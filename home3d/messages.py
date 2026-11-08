@@ -7,10 +7,17 @@ Family: one or two short warm lines, plain words, addressed to the requester (``
 ``requester``) when known, never English words inside Turkish. Owner: technical (state, layer, temps,
 HMS, links) but still short.
 
-ctx keys (all optional): persona, owner (owner display name), job, queue_item_id, requester, address_as,
-progress, layer, total_layers, duration_min, grams, bed_temp, nozzle_temp, hms_code, hms_message,
-wiki_url, filament (bool: the pause is a filament run-out), reason, eject_planned (bool), plate_diff,
-next_job, next_id, upgrade_title, upgrade_id, upgrade_label, evidence, window_days, model_ref,
+Family texts name the print by what the person asked for (``family_job``: the stored request text,
+shortened with ``short_text``) and fall back to ``job`` (the pretty file name); owner texts always use
+``job``. Plate wording is honest: the camera *thinks* the plate is empty, nothing is "verified".
+
+ctx keys (all optional): persona, owner (owner display name), job, family_job, queue_item_id, requester,
+address_as, progress, layer, total_layers, duration_min, grams, bed_temp, nozzle_temp, hms_code,
+hms_message, wiki_url, filament (bool: the pause is a filament run-out), reason, eject_planned (bool),
+plate_diff, next_job, next_id, ahead (list of {"id", "name"}: pending jobs ahead of ``next_id`` that the
+workshop did not queue), foreign (list of {"id", "name", "since"}: such jobs on their own),
+confirm_first (bool: the last print failed and nobody confirmed the plate yet), photo (bool: a fresh
+photo is attached), upgrade_title, upgrade_id, upgrade_label, evidence, window_days, model_ref,
 preview_url, offline_min.
 """
 
@@ -20,8 +27,11 @@ import re
 from typing import Any, Callable, Optional
 
 KINDS = ("started", "finished", "finished_ejected", "plate_not_clear", "eject_unverified", "plate_clear",
-         "failed", "paused", "hms", "offline", "ready_next", "upgrade_proposed", "eject_skipped")
-OWNER_ONLY = frozenset({"hms", "offline", "ready_next", "upgrade_proposed", "plate_clear"})
+         "failed", "paused", "hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "eject_skipped",
+         "light_left_on")
+OWNER_ONLY = frozenset({"hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "plate_clear",
+                        "light_left_on"})
+FAMILY_JOB_MAX = 40  # family texts quote at most this many characters of the request text
 AUDIENCES = ("owner", "family")
 
 _TR_BACK = set("aıou")
@@ -95,6 +105,17 @@ def dative(name: str) -> str:
     return f"{name}'{buffer}{'a' if back else 'e'}"
 
 
+def short_text(text: Any, limit: int = FAMILY_JOB_MAX) -> str:
+    """One line of at most ``limit`` characters, cut at a word boundary with "…" ("" for nothing)."""
+    t = re.sub(r"\s+", " ", _s(text)).strip().strip("\"'“”‘’«»").strip()
+    if len(t) <= limit:
+        return t
+    cut = t[: limit - 1]
+    if " " in cut and cut.rfind(" ") >= limit // 2:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 def _quote(job: Any, lang: str = "") -> str:
     """'"Rose box"'; without a name: "baskı" / "the print" (lang given) or ""."""
     j = _s(job)
@@ -115,6 +136,11 @@ def _cap(text: str) -> str:
 
 def _who(ctx: dict) -> str:
     return _s(ctx.get("address_as")) or _s(ctx.get("requester"))
+
+
+def _fjob(ctx: dict, tr: bool) -> str:
+    """The print as the family knows it: what they asked for, else the pretty file name, else "the print"."""
+    return _quote(short_text(ctx.get("family_job")) or ctx.get("job"), "tr" if tr else "en")
 
 
 def _owner_told(ctx: dict, lang: str) -> str:
@@ -208,7 +234,7 @@ def _link(ctx: dict) -> str:
 
 # ---- family templates -------------------------------------------------------------------------
 def _f_started(c: dict, tr: bool) -> str:
-    who, job, dur = _who(c), _quote(c.get("job"), "tr" if tr else "en"), duration(c.get("duration_min"), "tr" if tr else "en")
+    who, job, dur = _who(c), _fjob(c, tr), duration(c.get("duration_min"), "tr" if tr else "en")
     if tr:
         head = f"🖨️ {who}, {job} basılmaya başladı" if who else f"🖨️ {job} basılmaya başladı"
         first = head + (f", yaklaşık {dur} sürecek." if dur else ".")
@@ -221,7 +247,7 @@ def _f_started(c: dict, tr: bool) -> str:
 
 
 def _f_finished(c: dict, tr: bool) -> str:
-    who, job = _who(c), _quote(c.get("job"), "tr" if tr else "en")
+    who, job = _who(c), _fjob(c, tr)
     if tr:
         return (f"✅ {who}, {job} bitti, yazıcıda seni bekliyor." if who
                 else f"✅ {job} bitti, yazıcıda bekliyor.")
@@ -229,7 +255,7 @@ def _f_finished(c: dict, tr: bool) -> str:
 
 
 def _f_finished_ejected(c: dict, tr: bool) -> str:
-    who, job = _who(c), _quote(c.get("job"), "tr" if tr else "en")
+    who, job = _who(c), _fjob(c, tr)
     if tr:
         return (f"✅ {who}, {job} bitti. Otomatik düşürüldü, kutudan alabilirsin." if who
                 else f"✅ {job} bitti. Otomatik düşürüldü, kutudan alabilirsiniz.")
@@ -238,7 +264,7 @@ def _f_finished_ejected(c: dict, tr: bool) -> str:
 
 
 def _f_plate_not_clear(c: dict, tr: bool) -> str:
-    who, job = _who(c), _quote(c.get("job"), "tr" if tr else "en")
+    who, job = _who(c), _fjob(c, tr)
     if tr:
         return (f"🙏 {who}, {job} bitti ama tablada kaldı, kendi düşmedi. Müsait olunca alabilir misin?" if who
                 else f"🙏 {job} bitti ama tablada kaldı, kendi düşmedi. Biri alabilir mi?")
@@ -247,14 +273,14 @@ def _f_plate_not_clear(c: dict, tr: bool) -> str:
 
 
 def _f_eject_unverified(c: dict, tr: bool) -> str:
-    job = _quote(c.get("job"), "tr" if tr else "en")
+    job = _fjob(c, tr)
     if tr:
         return f"🙏 {job} bitti ama tablanın boş olduğundan emin olamadım. Biri bir bakabilir mi?"
     return f"🙏 {job} is done, but I couldn't tell whether the plate is empty. Could someone take a look?"
 
 
 def _f_failed(c: dict, tr: bool) -> str:
-    who, job, p = _who(c), _quote(c.get("job"), "tr" if tr else "en"), pct(c.get("progress"), "tr" if tr else "en")
+    who, job, p = _who(c), _fjob(c, tr), pct(c.get("progress"), "tr" if tr else "en")
     told = _owner_told(c, "tr" if tr else "en")
     if tr:
         head = f"⚠️ {who}, yazıcı durdu" if who else "⚠️ Yazıcı durdu"
@@ -264,17 +290,18 @@ def _f_failed(c: dict, tr: bool) -> str:
 
 
 def _f_paused(c: dict, tr: bool) -> str:
-    job, p = _quote(c.get("job"), "tr" if tr else "en"), pct(c.get("progress"), "tr" if tr else "en")
+    who, job, p = _who(c), _fjob(c, tr), pct(c.get("progress"), "tr" if tr else "en")
     told = _owner_told(c, "tr" if tr else "en")
+    head = f"⏸️ {who}, " if who else "⏸️ "
     if tr:
         why = ", filament bitti" if c.get("filament") else ""
-        return f"⏸️ {job} baskısı durakladı" + (f" ({p})" if p else "") + f"{why}. {told}"
+        return f"{head}{job} baskısı durakladı" + (f" ({p})" if p else "") + f"{why}. {told}"
     why = ", the filament ran out" if c.get("filament") else ""
-    return f"⏸️ {job} is paused" + (f" ({p})" if p else "") + f"{why}. {told}"
+    return f"{head}{job} is paused" + (f" ({p})" if p else "") + f"{why}. {told}"
 
 
 def _f_eject_skipped(c: dict, tr: bool) -> str:
-    job = _quote(c.get("job"), "tr" if tr else "en")
+    job = _fjob(c, tr)
     if tr:
         return f"ℹ️ {job} kendi düşmeyecek, bitince yazıcıdan alınması gerekecek."
     return f"ℹ️ {job} won't drop off by itself, someone will need to take it off when it's done."
@@ -309,8 +336,8 @@ def _o_finished(c: dict, tr: bool) -> str:
 def _o_finished_ejected(c: dict, tr: bool) -> str:
     d = _diff(c, "tr" if tr else "en")
     if tr:
-        return f"✅ {_job_ref(c)} otomatik düşürüldü, kamera tablayı boş görüyor" + (f" ({d})" if d else "") + "."
-    return f"✅ {_job_ref(c)} was pushed off; the camera sees an empty plate" + (f" ({d})" if d else "") + "."
+        return f"✅ {_job_ref(c)} otomatik düşürüldü, kameraya göre tabla boş" + (f" ({d})" if d else "") + "."
+    return f"✅ {_job_ref(c)} was pushed off; the camera thinks the plate is empty" + (f" ({d})" if d else "") + "."
 
 
 def _o_plate_not_clear(c: dict, tr: bool) -> str:
@@ -328,17 +355,40 @@ def _o_eject_unverified(c: dict, tr: bool) -> str:
     detail = ", ".join(x for x in (reason_text(c.get("reason"), lang), _diff(c, lang)) if x)
     if tr:
         return (f"❓ {_job_ref(c)}: otomatik düşürme doğrulanamadı" + (f" ({detail})" if detail else "")
-                + ". Kameraya bakıp tablayı kontrol et.")
+                + ". Kameraya bakıp tablayı kontrol et; boşsa /home3d approve clear.")
     return (f"❓ {_job_ref(c)}: auto-eject could not be verified" + (f" ({detail})" if detail else "")
-            + ". Check the plate on the camera.")
+            + ". Check the plate on the camera; if it is empty, /home3d approve clear.")
+
+
+def _camera_empty(c: dict, tr: bool) -> str:
+    """"the camera thinks the plate is empty (diff 1.8%)": the camera's opinion, never "verified"."""
+    d = _diff(c, "tr" if tr else "en")
+    if tr:
+        return "Kameraya göre tabla boş" + (f" ({d})" if d else "")
+    return "The camera thinks the plate is empty" + (f" ({d})" if d else "")
+
+
+def _confirm_first(c: dict, tr: bool) -> str:
+    if not c.get("confirm_first"):
+        return ""
+    if tr:
+        return "Son baskı yarıda kaldı: sıradaki işten önce tablaya bakıp /home3d approve clear ile onayla."
+    return "The last print failed: look at the plate and confirm it with /home3d approve clear before the next start."
+
+
+def _photo_hint(c: dict, tr: bool) -> str:
+    if not c.get("photo"):
+        return ""
+    return "Fotoğrafa bak, kamera ince parçaları kaçırabilir." if tr else "Check the photo: the camera can miss thin parts."
 
 
 def _o_plate_clear(c: dict, tr: bool) -> str:
-    d = _diff(c, "tr" if tr else "en")
     job = _job_ref(c)
     if tr:
-        return "✅ Tabla boş görünüyor" + (f" ({d})" if d else "") + (f", {job} alınmış." if job else ".")
-    return "✅ The plate looks empty" + (f" ({d})" if d else "") + (f", {job} was taken off." if job else ".")
+        first = "✅ " + _camera_empty(c, tr) + (f", {job} alınmış görünüyor." if job else ".")
+    else:
+        first = "✅ " + _camera_empty(c, tr) + (f"; {job} looks taken off." if job else ".")
+    return _lines(first, _confirm_first(c, tr), _photo_hint(c, tr))
 
 
 def _o_failed(c: dict, tr: bool) -> str:
@@ -356,13 +406,17 @@ def _o_paused(c: dict, tr: bool) -> str:
     first = _join([head, pct(c.get("progress"), lang), _layer(c, lang), _for(c, lang)])
     hms = _hms_line(c, lang)
     if hms:
-        tail = ("Filament değişince devam için home3d_stop resume." if c.get("filament") and tr else
-                "Swap the filament, then home3d_stop resume." if c.get("filament") else
-                "Hata giderilince devam için home3d_stop resume." if tr else
-                "Resume with home3d_stop resume once it is fixed.")
+        ack = (" (HMS hâlâ etkinse: /home3d approve resume ack)" if tr
+               else " (if the HMS is still active: /home3d approve resume ack)")
+        tail = ("Filamenti değiştirince: /home3d approve resume" if c.get("filament") and tr else
+                "Swap the filament, then: /home3d approve resume" if c.get("filament") else
+                "Hata giderilince: /home3d approve resume" if tr else
+                "Once it is fixed: /home3d approve resume") + ack + "."
     else:
-        tail = ("HMS yok: biri yazıcıdan ya da uygulamadan duraklatmış olabilir. Devam ettirmedim." if tr
-                else "No HMS: someone may have paused it on the printer or in the app. I did not resume it.")
+        tail = ("HMS yok: biri yazıcıdan ya da uygulamadan duraklatmış olabilir. Devam ettirmedim; "
+                "devam için: /home3d approve resume." if tr
+                else "No HMS: someone may have paused it on the printer or in the app. I did not resume it; "
+                     "to resume: /home3d approve resume.")
     return _lines(first, hms, tail)
 
 
@@ -380,15 +434,51 @@ def _o_offline(c: dict, tr: bool) -> str:
     return ("📴 Printer unreachable" + (f" for {mins} min" if mins else "") + (f" ({reason})" if reason else "") + ".")
 
 
+def _refs(items: Any, lang: str, with_since: bool = False) -> str:
+    """'"Soap dish" (#73), "Hook" (#74)' for a list of {"id", "name"[, "since"]} (or plain strings)."""
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            if _s(it):
+                out.append(_s(it))
+            continue
+        name, qid, since = _quote(it.get("name")), _s(it.get("id")), _s(it.get("since"))
+        extra = ", ".join(x for x in (f"#{qid}" if qid else "",
+                                      (f"eklenme {since}" if lang == "tr" else f"added {since}")
+                                      if with_since and since else "") if x)
+        out.append(_join([name, f"({extra})" if extra else ""], " ") or f"#{qid}")
+    return ", ".join(x for x in out if x)
+
+
 def _o_ready_next(c: dict, tr: bool) -> str:
     lang = "tr" if tr else "en"
     nid, name = _s(c.get("next_id")), _quote(c.get("next_job"))
     ref = f"{name} (#{nid})" if name and nid else name or f"#{nid}"
+    ahead = _refs(c.get("ahead"), lang)
+    cmd = f"/home3d approve start {nid}" + (" jump" if ahead else "") if nid else ""
     if tr:
-        first = _join([f"▶️ Tabla boş, sıradaki iş hazır: {ref}", _for(c, lang)])
-        return _lines(first, f"Başlatmak için: /home3d approve start {nid}" if nid else "")
-    first = _join([f"▶️ Plate clear, next job ready: {ref}", _for(c, lang)])
-    return _lines(first, f"To start it: /home3d approve start {nid}" if nid else "")
+        first = _join([f"▶️ {_camera_empty(c, tr)}. Sıradaki atölye işi hazır: {ref}", _for(c, lang)])
+        foreign = (f"Önünde atölyeden eklenmemiş iş var: {ahead}. Onları ben başlatmam; bizimkini öne almak için "
+                   "komutun sonunda jump var." if ahead else "")
+        start = (("Fotoğrafa bakıp başlatmak için: " if c.get("photo") else "Başlatmak için: ") + cmd) if cmd else ""
+    else:
+        first = _join([f"▶️ {_camera_empty(c, tr)}. Next workshop job ready: {ref}", _for(c, lang)])
+        foreign = (f"Ahead of it, not queued through the workshop: {ahead}. I never start those; the command below "
+                   "jumps ahead of them." if ahead else "")
+        start = (("Check the photo, then start it: " if c.get("photo") else "To start it: ") + cmd) if cmd else ""
+    return _lines(first, foreign, _confirm_first(c, tr), start)
+
+
+def _o_queue_foreign(c: dict, tr: bool) -> str:
+    lang = "tr" if tr else "en"
+    refs = _refs(c.get("foreign"), lang, with_since=True)
+    if not refs:
+        return ""
+    if tr:
+        return (f"ℹ️ Kuyrukta atölye üzerinden eklenmemiş iş bekliyor: {refs}. Ben başlatmam ve önermem; "
+                "gerekiyorsa Bambuddy'den başlat ya da kaldır.")
+    return (f"ℹ️ Waiting in the queue, not added through the workshop: {refs}. I won't start or suggest it; start or "
+            "remove it in Bambuddy if needed.")
 
 
 def _o_upgrade_proposed(c: dict, tr: bool) -> str:
@@ -417,6 +507,15 @@ def _o_eject_skipped(c: dict, tr: bool) -> str:
     return f"ℹ️ Auto-eject is off for {_job_ref(c)}" + (f": {reason}" if reason else "") + ". The part must be taken off by hand."
 
 
+def _o_light_left_on(c: dict, tr: bool) -> str:
+    """The chamber light was switched on for a camera check and could not be switched off again."""
+    if tr:
+        return ("💡 Kamera kontrolü için açtığım hazne ışığı kapanmadı, hâlâ açık. İstersen yazıcıdan ya da Bambu "
+                "Handy'den kapat.")
+    return ("💡 I switched the chamber light on for a camera check and could not switch it off again: it is still "
+            "on. Switch it off on the printer or in Bambu Handy if you want.")
+
+
 _FAMILY: dict[str, Callable[[dict, bool], str]] = {
     "started": _f_started, "finished": _f_finished, "finished_ejected": _f_finished_ejected,
     "plate_not_clear": _f_plate_not_clear, "eject_unverified": _f_eject_unverified, "failed": _f_failed,
@@ -426,7 +525,8 @@ _OWNER: dict[str, Callable[[dict, bool], str]] = {
     "started": _o_started, "finished": _o_finished, "finished_ejected": _o_finished_ejected,
     "plate_not_clear": _o_plate_not_clear, "eject_unverified": _o_eject_unverified, "plate_clear": _o_plate_clear,
     "failed": _o_failed, "paused": _o_paused, "hms": _o_hms, "offline": _o_offline, "ready_next": _o_ready_next,
-    "upgrade_proposed": _o_upgrade_proposed, "eject_skipped": _o_eject_skipped,
+    "queue_foreign": _o_queue_foreign, "upgrade_proposed": _o_upgrade_proposed, "eject_skipped": _o_eject_skipped,
+    "light_left_on": _o_light_left_on,
 }
 
 

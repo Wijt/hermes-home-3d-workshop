@@ -15,6 +15,7 @@ from home3d_ws.home3d.backends.base import (FAILED, FINISH, IDLE, PAUSE, RUNNING
                                             LibraryFile, ModelCard, ModelInstance, PlateCheck, PrinterStatus,
                                             QueueItem, Snapshot, SliceResult, Tray)
 from home3d_ws.home3d.config import Settings
+from home3d_ws.home3d.hooks import approval_target, hms_ack_detail
 from home3d_ws.home3d.runtime import Runtime
 from home3d_ws.home3d.store import Store
 
@@ -79,7 +80,7 @@ class FakeBackend(Backend):
         return self.state
 
     def queue(self, include_done=False):
-        return [q for q in self.items if include_done or q.status in ("pending", "printing")]
+        return [q for q in self.items if include_done or q.status.lower() in ("pending", "printing")]
 
     def snapshot(self, out_dir, lit=True):
         self.calls.append(("snapshot",))
@@ -223,6 +224,30 @@ def call(rt, name, args=None, session="s-mum"):
     return json.loads(raw)
 
 
+GATED = {"home3d_start": "start", "home3d_clear_plate": "clear_plate", "home3d_stop": "resume"}
+
+
+def approve(rt, name, args, session):
+    """What the pre_tool_call hook does for an owner session whose gate passed: one single-use pass."""
+    qid = args.get("queue_item_id")
+    target = approval_target(GATED[name], int(qid) if qid is not None else None, bool(args.get("allow_jump")))
+    detail = ""
+    if GATED[name] == "resume" and args.get("ack_hms"):  # the hook records the printer errors the owner was shown
+        detail = hms_ack_detail([h.code for h in rt.backend.status().blocking_hms])
+    rt.store.issue_pass(name, target, session, detail=detail)
+
+
+def later(rt):
+    """More than 90 s pass: the runtime's shared "plate is empty" answer is no longer reused."""
+    rt.forget_plate_check()
+
+
+def gated(rt, name, args, session="s-owner"):
+    """An approved call: pass issued for exactly this call, then the handler."""
+    approve(rt, name, args, session)
+    return call(rt, name, args, session)
+
+
 def sliced(rt, fid=1, **args):
     return call(rt, "home3d_slice", {"library_file_id": fid, **args})
 
@@ -282,6 +307,19 @@ def test_status(rt, be):
     assert out["watcher"]["fresh"] is False and "timed out" in out["watcher"]["error"]
 
 
+def test_status_and_list_call_only_active_jobs_ours(rt, be):
+    _, q = queued(rt)
+    rt.store.upsert_job(q["queue_item_id"], state="cancelled")  # e.g. an id an old workshop job once had
+    entry = call(rt, "home3d_status")["queue"][0]
+    assert entry["ours"] is False and "requester" not in entry
+    assert call(rt, "home3d_queue", {"action": "list"})["items"][0]["ours"] is False
+
+
+def test_tools_use_public_store_api_only():
+    src = Path(tools_mod.__file__).read_text(encoding="utf-8")
+    assert "_rows(" not in src and "_exec(" not in src
+
+
 def test_status_offline(rt, be, monkeypatch):
     monkeypatch.setattr(be, "status", lambda: (_ for _ in ()).throw(BackendError("timed out")))
     out = call(rt, "home3d_status")
@@ -292,6 +330,7 @@ def test_camera(rt, be):
     out = call(rt, "home3d_camera", {"check_plate": True})
     assert out["ok"] and Path(out["path"]).is_file() and Path(out["path"]).parent == rt.media_dir.resolve()
     assert out["media_line"] == f"MEDIA:{out['path']}" and out["plate"]["is_empty"] is True
+    assert "light_ok" in out["plate"] and "opinion" in out["plate"]["note"]
     assert not call(rt, "home3d_camera").get("plate")
 
 
@@ -319,6 +358,16 @@ def test_import_records_request(rt, be):
     again = call(rt, "home3d_import", {"model_id": 78, "profile_id": 782, "request_id": out["request_id"]})
     assert again["request_id"] == out["request_id"] and be.called("import")[-1] == ("import", 78, 782)
     assert call(rt, "home3d_import", {})["ok"] is False
+
+
+def test_import_needs_the_requesters_own_words_for_a_new_request(rt, be):
+    """Fix round 2 (e2e F4): family texts name the print by request_text, so a new request never falls back to the
+    English MakerWorld title."""
+    out = call(rt, "home3d_import", {"model_id": 77})
+    assert out["ok"] is False and "request_text" in out["error"] and "çiçek kutusu" in out["error"]
+    assert be.called("import") == []
+    ok = call(rt, "home3d_import", {"model_id": 77, "request_text": "çiçek kutusu"})
+    assert rt.store.get_request(ok["request_id"])["text"] == "çiçek kutusu"
 
 
 def test_customize_scale(rt, be):
@@ -349,7 +398,7 @@ def test_customize_template_without_openscad(rt, monkeypatch):
 
 # ---- slice ----------------------------------------------------------------------------------------
 def test_slice_auto_eject_eligible(rt, be):
-    req = call(rt, "home3d_import", {"model_id": 5})
+    req = call(rt, "home3d_import", {"model_id": 5, "request_text": "vase"})
     out = sliced(rt, req["library_file_id"], colour="kırmızı")
     assert out["ok"] and out["eject"]["planned"] is True and out["eject"]["push_z"] == 2.5
     assert out["presets"] == {"printer": AUTO, "process": "0.20mm Standard @BBL A1", "filament": "11"}
@@ -402,7 +451,7 @@ def test_slice_without_autoeject_preset_and_fallbacks(be, tmp_path):
 
 # ---- queue ----------------------------------------------------------------------------------------
 def test_queue_add_records_job(rt, be):
-    req = call(rt, "home3d_import", {"model_id": 5})
+    req = call(rt, "home3d_import", {"model_id": 5, "request_text": "vase"})
     s = sliced(rt, req["library_file_id"])
     out = call(rt, "home3d_queue", {"action": "add", "sliced_file_id": s["sliced_file_id"], "ams_slot": 1})
     assert out["ok"] and out["manual_start"] is True and out["ams_mapping"] == [1] and out["eject_planned"]
@@ -450,41 +499,176 @@ def test_queue_remove_permissions(rt, be):
 # ---- start ----------------------------------------------------------------------------------------
 def test_start_ok(rt, be):
     _, q = queued(rt)
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]}, session="s-owner")
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["ok"] and out["requester"] == "Mum" and out["eject_planned"] is True
     assert be.called("start") == [("start", q["queue_item_id"])] and be.called("check_plate")
     job = rt.store.get_job(q["queue_item_id"])
     assert job["state"] == "printing" and job["started_ts"]
     assert rt.store.request_for_queue_item(q["queue_item_id"]) is None  # no request (sliced directly)
+    assert not rt.store.peek_pass("home3d_start", str(q["queue_item_id"]), "s-owner")  # used up
+
+
+@pytest.mark.parametrize("name,args", [("home3d_start", {"queue_item_id": 0}),
+                                       ("home3d_clear_plate", {"action": "confirm"}),
+                                       ("home3d_stop", {"action": "resume", "reason": "x"})])
+def test_gated_handlers_refuse_without_a_pass(rt, be, name, args):
+    """ctx.dispatch_tool skips pre_tool_call: a direct handler call (any session, even the owner's) does nothing."""
+    if name == "home3d_start":
+        _, q = queued(rt)
+        args = {"queue_item_id": q["queue_item_id"]}
+    if name == "home3d_stop":
+        be.state.state, be.state.job_name = PAUSE, "vase"
+    be.state.bed_temp = 24.0
+    before = list(be.calls)
+    for session in ("s-owner", "s-mum", None):
+        raw = tools(rt)[name](dict(args), **({"session_id": session} if session else {}))
+        out = json.loads(raw)
+        assert out["ok"] is False and out["blocked"] and "no approval pass found" in out["error"], out
+        assert out["codes"] == ["no_pass"]
+    assert be.calls == before  # not even a status read or a camera check
+    for kind in ("start", "resume", "mark_plate_cleared"):
+        assert not be.called(kind)
+
+
+def test_a_pass_is_bound_to_session_target_and_single_use(rt, be):
+    _, q = queued(rt)
+    qid = q["queue_item_id"]
+    approve(rt, "home3d_start", {"queue_item_id": qid}, "s-owner")
+    assert call(rt, "home3d_start", {"queue_item_id": qid}, "s-mum")["codes"] == ["no_pass"]  # other session
+    assert call(rt, "home3d_start", {"queue_item_id": qid, "allow_jump": True},
+                "s-owner")["codes"] == ["no_pass"]  # a jump needs its own pass
+    approve(rt, "home3d_start", {"queue_item_id": qid}, "s-owner")
+    be.state.state = RUNNING  # gate refuses: the pass is still used up
+    assert "busy" in call(rt, "home3d_start", {"queue_item_id": qid}, "s-owner")["codes"]
+    be.state.state = IDLE
+    assert call(rt, "home3d_start", {"queue_item_id": qid}, "s-owner")["codes"] == ["no_pass"]
+    assert not be.called("start")
+    tr = Runtime(settings=settings(language="tr"), store=rt.store, backend=be)
+    assert call(tr, "home3d_start", {"queue_item_id": qid}, "s-owner")["message"].startswith("Bu işlem")
+
+
+def test_store_failure_authorises_nothing(rt, be, monkeypatch):
+    _, q = queued(rt)
+    approve(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]}, "s-owner")
+    for name in ("consume_pass", "take_pass"):
+        monkeypatch.setattr(rt.store, name, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db locked")))
+    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]}, "s-owner")
+    assert out["blocked"] and not be.called("start")
 
 
 def test_start_blocked_by_plate_and_state(rt, be):
     _, q = queued(rt)
+    args = {"queue_item_id": q["queue_item_id"]}
     be.plate = PlateCheck(is_empty=None, difference_pct=22.0, message="uncertain")
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    out = gated(rt, "home3d_start", args)
     assert out["ok"] is False and out["blocked"] and "plate_uncertain" in out["codes"]
     be.plate, be.state.state = PlateCheck(is_empty=True), RUNNING
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
-    assert "busy" in out["codes"]
+    assert "busy" in gated(rt, "home3d_start", args)["codes"]
     be.state.state = IDLE
     be.state.hms = [HMSError(code="0700-2000-0002-0001", message="filament runout")]
-    assert "hms" in call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})["codes"]
+    assert "hms" in gated(rt, "home3d_start", args)["codes"]
+    be.state.hms = []
+    later(rt)
+    be.plate = PlateCheck(is_empty=True, difference_pct=1.0, light_ok=False, message="light warning")
+    assert "plate_dark" in gated(rt, "home3d_start", args)["codes"]
     assert not be.called("start")
+
+
+def test_start_after_a_failed_print_needs_the_owners_plate_confirmation(rt, be):
+    _, q = queued(rt)
+    args = {"queue_item_id": q["queue_item_id"]}
+    be.state.state, be.state.job_name, be.state.bed_temp = FAILED, "old_part", 26.0
+    out = gated(rt, "home3d_start", args)  # the camera thinks the plate is empty: not enough after a failure
+    assert out["ok"] is False and "after_failure" in out["codes"] and not be.called("start")
+    clear = gated(rt, "home3d_clear_plate", {"action": "confirm"})
+    assert clear["ok"] and clear["cleared"] and clear["confirmed_for"] == "old_part"
+    assert rt.store.plate_confirmed("old_part") and not rt.store.plate_confirmed("other_part")
+    out = gated(rt, "home3d_start", args)
+    assert out["ok"] and be.called("start")
+
+
+def test_start_handler_remembers_a_failure_the_printer_forgot(rt, be):
+    """safety 6 / e2e NEW-2 at the handler: IDLE after a power cycle, empty job name, camera "empty"."""
+    _, q = queued(rt)
+    args = {"queue_item_id": q["queue_item_id"]}
+    be.state.state, be.state.job_name = IDLE, ""
+    rt.store.record_failure("clip", "watcher")
+    out = gated(rt, "home3d_start", args)
+    assert out["ok"] is False and "after_failure" in out["codes"] and not be.called("start")
+    clear = gated(rt, "home3d_clear_plate", {"action": "confirm"})
+    assert clear["ok"] and rt.store.unconfirmed_failure() is None
+    assert clear["next_job"]["id"] == q["queue_item_id"]  # the owner is told what to start next
+    assert gated(rt, "home3d_start", args)["ok"] and be.called("start")
+
+
+def test_band_reading_after_a_failure_can_be_confirmed_by_the_owner(rt, be):
+    """e2e NEW-1 at the handlers: check says can_confirm, confirm records it, and the start then passes."""
+    _, q = queued(rt)
+    args = {"queue_item_id": q["queue_item_id"]}
+    be.state.state, be.state.job_name, be.state.bed_temp = FAILED, "old_part", 26.0
+    be.plate = PlateCheck(is_empty=None, difference_pct=19.9, message="uncertain: band", light_ok=True,
+                          uncertain_band=True)
+    chk = call(rt, "home3d_clear_plate", {"action": "check"})
+    assert chk["can_confirm"] is True and chk["plate"]["uncertain_band"] is True
+    assert any("confirm the plate is clear yourself" in w for w in chk["warnings"])
+    assert "after_failure" in gated(rt, "home3d_start", args)["codes"]
+    assert gated(rt, "home3d_clear_plate", {"action": "confirm"})["cleared"]
+    out = gated(rt, "home3d_start", args)
+    assert out["ok"] and any("owner confirmed" in w for w in out["warnings"])
+
+
+def test_start_handler_skips_the_camera_when_the_printer_blocks(rt, be):
+    _, q = queued(rt)
+    be.state.state = RUNNING
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert out["codes"] == ["busy"] and not be.called("check_plate")
+
+
+def test_start_handler_reports_a_light_left_on(rt, be):
+    _, q = queued(rt)
+    be.plate = PlateCheck(is_empty=True, difference_pct=1.0, light_ok=True,
+                          message="empty (light_left_on: the chamber light could not be switched off again)")
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert out["ok"] and any("light_left_on" in w for w in out["warnings"])
+
+
+def test_start_after_finish_warns_camera_only(rt, be):
+    _, q = queued(rt)
+    be.state.state, be.state.job_name = FINISH, "old_part"
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert out["ok"] and any("only the camera" in w for w in out["warnings"])
+
+
+def test_start_shares_the_hooks_plate_check(rt, be):
+    _, q = queued(rt)
+    rt.plate_check()  # what pre_tool_call did a moment ago
+    gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert len(be.called("check_plate")) == 1
 
 
 def test_start_never_jumps_someone_elses_job(rt, be):
     family = be.queue_add(1)  # queued outside the workshop, ahead of ours
     _, q = queued(rt)
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["ok"] is False and "jump" in out["codes"] and not be.called("start")
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"], "allow_jump": True})
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"], "allow_jump": True})
     assert out["ok"] and any(str(family.id) in w for w in out["warnings"])
+
+
+def test_jump_check_ignores_old_workshop_ids(rt, be):
+    family = be.queue_add(1)
+    rt.store.upsert_job(family.id, name="old", state="cancelled")  # an id an old, cancelled workshop job had
+    family.status = "Pending"  # status case does not matter
+    _, q = queued(rt)
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert "jump" in out["codes"] and not be.called("start")
 
 
 def test_start_blocked_in_cron(be, tmp_path):
     rt = Runtime(CronCtx(), settings=settings(), store=Store(tmp_path / "c.db"), backend=be)
+    rt.store.remember_sender("s-owner", OWNER, "whatsapp")
     _, q = queued(rt)
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["ok"] is False and "in_cron" in out["codes"] and not be.called("start")
 
 
@@ -492,15 +676,15 @@ def test_start_message_in_household_language(be, tmp_path):
     rt = Runtime(settings=settings(language="tr"), store=Store(tmp_path / "t.db"), backend=be)
     be.plate = PlateCheck(is_empty=False, difference_pct=60.0)
     _, q = queued(rt)
-    out = call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["message"].startswith("Başlatamam") and out["error"].startswith("Cannot start")
 
 
 # ---- stop / pause / resume ------------------------------------------------------------------------
 def test_stop_logs_who_and_reason(rt, be):
     _, q = queued(rt)
-    call(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]}, session="s-owner")
-    out = call(rt, "home3d_stop", {"action": "stop", "reason": "spaghetti"}, session="s-dad")
+    gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    out = call(rt, "home3d_stop", {"action": "stop", "reason": "spaghetti"}, session="s-dad")  # no pass needed
     assert out["ok"] and out["by"] == "Dad" and be.called("stop")
     ev = rt.store.events(kind="stop_request")[0]
     assert json.loads(ev["payload"])["who"] == "Dad" and json.loads(ev["payload"])["reason"] == "spaghetti"
@@ -519,29 +703,70 @@ def test_stop_without_status_still_stops(rt, be, monkeypatch):
 
 def test_pause_resume(rt, be, tmp_path):
     be.state.state, be.state.job_name = RUNNING, "vase"
-    assert call(rt, "home3d_stop", {"action": "pause", "reason": "filament"})["ok"] and be.called("pause")
+    paused = call(rt, "home3d_stop", {"action": "pause", "reason": "filament"})
+    assert paused["ok"] and be.called("pause") and "/home3d approve resume" in paused["next"]
     cron = Runtime(CronCtx(), settings=settings(), store=rt.store, backend=be)
-    assert call(cron, "home3d_stop", {"action": "resume", "reason": "ok"})["ok"] is False
-    out = call(rt, "home3d_stop", {"action": "resume", "reason": "swapped"}, session="s-owner")
+    resume = {"action": "resume", "reason": "ok"}
+    assert "in_cron" in gated(cron, "home3d_stop", resume)["codes"]
+    out = gated(rt, "home3d_stop", {"action": "resume", "reason": "swapped"})
     assert out["ok"] and be.called("resume")
-    assert call(rt, "home3d_stop", {"action": "resume", "reason": "x"})["ok"] is False  # not paused
+    assert "not_paused" in gated(rt, "home3d_stop", resume)["codes"]  # not paused any more
+
+
+def test_resume_with_an_active_printer_error_needs_the_owners_ack(rt, be):
+    be.state.state, be.state.job_name = PAUSE, "vase"
+    be.state.hms = [HMSError(code="0C00-0300-0002-0001", message="first layer defect")]
+    out = gated(rt, "home3d_stop", {"action": "resume"})
+    assert out["blocked"] and "hms_unacknowledged" in out["codes"] and not be.called("resume")
+    # ack_hms from someone who is not the owner does not count (even with a pass)
+    out = gated(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, session="s-mum")
+    assert "hms_unacknowledged" in out["codes"] and not be.called("resume")
+    out = gated(rt, "home3d_stop", {"action": "resume", "ack_hms": True})
+    assert out["ok"] and be.called("resume") and any("0C00-0300-0002-0001" in w for w in out["warnings"])
+    ev = json.loads(rt.store.events(kind="resume_request")[0]["payload"])
+    assert ev["hms_acknowledged"] == ["0C00-0300-0002-0001"]
+
+
+def test_the_hms_ack_covers_only_the_errors_the_owner_was_shown(rt, be):
+    """Fix round 2 (safety 2): a new printer error that appears while Hermes' prompt waits is not acknowledged."""
+    be.state.state, be.state.job_name = PAUSE, "vase"
+    be.state.hms = [HMSError(code="0700-2000-0002-0001", message="filament ran out")]
+    approve(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, "s-owner")  # the owner saw the filament code
+    be.state.hms.append(HMSError(code="0300-0100-0001-0007", message="heatbed fault"))  # a new fatal error
+    out = call(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, "s-owner")
+    assert out["blocked"] and "hms_unacknowledged" in out["codes"] and not be.called("resume")
+    assert "0300-0100-0001-0007" in out["error"]
+    # a pass without any acknowledged codes never acknowledges anything
+    be.state.hms = [HMSError(code="0700-2000-0002-0001", message="filament ran out")]
+    rt.store.issue_pass("home3d_stop", "", "s-owner")
+    out = call(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, "s-owner")
+    assert out["blocked"] and "hms_unacknowledged" in out["codes"] and not be.called("resume")
+    # the error the owner saw cleared meanwhile: fewer errors than acknowledged is fine
+    approve(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, "s-owner")
+    be.state.hms = []
+    out = call(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, "s-owner")
+    assert out["ok"] and be.called("resume")
 
 
 # ---- clear plate ----------------------------------------------------------------------------------
 def test_clear_plate_check_and_confirm(rt, be):
     _, q = queued(rt)
     rt.store.upsert_job(q["queue_item_id"], state="finished")
-    be.state.state, be.state.bed_temp = FINISH, 55.0
-    chk = call(rt, "home3d_clear_plate", {"action": "check"})
+    be.state.state, be.state.job_name, be.state.bed_temp = FINISH, "vase", 55.0
+    chk = call(rt, "home3d_clear_plate", {"action": "check"})  # anyone may look, no pass
     assert chk["ok"] and chk["media_line"].startswith("MEDIA:") and chk["can_confirm"] is False
-    hot = call(rt, "home3d_clear_plate", {"action": "confirm"})
+    hot = gated(rt, "home3d_clear_plate", {"action": "confirm"})
     assert hot["ok"] is False and "bed_hot" in hot["codes"] and not be.called("mark_plate_cleared")
+    be.state.bed_temp = None
+    assert "bed_unknown" in gated(rt, "home3d_clear_plate", {"action": "confirm"})["codes"]
     be.state.bed_temp = 26.0
-    out = call(rt, "home3d_clear_plate", {"action": "confirm"}, session="s-owner")
-    assert out["ok"] and out["cleared"] and be.called("mark_plate_cleared")
+    out = gated(rt, "home3d_clear_plate", {"action": "confirm"})
+    assert out["ok"] and out["cleared"] and be.called("mark_plate_cleared") and out["by"] == "Owner"
     assert rt.store.get_job(q["queue_item_id"])["state"] == "cleared"
+    assert rt.store.plate_confirmed("vase")
+    later(rt)
     be.plate = PlateCheck(is_empty=False, difference_pct=70.0)
-    assert "plate_occupied" in call(rt, "home3d_clear_plate", {"action": "confirm"})["codes"]
+    assert "plate_occupied" in gated(rt, "home3d_clear_plate", {"action": "confirm"})["codes"]
 
 
 # ---- household ------------------------------------------------------------------------------------
@@ -578,6 +803,7 @@ def test_human_needed_to_upgrade_flow(rt):
     ups = call(rt, "home3d_upgrades", {"action": "list"})
     assert ups["upgrades"][0]["id"] == uid and ups["upgrades"][0]["status"] == "proposed"
     assert call(rt, "home3d_upgrades", {"action": "accept", "upgrade_id": uid}, session="s-mum")["ok"] is False
+    assert call(rt, "home3d_upgrades", {"action": "accept", "upgrade_id": uid}, session="s-nobody")["ok"] is False
     assert call(rt, "home3d_upgrades", {"action": "installed", "upgrade_id": uid},
                 session="s-owner")["ok"] is False  # not accepted yet
     acc = call(rt, "home3d_upgrades", {"action": "accept", "upgrade_id": uid, "note": "do it"}, session="s-owner")

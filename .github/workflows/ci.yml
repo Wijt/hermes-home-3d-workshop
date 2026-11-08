@@ -36,8 +36,37 @@ jobs:
           sys.modules["home3d_ws"] = mod
           spec.loader.exec_module(mod)
           from home3d_ws.home3d.cli import run_demo
-          sys.exit(0 if run_demo(lang="en")["ok"] else 1)
+          runs = [run_demo(lang=lang) for lang in ("en", "tr")]
+          print("demo seconds:", [r.get("seconds") for r in runs])
+          sys.exit(0 if all(r["ok"] for r in runs) else 1)
           EOF
+
+  hermes-validate:
+    # The check the Hermes plugin catalog runs: install Hermes v0.22.5 from its git tag (Python 3.14 via uv, the
+    # locked dependency set) and validate this checkout in a throwaway HERMES_HOME (never a real one). The same
+    # steps pass locally; if a runner-side change ever breaks the Hermes install itself, mark this job
+    # continue-on-error rather than skipping it, and say why here.
+    name: hermes plugins validate (Hermes v0.22.5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HERMES_TAG: v0.22.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Hermes ${{ env.HERMES_TAG }} (git tag, Python 3.14, uv sync --frozen)
+        run: |
+          git clone --quiet --depth 1 --branch "$HERMES_TAG" https://github.com/NousResearch/hermes-agent.git hermes
+          cd hermes
+          uv python install 3.14
+          uv sync --frozen --python 3.14
+      - name: hermes plugins validate . --install-deps
+        working-directory: plugin
+        run: |
+          export HERMES_HOME="$(mktemp -d)"
+          "$GITHUB_WORKSPACE/hermes/.venv/bin/hermes" plugins validate . --install-deps < /dev/null
 
   hygiene:
     name: compile + secret / personal-data scan

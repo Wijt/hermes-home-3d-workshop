@@ -3,7 +3,7 @@ version: 0.1.0
 description: >-
   A household 3D-printing workshop with a character. Family members ask in plain language (text or
   voice note); the agent finds or customises a model, slices it, queues it, watches the print with a
-  zero-token watcher, tells the owner and the family (in different tones), verifies the plate is clear
+  zero-token watcher, tells the owner and the family (in different tones), checks the plate with the camera
   for the next job, and turns every "a human had to step in" moment into an upgrade proposal.
   Works with a Bambu Lab printer managed by Bambuddy, or with the built-in simulated printer.
 author: Wijt
@@ -65,7 +65,7 @@ config_schema:
     choices: [tr, en]
     default: tr
     label: Household language
-    description: "Language of family-facing messages and the persona's replies."
+    description: "Language of family-facing messages and the persona's replies (hermes home3d demo is English unless --lang tr)."
   owner_name:
     type: str
     default: "Owner"
@@ -74,12 +74,23 @@ config_schema:
     type: list
     default: []
     label: Owner sender ids
-    description: "Messaging user ids (e.g. WhatsApp ids) that count as the owner for approvals."
+    description: "Messaging user ids that count as the owner for approvals. Compared exactly (a WhatsApp phone id may be written with or without its @s.whatsapp.net / @c.us suffix; @lid ids are a separate id space). Check with /home3d whoami."
+  local_is_owner:
+    type: bool
+    default: true
+    label: Local sessions are the owner
+    description: "A local CLI/TUI/desktop session (no messaging identity, or the gateway-hosted CLI's uid:<n> user) is the owner; slash commands from the TUI, Desktop and web dashboard count too. Runs with nobody present (cron, kanban workers, chat -q, -z, --source tool) are never the owner for a printer action. Turn off on a shared machine or a dashboard others can reach: then only owner_ids can approve."
   household:
     type: list
     default: []
     label: Household members
     description: 'List of {"id": "<sender id>", "name": "Mum", "address_as": "Anneciğim", "role": "family"}.'
+  inject_context:
+    type: str
+    choices: [auto, always, never]
+    default: auto
+    label: Per-turn printing context
+    description: "auto: household members and the local owner get the persona/printer context on their first turn, when the printer changed or the message is about printing (or names the persona), and one 'Speaking: ...' line on other turns; other senders get it only on printing-related turns. always: every turn of every session. never: no context (the skill still loads on request)."
   owner_target:
     type: str
     default: ""
