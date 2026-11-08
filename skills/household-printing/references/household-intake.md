@@ -11,8 +11,9 @@ unanswered voice note usually comes back as another voice note.
 - Read for intent. Expect misheard words: your own name, "filament", colours, numbers, names. Earlier
   notes in the chat often hold the actual request.
 - Names, numbers and start words must be confirmed in writing. Speech-to-text turns casual speech into
-  start-like words. Quote what you heard and ask: "I heard 'print it', shall I start?" A print once started
-  on a misheard word and had to be stopped.
+  start-like words. Quote what you heard and ask: "I heard 'print it', shall I go ahead?" A print once
+  started on a misheard word and had to be stopped. For a family member, going ahead means passing it on to
+  the owner, who decides when it starts.
 - Record the channel: `home3d_import ... channel=voice`.
 - "You didn't answer" in a voice note: resend your last answer and its picture, don't only re-explain.
 

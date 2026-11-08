@@ -90,7 +90,7 @@ def test_demo_says_what_is_staged(demo_en):
             assert STAGED in ln, ln
     # the persona speaks: staged chat replies plus the real watcher notices to the owner and the family
     assert "Mıstık → Mum [staged]" in text and "Mıstık → Dad [staged]" in text
-    assert "Mıstık → Owner (owner chat):" in text and "Mıstık → family group:" in text
+    assert "Mıstık → Sam (owner chat):" in text and "Mıstık → family group:" in text
     assert "home3d_upgrades accept" not in text and "home3d_stop resume" not in text
 
 
@@ -129,6 +129,12 @@ def test_demo_is_deterministic_and_turkish_says_the_same(demo_en, data_dir, tmp_
     text = "\n".join(lines)
     assert "language tr" in lines[0] and "--lang en" in lines[1]
     assert "Anneciğim, iki tane buldum" in text and "Sıraya ekledim" in text
+    # judge F9: Turkish display names and labels, no English household words in the Turkish lines
+    assert "💬 Annem [staged]" in text and "💬 Babam [staged]" in text and "Mıstık → Sam (owner chat):" in text
+    owner_tr = [r["text"] for r in res_tr["outbox"] if r["audience"] == "owner"]
+    assert not any(re.search(r"\b(Mum|Dad|Owner)\b", t) for t in owner_tr + family)
+    assert "Owner onaylayınca" not in text and "[proposed]" not in text and "[önerildi]" in text
+    assert "biten parçayı tabladan alma" in text
     again: list[str] = []
     res_again = cli.run_demo(lang="en", out=again.append)
     assert res_again["events"] == res_en["events"]
@@ -379,6 +385,8 @@ def test_plugin_yaml_declares_every_setting():
     assert Settings().local_is_owner is True and Settings().inject_context == "auto"
     for key in ("local_is_owner", "inject_context"):
         assert "description:" in blocks[key]
+    # judge F3: English first; a Turkish household sets language: tr
+    assert "default: en" in blocks["language"] and Settings().language == "en"
 
 
 def test_skill_describes_the_approval_flow():
@@ -398,6 +406,62 @@ def test_ci_validates_with_hermes_in_a_throwaway_home():
     assert 'export HERMES_HOME="$(mktemp -d)"' in ci and "plugins validate . --install-deps" in ci
 
 
+def test_bare_hermes_home3d_prints_every_subcommand(capsys):
+    """judge F10: a bare `hermes home3d` printed only a usage line."""
+    assert cli.handle(_parse([]), _rt(language="en")) == 2
+    out = capsys.readouterr().out
+    for name, desc in cli._SUBCOMMAND_HELP:
+        assert re.search(rf"^  {name}\s+{re.escape(desc)}$", out, re.M), name
+    assert out.rstrip().endswith("Try it without hardware: hermes home3d demo")
+    cli.handle(_parse([]), _rt(language="tr"))
+    out = capsys.readouterr().out
+    assert "Donanımsız dene: hermes home3d demo" in out and "Benzetilmiş yazıcıda" in out
+
+
+def _doctor(rt, capsys) -> str:
+    cli.handle(_parse(["doctor"]), rt)
+    return capsys.readouterr().out
+
+
+def test_doctor_names_a_scheduler_that_is_not_running(tmp_path, monkeypatch, capsys):
+    """judge F5: the cron job exists but no pass ever ran: the gateway (scheduler) is not running."""
+    home = tmp_path / "hermes"
+    monkeypatch.setattr(cli, "hermes_home", lambda: home)
+    monkeypatch.setattr(notify, "hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(cli, "_cron_list", lambda binary, all_jobs=True: CRON_LIST)
+    out = _doctor(_rt(), capsys)
+    assert "[warn] watcher" in out and cli.SCHEDULER_DOWN in out
+    assert re.search(r"\[warn\] cron job\s+2 watcher jobs", out)
+    monkeypatch.setattr(cli, "_cron_list", lambda binary, all_jobs=True: "")
+    out = _doctor(_rt(), capsys)
+    assert re.search(r"\[warn\] cron job\s+none named home3d-watch", out) and "never ran: hermes home3d setup" in out
+    rt = _rt()
+    rt.store.kv_set("watcher", {"state": "IDLE", "updated": __import__("time").time() - 60})
+    assert re.search(r"\[  ok\] watcher\s+last pass 1 min ago", _doctor(rt, capsys))
+
+
+def test_doctor_warns_when_bambuddy_may_auto_start_on_a_finished_printer(tmp_path, monkeypatch, capsys):
+    """hw F4: Bambuddy's require_plate_clear off + an auto-eject preset: a queued auto-start item may start on a
+    FINISH printer before the camera check."""
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    rt = _rt()
+    monkeypatch.setattr(rt.backend, "settings", lambda: {"require_plate_clear": False}, raising=False)
+    out = _doctor(rt, capsys)
+    assert "[warn] require plate clear" in out and "turn on 'Require plate clear'" in out
+    monkeypatch.setattr(rt.backend, "settings", lambda: {"require_plate_clear": True}, raising=False)
+    assert re.search(r"\[  ok\] require plate clear\s+on", _doctor(rt, capsys))
+
+
+def test_doctor_compares_what_the_watcher_reads_with_the_live_settings(tmp_path, monkeypatch, capsys):
+    """hw F1: the watcher read a stale snapshot (family target, backend, owner) while doctor said OK."""
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    write_snapshot(Settings(backend="simulator", family_target="whatsapp:<old-family>@g.us"))
+    out = _doctor(_rt(family_target=""), capsys)
+    assert re.search(r"\[warn\] watcher settings\s+the watcher reads snapshot", out) and "family_target" in out
+    write_snapshot(_rt(family_target="").settings)
+    assert re.search(r"\[  ok\] watcher settings\s+the watcher reads snapshot", _doctor(_rt(family_target=""), capsys))
+
+
 def test_doctor_reports_who_can_approve(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
@@ -408,3 +472,49 @@ def test_doctor_reports_who_can_approve(tmp_path, monkeypatch, capsys):
     cli.handle(_parse(["doctor"]), _rt(owner_ids=["owner@demo"]))
     out = capsys.readouterr().out
     assert "1 id(s), compared exactly" in out and "count as the owner (local_is_owner)" in out
+
+
+def test_the_installed_script_points_the_watcher_at_its_own_profile(tmp_path, monkeypatch):
+    """hw F1: the watcher reads <HERMES_HOME>/config.yaml; the installed copy knows its profile (it lives in
+    <HERMES_HOME>/scripts) and names it when the environment does not."""
+    m = _script_module()
+    seen = {}
+
+    class FakeWatcher:
+        @staticmethod
+        def main(argv):
+            seen["home"] = os.environ.get("HERMES_HOME")
+            return 0
+
+    monkeypatch.setattr(m, "_installed", lambda: True)
+    monkeypatch.setattr(m, "plugin_state", lambda plugin_dir, home: m.ACTIVE)
+    monkeypatch.setattr(m, "_hermes_home", lambda: tmp_path / "profile")
+    monkeypatch.setattr(m, "_load", lambda plugin_dir: FakeWatcher)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert m.main() == 0 and seen["home"] == str(tmp_path / "profile")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "other"))  # an explicit profile wins
+    assert m.main() == 0 and seen["home"] == str(tmp_path / "other")
+
+
+def test_doctor_warns_about_a_low_hermes_hook_timeout(tmp_path, monkeypatch, capsys):
+    """A low plugins.hook_callback_timeout shrinks the printer gate in pre_tool_call (0.4 of it): doctor says so."""
+    import json
+    import sys
+    import types
+
+    from home3d_ws.home3d import config as config_mod
+
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    out = _doctor(_rt(), capsys)
+    assert re.search(r"\[  ok\] hook timeout\s+30 s \(default\); the printer gate stops after 12 s", out)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(json.dumps({"plugins": {"hook_callback_timeout": 8}}), encoding="utf-8")
+    monkeypatch.setattr(config_mod, "_yaml_load", lambda text: (json.loads(text), "json-as-yaml"))  # no PyYAML here
+    monkeypatch.setenv("HOME3D_HERMES_CONFIG", str(cfg))
+    out = _doctor(_rt(), capsys)
+    assert re.search(r"\[warn\] hook timeout\s+plugins.hook_callback_timeout is 8 s \(config.yaml\): the printer "
+                     r"check before a start gets only 3.2 s", out), out
+    fake = types.ModuleType("hermes_cli.plugins")
+    fake._resolve_hook_callback_timeout = lambda: 0.0  # inside Hermes its own resolver wins
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake)
+    assert re.search(r"\[  ok\] hook timeout\s+plugins.hook_callback_timeout is off", _doctor(_rt(), capsys))

@@ -15,10 +15,24 @@ when its printer preset is ``"sim-autoeject"``, equals ``$HOME3D_SIM_AUTOEJECT_P
 ids allowed), equals ``autoeject_printer_preset`` in the watcher snapshot, or is listed in the
 ``autoeject_presets`` constructor argument.
 
+Auto-eject order (``eject_in_gcode = True``, like the real A1 with the auto-eject preset): the end G-code
+waits ``M400 S900`` and pushes the part while the printer still reports RUNNING at 100 % (the bed cools,
+``remaining_min`` counts the cool-down down); FINISH comes AFTER the push.
+
+``require_plate_clear`` (Bambuddy's setting of the same name, kept in the state file; default True): True =
+an auto-start queue item (``manual_start`` False) only starts once the plate is clear; False = it starts on
+a finished printer at once, even on top of a part (what the live Bambuddy does with the setting off).
+
+Model cards: a MakerWorld link with a slug (``/models/1092613-simple-coaster``) gets its title from the slug
+and its size from a keyword match against ``CATALOG`` (else ``id % len(CATALOG)``); a bare id gets the
+catalogue entry. ``CATALOG_IDS`` lists ids that map 1:1 onto the catalogue (handy without a web search).
+
 Scenarios (``set_scenario``): ok | fail (FAILED at 40 %) | pause_hms (PAUSE + filament-runout HMS at
 30 %) | eject_miss (eject runs but the part stays) | busy (a family job queued ahead) | offline (printer
-unreachable; simulator extra). A scenario applies to the next start and, when set mid-print, to the
-running job (a fail/pause threshold already passed triggers at the current progress).
+unreachable; simulator extra) | dispatch_fail (``start`` is accepted, then the printer manager fails the
+item without starting it: ``status`` failed, ``error_message`` set, ``started_at`` None; the printer stays
+IDLE). A scenario applies to the next start and, when set mid-print, to the running job (a fail/pause
+threshold already passed triggers at the current progress).
 """
 
 from __future__ import annotations
@@ -54,11 +68,14 @@ SPEED_ENV = "HOME3D_SIM_SPEED"
 AUTOEJECT_ENV = "HOME3D_SIM_AUTOEJECT_PRESET"
 SIM_AUTOEJECT_PRESET = "sim-autoeject"
 DEFAULT_SPEED = 60.0
-SCENARIOS = ("ok", "fail", "pause_hms", "eject_miss", "busy", "offline")
+SCENARIOS = ("ok", "fail", "pause_hms", "eject_miss", "busy", "offline", "dispatch_fail")
 FAIL_AT_PCT = 40.0
 PAUSE_AT_PCT = 30.0
 PREPARE_S = 120.0
-EJECT_DELAY_S = 15 * 60.0  # M400 S900 cool-down before the push
+EJECT_DELAY_S = 15 * 60.0  # M400 S900 cool-down before the push (the printer still says RUNNING, 100 %)
+DISPATCH_FAIL_S = 30.0  # dispatch_fail: the printer manager gives up on the item this long after the start
+DISPATCH_ERROR = ("The printer rejected the print command: MQTT command verification failed "
+                  "(HMS 0500-0500-0001-0007) (simulated)")
 ROOM_C = 25.0
 BED_TAU_S = 300.0  # 65 C -> ~25.7 C after 20 sim-min
 NOZZLE_TAU_S = 90.0
@@ -82,6 +99,13 @@ CATALOG = (
     ("Coaster", (95.0, 95.0, 4.0)),
 )
 CREATORS = ("maker_ada", "printsmith", "layerlab", "tinkerhome", "filamentfox")
+CATALOG_BASE_ID = 1440000  # CATALOG_BASE_ID + i is CATALOG[i]
+CATALOG_IDS = tuple((CATALOG_BASE_ID + i, title) for i, (title, _dims) in enumerate(CATALOG))
+# keyword (singular, lower case) -> CATALOG index: the size a slug title gets
+_KEYWORDS = {"box": 0, "gift": 0, "flower": 0, "clip": 1, "cable": 1, "hook": 1, "pill": 2, "organiser": 2,
+             "organizer": 2, "tray": 2, "tag": 3, "keychain": 3, "keyring": 3, "label": 3, "pot": 4, "planter": 4,
+             "vase": 4, "plant": 4, "stand": 5, "phone": 5, "holder": 6, "pen": 6, "pencil": 6, "cup": 6,
+             "coaster": 7, "mat": 7}
 DEMO_MODEL_IDS = (1440000, 1440001)  # seeded library: "Flower gift box", "Cable clip"
 FAMILY_MODEL_ID = 1440005  # "Phone stand", queued ahead of us by the "busy" scenario
 # material -> (bed C, nozzle C, density g/cm3)
@@ -95,7 +119,7 @@ DEFAULT_TRAYS = (
 )
 _ACTIVE_QUEUE = ("pending", "printing")
 _QUEUE_FIELDS = ("id", "status", "name", "position", "library_file_id", "manual_start", "print_time_s",
-                 "scheduled_time", "created_at", "archive_id")
+                 "scheduled_time", "created_at", "archive_id", "error_message", "started_at")
 _thread_lock = threading.Lock()  # only used where fcntl is unavailable
 
 
@@ -116,6 +140,29 @@ def _iso(ts: float) -> str:
 
 def _catalog(model_id: int) -> tuple[str, tuple[float, float, float]]:
     return CATALOG[model_id % len(CATALOG)]
+
+
+def _slug_title(url_or_id: str) -> str:
+    """'https://makerworld.com/en/models/1092613-simple-coaster#profileId-7' -> 'Simple coaster' ('' without a
+    slug)."""
+    m = re.search(r"/models/\d+-([^/?#\s]+)", str(url_or_id or ""))
+    if not m:
+        return ""
+    words = [w for w in re.split(r"[-_+]+|%20", m.group(1)) if w]
+    title = " ".join(words).strip()
+    return (title[:1].upper() + title[1:])[:80] if title else ""
+
+
+def _model_entry(model_id: int, title: str = "") -> tuple[str, tuple[float, float, float]]:
+    """(title, dims) for a model: the slug title when there is one, sized by the first catalogue keyword it
+    contains; else the catalogue entry of the id."""
+    if not title:
+        return _catalog(model_id)
+    for word in re.findall(r"[a-z]+", title.lower()):
+        for cand in (word, word[:-1] if word.endswith("s") else word, word[:-2] if word.endswith("es") else word):
+            if cand in _KEYWORDS:
+                return title, CATALOG[_KEYWORDS[cand]][1]
+    return title, _catalog(model_id)[1]
 
 
 def parse_model_id(url_or_id: str) -> int:
@@ -458,10 +505,15 @@ class SimulatorBackend(Backend):
 
     name = "simulator"
 
-    def __init__(self, state_path: Optional[Path] = None, *, autoeject_presets: Iterable[str] = ()):
+    eject_in_gcode = True  # the push runs inside the end G-code, before FINISH (like the real A1)
+
+    def __init__(self, state_path: Optional[Path] = None, *, autoeject_presets: Iterable[str] = (),
+                 require_plate_clear: Optional[bool] = None):
         self.state_path = Path(state_path) if state_path else data_dir() / STATE_FILE
         self.files_dir = self.state_path.with_name(self.state_path.stem + "-files")
         self.autoeject_presets = {str(p).strip() for p in autoeject_presets if str(p).strip()}
+        if require_plate_clear is not None:
+            self.set_require_plate_clear(require_plate_clear)
 
     # ---- state plumbing ---------------------------------------------------------------------
     @contextmanager
@@ -504,7 +556,7 @@ class SimulatorBackend(Backend):
         st = {"version": STATE_VERSION, "clock": {"real0": w, "sim0": float(int(w)), "speed": _speed()},
               "scenario": "ok", "next": {"library": 1, "queue": 1, "archive": 1}, "library": [], "queue": [],
               "archives": [], "job": None, "plate": None, "trays": [dict(t) for t in DEFAULT_TRAYS],
-              "snapshots": 0}
+              "snapshots": 0, "require_plate_clear": True, "models": {}}
         for mid in DEMO_MODEL_IDS:
             self._add_model(st, mid, mid * 10 + 1)
         return st
@@ -538,7 +590,9 @@ class SimulatorBackend(Backend):
 
     @staticmethod
     def _qitem(row: dict) -> QueueItem:
-        return QueueItem(**{k: row.get(k) for k in _QUEUE_FIELDS})
+        item = QueueItem(**{k: row.get(k) for k in _QUEUE_FIELDS})
+        item.error_message = str(item.error_message or "")
+        return item
 
     @staticmethod
     def _active(st: dict) -> Optional[dict]:
@@ -551,7 +605,8 @@ class SimulatorBackend(Backend):
             raise BackendError(f"{what}: printer is offline (simulated)")
 
     def _add_model(self, st: dict, model_id: int, profile_id: Optional[int]) -> dict:
-        title, dims = _catalog(model_id)
+        known = (st.get("models") or {}).get(str(model_id))  # the title resolve_model gave this id
+        title, dims = (known["title"], tuple(known["dims"])) if isinstance(known, dict) else _catalog(model_id)
         entry = {"id": self._next_id(st, "library"), "name": f"{title}.3mf", "kind": "3mf", "sliced": False,
                  "model_id": model_id, "profile_id": profile_id, "dims": list(dims)}
         st["library"].append(entry)
@@ -589,14 +644,23 @@ class SimulatorBackend(Backend):
                         job["hms"] = [dict(RUNOUT_HMS)]
                         st["trays"][0]["remain_pct"] = 0
                 elif t >= run0 + dur:
-                    self._end_job(st, job, FINISH, run0 + dur, 100.0, "completed")
-        job = st["job"]
-        if (job and job["end_state"] == FINISH and job["params"].get("eject") and job["scenario"] != "eject_miss"
-                and job.get("ejected_at") is None and st["plate"]
-                and st["plate"].get("queue_item_id") == job["queue_item_id"]
-                and t >= job["ended_at"] + EJECT_DELAY_S):
-            st["plate"] = None
-            job["ejected_at"] = job["ended_at"] + EJECT_DELAY_S
+                    job.setdefault("printed_at", None)
+                    if job["printed_at"] is None:
+                        job["printed_at"] = run0 + dur  # last layer done: the end G-code starts
+                    if not job["params"].get("eject"):
+                        self._end_job(st, job, FINISH, run0 + dur, 100.0, "completed")
+                    elif t >= run0 + dur + EJECT_DELAY_S:
+                        # the end G-code cooled the bed and pushed the part off; only then the printer says FINISH
+                        t_push = run0 + dur + EJECT_DELAY_S
+                        if (job["scenario"] != "eject_miss" and st["plate"]
+                                and st["plate"].get("queue_item_id") == job["queue_item_id"]):
+                            st["plate"] = None
+                            job["ejected_at"] = t_push
+                        self._end_job(st, job, FINISH, t_push, 100.0, "completed")
+        for row in st["queue"]:  # dispatch_fail: the printer manager gives up on a started item
+            due = row.get("dispatch_fail_at")
+            if due is not None and row["status"] == "pending" and t >= due:
+                row.update(status="failed", error_message=DISPATCH_ERROR, started_at=None, dispatch_fail_at=None)
         self._auto_start(st, t)
 
     def _end_job(self, st: dict, job: dict, state: str, t_end: float, progress: float, qstatus: str) -> None:
@@ -619,8 +683,9 @@ class SimulatorBackend(Backend):
                      "paused_at": None, "paused_total": 0.0, "pause_reason": "", "hms": [],
                      "scenario": scenario, "trigger_pct": self._trigger_for(scenario),
                      "part_placed": False, "end_state": None, "ended_at": None, "end_progress": None,
-                     "ejected_at": None}
-        row["status"] = "printing"
+                     "ejected_at": None, "printed_at": None,
+                     "started_on_part": bool(st["plate"])}  # require_plate_clear False: on top of a part
+        row["status"], row["started_at"], row["error_message"] = "printing", _iso(t), ""
 
     @staticmethod
     def _trigger_for(scenario: str, current: float = 0.0) -> Optional[float]:
@@ -631,10 +696,14 @@ class SimulatorBackend(Backend):
         return None
 
     def _auto_start(self, st: dict, t: float) -> None:
-        """Bambuddy's queue manager: non-manual items start by themselves once idle with a clear plate."""
-        if st["scenario"] == "offline" or self._active(st) is not None or st["plate"]:
+        """Bambuddy's queue manager: non-manual items start by themselves once the printer is not printing; with
+        ``require_plate_clear`` (default) only on a clear plate, without it at once (even on top of a part)."""
+        if st["scenario"] == "offline" or self._active(st) is not None:
             return
-        auto = [q for q in st["queue"] if q["status"] == "pending" and not q["manual_start"]]
+        if st["plate"] and st.get("require_plate_clear", True):
+            return
+        auto = [q for q in st["queue"] if q["status"] == "pending" and not q["manual_start"]
+                and q.get("dispatch_fail_at") is None]
         if auto:
             auto.sort(key=lambda q: (q["position"] if q["position"] is not None else 1e9, q["id"]))
             self._start_job(st, auto[0], t)
@@ -655,7 +724,7 @@ class SimulatorBackend(Backend):
             return max(1, min(total, math.ceil(prog / 100.0 * total - 1e-9)))
 
         if job["end_state"]:
-            dt = t - job["ended_at"]
+            dt = t - (job.get("printed_at") or job["ended_at"])  # an eject job cooled before FINISH
             prog = float(job["end_progress"] or 0.0)
             return PrinterStatus(state=job["end_state"], job_name=name, progress=prog, remaining_min=0,
                                  layer=layer_at(prog) if job["part_placed"] else 0, total_layers=total,
@@ -664,6 +733,14 @@ class SimulatorBackend(Backend):
                                  trays=trays, printer_name=PRINTER_NAME, chamber_light=False)
         phase, prog, el = self._phase(job, t)
         dur = float(job["duration_s"])
+        cool_s = el - PREPARE_S - dur  # > 0: the end G-code's cool-down (auto-eject), still RUNNING at 100 %
+        if phase == RUNNING and job["params"].get("eject") and cool_s >= 0:
+            return PrinterStatus(state=PAUSE if job["paused_at"] is not None else RUNNING, job_name=name,
+                                 progress=100.0, remaining_min=math.ceil(max(0.0, EJECT_DELAY_S - cool_s) / 60),
+                                 layer=total, total_layers=total, bed_temp=_cool(p["bed_temp"], cool_s, BED_TAU_S),
+                                 bed_target=0.0, nozzle_temp=_cool(p["nozzle_temp"], cool_s, NOZZLE_TAU_S),
+                                 hms=[HMSError(**h) for h in job["hms"]], trays=trays, printer_name=PRINTER_NAME,
+                                 chamber_light=False)
         if phase == PREPARE:
             f = el / PREPARE_S
             bed = round(ROOM_C + (p["bed_temp"] - ROOM_C) * f, 1)
@@ -755,10 +832,17 @@ class SimulatorBackend(Backend):
 
     def resolve_model(self, url_or_id: str) -> ModelCard:
         mid = parse_model_id(url_or_id)
-        title, dims = _catalog(mid)
-        t02, g02, _ = _estimate(dims, "PLA", 0.2)
         with self._state() as st:
+            known = (st.get("models") or {}).get(str(mid))
+            slug = _slug_title(url_or_id)
+            if slug or not isinstance(known, dict):
+                title, dims = _model_entry(mid, slug)
+                if slug:  # import_model(mid) later names the library file after it
+                    st.setdefault("models", {})[str(mid)] = {"title": title, "dims": list(dims)}
+            else:
+                title, dims = known["title"], tuple(known["dims"])
             imported = [e["id"] for e in st["library"] if e.get("model_id") == mid and not e["sliced"]]
+        t02, g02, _ = _estimate(dims, "PLA", 0.2)
         return ModelCard(
             model_id=mid, title=title, url=f"https://makerworld.com/en/models/{mid}", cover_url="",
             creator=CREATORS[(mid // 7) % len(CREATORS)],
@@ -919,6 +1003,9 @@ class SimulatorBackend(Backend):
                 raise BackendError(f"start: printer is busy ({self._status(st, self._now(st)).state})")
             if st["plate"]:
                 raise BackendError("start: the build plate is not clear (simulated safety stop)")
+            if st["scenario"] == "dispatch_fail":  # accepted now, failed by the "printer manager" a moment later
+                row.update(manual_start=False, dispatch_fail_at=self._now(st) + DISPATCH_FAIL_S)
+                return self._qitem(row)
             self._start_job(st, row, self._now(st))
             return self._qitem(row)
 
@@ -964,7 +1051,18 @@ class SimulatorBackend(Backend):
         st["plate"] = None
         self._auto_start(st, self._now(st))
 
+    def settings(self) -> dict:
+        """The simulated printer manager's settings (like Bambuddy ``GET /settings/``)."""
+        with self._state() as st:
+            return {"require_plate_clear": bool(st.get("require_plate_clear", True))}
+
     # ---- simulator-only helpers -------------------------------------------------------------
+    def set_require_plate_clear(self, on: bool) -> None:
+        """Bambuddy's "Require plate clear": False lets auto-start items start on a finished printer at once."""
+        with self._state() as st:
+            st["require_plate_clear"] = bool(on)
+            self._auto_start(st, self._now(st))
+
     def advance(self, minutes: float) -> PrinterStatus:
         """Move simulated time forward and return the new status."""
         if minutes < 0:
@@ -983,7 +1081,7 @@ class SimulatorBackend(Backend):
             st["scenario"] = name
             if name == "busy":
                 self._add_family_job(st, t)
-            if name in ("busy", "offline"):
+            if name in ("busy", "offline", "dispatch_fail"):
                 return
             job = st["job"]
             if job and job["end_state"] is None:
@@ -992,8 +1090,6 @@ class SimulatorBackend(Backend):
                 already_paused = job["paused_at"] is not None and name == "pause_hms"
                 job["trigger_pct"] = None if already_paused else self._trigger_for(name, prog)
                 self._tick(st, t)  # a threshold already passed fires now
-            elif job and job.get("ejected_at") is None:
-                job["scenario"] = name  # only matters for a pending eject (ok vs eject_miss)
 
     def _add_family_job(self, st: dict, t: float) -> None:
         if any(q.get("owner") == "family" and q["status"] == "pending" for q in st["queue"]):
@@ -1024,5 +1120,5 @@ class SimulatorBackend(Backend):
         shutil.rmtree(self.files_dir, ignore_errors=True)
 
 
-__all__ = ["SimulatorBackend", "SCENARIOS", "SIM_AUTOEJECT_PRESET", "AUTOEJECT_ENV", "SPEED_ENV",
+__all__ = ["SimulatorBackend", "SCENARIOS", "SIM_AUTOEJECT_PRESET", "AUTOEJECT_ENV", "SPEED_ENV", "CATALOG_IDS",
            "parse_model_id", "render_gcode", "render_plate_png", "write_box_3mf", "write_box_stl"]

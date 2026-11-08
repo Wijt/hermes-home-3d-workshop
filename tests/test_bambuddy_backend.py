@@ -873,3 +873,45 @@ def test_lit_check_failure_after_our_light_off_is_uncertain(http, backend, tmp_p
     http.add("GET", "/printers/1/camera/check-plate", {"detail": "camera busy"}, status=503)
     pc = backend.check_plate()
     assert pc.is_empty is None and pc.light_ok is False and "lit re-check failed" in pc.message
+
+
+# ---- fix round 2 ------------------------------------------------------------------------------------------------
+def test_a_failed_dispatch_keeps_its_reason_and_no_start_time(http, backend):
+    """hw F2: live item #6 (shape): status failed, started_at None, error_message from the printer."""
+    http.add("GET", "/queue/", [
+        {"id": 6, "status": "failed", "library_file_name": "clip.gcode.3mf", "manual_start": True,
+         "started_at": None, "error_message": "The printer rejected the print command: MQTT command verification "
+                                              "failed (HMS 0500-0500-0001-0007)"},
+        {"id": 7, "status": "completed", "archive_name": "Card wallet", "started_at": "2026-11-07T18:02:11",
+         "error_message": None},
+        {"id": 8, "status": "pending", "library_file_name": "box.gcode.3mf"}])
+    items = {q.id: q for q in backend.queue(include_done=True)}
+    assert items[6].started_at is None and items[6].error_message.startswith("The printer rejected the print")
+    assert items[7].started_at == "2026-11-07T18:02:11" and items[7].error_message == ""
+    assert items[8].started_at is None and items[8].error_message == ""
+
+
+def test_the_real_printer_pushes_inside_the_end_gcode():
+    assert bb.BambuddyBackend.eject_in_gcode is True
+
+
+def test_settings_reads_require_plate_clear(http, backend):
+    http.add("GET", "/settings/", {"require_plate_clear": False, "plate_detection_enabled": False})
+    assert backend.settings()["require_plate_clear"] is False
+    assert http.paths() == ["GET /settings/"]
+    http.routes.clear()
+    http.add("GET", "/settings/", ["not", "a", "dict"])
+    with pytest.raises(BackendError):
+        backend.settings()
+
+
+def test_with_timeout_caps_every_request_of_a_copy(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", {"connected": True, "state": "IDLE"})
+    http.add("GET", "/printers/1/camera/check-plate", {"is_empty": True, "difference_percent": 1.0})
+    quick = backend.with_timeout(5)
+    assert quick is not backend and backend.timeout_cap is None and quick.timeout_cap == 5
+    quick.status()
+    quick._get("/printers/1/camera/check-plate", timeout=30.0)  # an explicit long timeout is capped too
+    backend.status()
+    assert [c.timeout for c in http.calls] == [5, 5, backend.timeout_s]
+    assert quick.with_timeout(10).timeout_cap == 5 and quick.with_timeout(2).timeout_cap == 2

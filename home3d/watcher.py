@@ -5,11 +5,25 @@ No model calls. Each pass reads the printer status, detects transitions (pause, 
 (``eject.step``, with a camera plate check only when it asks for one), turns the resulting events into an
 owner text (technical, with photo) and a family line (by name), logs human-needed moments, evaluates
 upgrade proposals and tells the owner when the plate is clear and a manual job is waiting (it never starts
-anything itself). State lives in ``store.kv('watcher')``.
+anything itself). State lives in ``store.kv('watcher')`` and starts over when the printer changes (backend, URL
+or printer id: ``backend_key``).
 
-Which workshop job is printing: the backend queue item whose status is ``printing`` (and whose name matches),
-remembered for the rest of that print; else the store's exact name match. A printing queue item the workshop
-did not queue is nobody's job (no family message).
+Which workshop job is printing (decided once per print, remembered in ``job_memo``): when the printer manager
+has a queue item in status ``printing``, its id decides (names are not compared: an archive reprint is named
+by its archive title). No active store row for that id = nobody's job (no family message, no guess by name).
+Only when the queue was read and no item is printing, the store's exact name match among workshop jobs still
+queued or printing (never one whose own queue item still waits or failed before it started). A job never goes back
+to ``printing`` once it left the active states. Jobs the store still calls ``printing``
+whose queue item ended while the printer was idle or on another job (a dispatch that failed, a FINISH the
+watcher never saw because the next job started at once) are closed from the queue (``reconcile``).
+
+Light discipline: a pass switches the chamber light at most once (``snapshot_and_check`` gives the plate check
+and the pass photo in one light cycle); no near-end photo for prints the workshop did not queue; plate
+re-checks while a person is needed (or on an idle printer with a job waiting) back off 15 -> 30 -> 60 -> 120
+min, at most ``MAX_RECHECKS`` per (printer state, job, queue head).
+
+Family approval requests the hook refused (``Store.pending_approval_requests``) are told to the owner once, with
+the exact ``/home3d approve`` command.
 
 "Next job ready" names the first pending manual-start job the WORKSHOP queued; jobs queued elsewhere that
 wait ahead of it are named in the same owner text (with ``/home3d approve start N jump``), and jobs queued
@@ -32,13 +46,15 @@ from .backends import make_backend
 from .backends.base import (ACTIVE_STATES, FAILED, FINISH, IDLE, OFFLINE, PAUSE, RUNNING, Backend, HMSError,
                             PlateCheck, PrinterStatus, QueueItem)
 from .config import Person, Settings, data_dir, load_settings
-from .store import Store
+from .store import ACTIVE_JOB_STATES, Store
 
 KV_KEY = "watcher"
 LOG_FILE = "watcher.log"
 LOCK_FILE = "watcher.lock"
 OFFLINE_NOTIFY_S = 10 * 60  # tell the owner once the printer has been unreachable this long
 IDLE_CHECK_S = 15 * 60  # idle printer, plate state unknown, manual job waiting: look this often
+RECHECK_BACKOFF_S = (15 * 60, 30 * 60, 60 * 60, 120 * 60)  # waits between plate re-checks (last one repeats)
+MAX_RECHECKS = 6  # plate checks per (kind, printer state, job, queue head) before the watcher stops looking
 LAST_LAYER_PCT = 98.0  # "done" photo from this progress (or the last two layers) on
 MEDIA_KEEP_S = 14 * 86400
 LIGHT_ALERT_S = 6 * 3600  # "chamber light left on" owner alert at most this often
@@ -46,6 +62,8 @@ LIGHT_FLAG = "light_left_on"  # the backend's flag in Snapshot.note / PlateCheck
 LIGHT_PENDING_KEY = "light_left_on:pending"  # runtime.LIGHT_PENDING_KEY: a hook/handler check left the light on
 _CANCELLED_QUEUE = ("cancelled", "canceled", "skipped")
 _ENDED_QUEUE = {"completed": ("finished", "done"), "failed": ("failed", "failed")}
+_REQUEST_STATUS = {"printing": "printing", "finished": "done", "failed": "failed", "start_failed": "start_failed",
+                   "cancelled": "cancelled"}
 _EJECT_FLOW = ("finished", "cooling", "ejecting", "verifying")
 _SUFFIXES = (".gcode.3mf", ".3mf", ".gcode", ".stl")
 _FILAMENT_HMS = re.compile(r"^07[0-9A-F]{2}-[0-9A-F]{4}-0002-000[12]$")
@@ -92,6 +110,12 @@ def _backend_now(backend: Backend) -> float:
         except Exception:
             pass
     return time.time()
+
+
+def backend_key(backend: Backend) -> list:
+    """Which printer the watcher state is about: ``[backend name, printer manager URL, printer id]``."""
+    return [str(getattr(backend, "name", "") or ""), str(getattr(backend, "root", "") or "").rstrip("/"),
+            str(getattr(backend, "printer_id", "") or "")]
 
 
 def _try_lock():
@@ -143,6 +167,12 @@ class _Pass:
         self.now = float(now) if now is not None else _backend_now(backend)
         w = store.kv_get(KV_KEY) or {}
         self.w: dict = w if isinstance(w, dict) else {}
+        key = backend_key(backend)
+        old = self.w.get("backend_key")
+        if old is not None and old != key:  # another printer (or the simulator): the old state is not about it
+            _log(f"printer changed ({old} -> {key}): the watcher starts over")
+            self.w = {}
+        self.w["backend_key"] = key
         self.first = not self.w.get("initialized")
         self.notes: list[_Note] = []
         self.moments = 0
@@ -150,6 +180,8 @@ class _Pass:
         self._fresh_tried = False
         self._queue_items: Optional[list[QueueItem]] = None
         self._queue_tried = False
+        self.gcode_push = bool(getattr(backend, "eject_in_gcode", False))  # push before FINISH (real A1)
+        self._announced: list[int] = []  # approval request ids told to the owner this pass
 
     # -- backend calls (never raise) --
     def _status(self) -> tuple[Optional[PrinterStatus], str]:
@@ -159,11 +191,25 @@ class _Pass:
             return None, str(exc) or type(exc).__name__
 
     def _check_plate(self) -> Optional[PlateCheck]:
-        try:
-            check = self.backend.check_plate()
-        except Exception as exc:
-            _log(f"check_plate failed: {exc}")
-            return None
+        """One lit plate check. The first one of a pass also takes this pass's photo in the same light cycle
+        (``snapshot_and_check``), so a later ``_snapshot()`` does not switch the chamber light again."""
+        check: Optional[PlateCheck] = None
+        if not self._fresh_tried:
+            self._fresh_tried = True
+            try:
+                self.out_dir.mkdir(parents=True, exist_ok=True)
+                snap, check = self.backend.snapshot_and_check(self.out_dir)
+                self._fresh = Path(snap.path) if snap and snap.path else None
+                self._light_left_on(getattr(snap, "note", ""))
+            except Exception as exc:
+                _log(f"snapshot_and_check failed: {exc}")
+                check = None
+        if check is None:
+            try:
+                check = self.backend.check_plate()
+            except Exception as exc:
+                _log(f"check_plate failed: {exc}")
+                return None
         self._light_left_on(getattr(check, "message", ""))
         return check
 
@@ -179,16 +225,61 @@ class _Pass:
         ctx = {"persona": self.s.persona_name, "owner": self.s.owner_name}
         self._note(LIGHT_FLAG, self.w.get("job_name", ""), ctx, note=str(text)[:200])
 
-    def _queue(self) -> Optional[list[QueueItem]]:
-        """The backend queue, read at most once per pass (the watcher never changes it); None when unreadable."""
+    def _queue_all(self) -> Optional[list[QueueItem]]:
+        """Every queue item, finished ones included, read at most once per pass (one GET on Bambuddy; the watcher
+        never changes the queue); None when unreadable."""
         if not self._queue_tried:
             self._queue_tried = True
             try:
-                self._queue_items = list(self.backend.queue())
+                self._queue_items = list(self.backend.queue(include_done=True))
             except Exception as exc:
                 _log(f"queue failed: {exc}")
                 self._queue_items = None
         return self._queue_items
+
+    def _queue(self) -> Optional[list[QueueItem]]:
+        """The live queue (pending / printing items, in the backend's order); None when unreadable."""
+        items = self._queue_all()
+        return None if items is None else [q for q in items if not q.is_done]
+
+    def _queue_head(self) -> Any:
+        """Id of the first pending item (None: nothing pending; "?" when the queue is unreadable)."""
+        items = self._queue()
+        if items is None:
+            return "?"
+        pending = [q for q in items if q.is_pending]
+        return int(pending[0].id) if pending else None
+
+    # -- light discipline: plate re-checks back off --
+    def _recheck_ok(self, kind: str, st: PrinterStatus, job: str, base_ok: bool) -> bool:
+        """May the pass run one more plate check of ``kind`` ("needs_human" / "idle")? ``base_ok`` is the plain
+        rule (eject's 15-min re-check, the idle interval). After the first check the waits grow 15 -> 30 -> 60 ->
+        120 min, and at most ``MAX_RECHECKS`` checks run while the printer state, the job and the queue head stay
+        the same (any change starts over)."""
+        if not base_ok:
+            return False
+        rec = self.w.get("recheck")
+        rec = rec if isinstance(rec, dict) else {}
+        head = self._queue_head()
+        old_key = rec.get("key") if isinstance(rec.get("key"), list) else None
+        if head == "?" and old_key and len(old_key) == 4:
+            head = old_key[3]  # an unreadable queue is not a new queue head
+        key = [kind, st.state, job or "", head]
+        if old_key != key:
+            rec = {"key": key, "n": 0, "ts": None}
+            self.w["recheck"] = rec
+        n = int(rec.get("n") or 0)
+        if n >= MAX_RECHECKS:
+            return False
+        if n == 0:
+            return True
+        wait = RECHECK_BACKOFF_S[min(n - 1, len(RECHECK_BACKOFF_S) - 1)]
+        return self.now - float(rec.get("ts") or 0) >= wait
+
+    def _count_recheck(self) -> None:
+        rec = self.w.get("recheck")
+        if isinstance(rec, dict):
+            rec["n"], rec["ts"] = int(rec.get("n") or 0) + 1, self.now
 
     def _snapshot(self) -> Optional[Path]:
         if not self._fresh_tried:
@@ -205,7 +296,7 @@ class _Pass:
     def _part_photo(self, job: str, *, take: bool) -> Optional[Path]:
         """Photo of the finished part: the last-layer photo, else (``take``) a fresh one remembered for later."""
         path = self.w.get("photo_path") or ""
-        if job and self.w.get("photo_for_job") == job and path and Path(path).is_file():
+        if job and _same_name(self.w.get("photo_for_job") or "", job) and path and Path(path).is_file():
             return Path(path)
         if not take:
             return None
@@ -216,32 +307,70 @@ class _Pass:
 
     # -- household lookups --
     def _lookup(self, name: str) -> tuple[Optional[dict], Optional[int]]:
-        """(workshop job row, queue item id) of the print called ``name``: the backend queue item that is
-        printing under that name wins (not in the store = not ours: None, never a guess by name); else the
-        store's exact name match."""
-        for q in self._queue() or []:
-            if str(q.status or "").strip().lower() == "printing" and _same_job(q.name, name):
-                try:
-                    return self.store.get_job(int(q.id)), int(q.id)
-                except Exception:
-                    return None, int(q.id)
+        """(workshop job row, queue item id) of the print called ``name``. A queue item in status ``printing``
+        decides by its id (an archive reprint carries the archive title, so names are not compared; with several,
+        one whose name matches): a store row that is not queued / printing any more, or none at all, means not
+        ours (None), never a guess by name. Only when the queue was read and nothing in it is printing: the store's
+        exact name match among the workshop jobs still queued or printing, unless that job's own queue item is
+        visibly still waiting, or failed without ever starting (then this print came from elsewhere: the printer
+        screen, a phone app, an archive reprint)."""
+        live = self._queue()
+        if live is None:
+            return None, None  # the queue is unreadable: never guess by name (the next pass looks again)
+        printing = [q for q in live if str(q.status or "").strip().lower() == "printing"]
+        if printing:
+            q = next((x for x in printing if x.name and name and _same_name(x.name, name)), printing[0])
+            try:
+                row = self.store.get_job(int(q.id))
+            except Exception:
+                row = None
+            return (row if row and row.get("state") in ACTIVE_JOB_STATES else None), int(q.id)
         try:
             row = self.store.job_by_name(name)
         except Exception:
             row = None
+        if row and row.get("state") not in ACTIVE_JOB_STATES:
+            row = None  # an old job of the same file (a reprint, a family copy) is not this print
+        if row and row.get("queue_item_id") is not None:
+            item = next((q for q in self._queue_all() or [] if int(q.id) == int(row["queue_item_id"])), None)
+            if item is not None and (item.is_pending or (str(item.status or "").strip().lower() == "failed"
+                                                         and not item.started_at)):
+                row = None  # its own queue item still waits / never started: this print is not that job
         qid = row.get("queue_item_id") if row else None
         return row, (int(qid) if qid is not None else None)
 
+    def _printing_item(self) -> Optional[int]:
+        """Id of the queue item the printer manager says is printing (None: none, or the queue is unreadable)."""
+        q = next((x for x in self._queue() or [] if str(x.status or "").strip().lower() == "printing"), None)
+        return int(q.id) if q is not None else None
+
+    def _remember_job(self, name: str, row: Optional[dict]) -> None:
+        if self._queue() is None:
+            return  # decided without the queue: not remembered, the next pass decides again
+        qid = (row or {}).get("queue_item_id")
+        self.w["job_memo"] = {"name": name, "qid": int(qid) if qid is not None else None}
+        self.w["job_qid"] = self.w["job_memo"]["qid"]
+
     def _attribute(self, name: str) -> Optional[dict]:
         """A print just started: decide whose job it is and remember it for the rest of the print."""
-        row, qid = self._lookup(name) if name else (None, None)
-        self.w["job_qid"] = qid if row else None
+        row = self._lookup(name)[0] if name else None
+        self._remember_job(name, row)
         return row
 
     def _job(self, name: str) -> Optional[dict]:
+        """The workshop job row of the print called ``name``: the decision remembered for that print (``job_memo``,
+        None = not ours), else a lookup that is remembered from then on."""
         if not name:
             return None
-        qid = self.w.get("job_qid")
+        memo = self.w.get("job_memo")
+        if isinstance(memo, dict) and memo.get("name") == name:
+            if memo.get("qid") is None:
+                return None
+            try:
+                return self.store.get_job(int(memo["qid"]))
+            except Exception:
+                return None
+        qid = self.w.get("job_qid")  # state written before job_memo existed
         if qid is not None and name == self.w.get("started_job"):
             try:
                 row = self.store.get_job(int(qid))
@@ -249,7 +378,9 @@ class _Pass:
                 row = None
             if row:
                 return row
-        return self._lookup(name)[0]
+        row = self._lookup(name)[0]
+        self._remember_job(name, row)
+        return row
 
     def _person(self, name: str) -> Optional[Person]:
         n = (name or "").strip().lower()
@@ -304,6 +435,8 @@ class _Pass:
     def _job_state(self, jobrow: Optional[dict], state: str, outcome: str = "") -> None:
         if not jobrow or jobrow.get("queue_item_id") is None:
             return
+        if state == "printing" and jobrow.get("state") not in (None, *ACTIVE_JOB_STATES):
+            return  # a job never goes back to printing once it left the active states
         try:
             fields: dict[str, Any] = {"state": state}
             if state in ("finished", "failed"):
@@ -313,8 +446,9 @@ class _Pass:
             if state == "printing" and jobrow.get("started_ts") is None:
                 fields["started_ts"] = self.now  # the start tool may already have recorded it
             self.store.upsert_job(int(jobrow["queue_item_id"]), **fields)
+            jobrow.update(fields)
             rid = jobrow.get("request_id")
-            req_status = {"printing": "printing", "finished": "done", "failed": "failed"}.get(state)
+            req_status = _REQUEST_STATUS.get(state)
             if rid and req_status:
                 self.store.update_request(int(rid), status=req_status, outcome=outcome or state)
         except Exception as exc:
@@ -355,19 +489,26 @@ class _Pass:
                     reason="found finished before the watcher started").to_dict()
             if st.state == FAILED and not self._plate_confirmed(job):
                 self._record_failure(job, "found failed before the watcher started")
-        if st.is_active and (prev not in ACTIVE_STATES or (job and job != self.w.get("job_name"))):
+        item_now = self._printing_item() if st.is_active else None
+        item_before = self.w.get("print_item")
+        next_item = item_now is not None and item_before is not None and item_now != item_before
+        if st.is_active and (prev not in ACTIVE_STATES or (job and job != self.w.get("job_name")) or next_item):
+            # a new print (also the same file again: the printer manager's printing item changed between passes)
             jobrow = self._attribute(job)
+            self.w["print_item"] = item_now
             self._job_state(jobrow, "printing")
             self.w.update(started_ts=self.now, started_job=job)
             try:  # the plate is in use by a new print: an earlier failure is settled
                 self.store.clear_failure(f"a new print started: {job}"[:120])
             except Exception as exc:
                 _log(f"clear_failure failed: {exc}")
-            if self.w.get("photo_for_job") == job:
+            if self.w.get("photo_for_job") == job:  # keep it for a finish the watcher may report late (reconcile)
+                self.w["prev_photo"] = {"job": job, "path": self.w.get("photo_path") or ""}
                 self.w["photo_for_job"] = ""
             self.store.add_event("started", job, {"state": st.state, "queue_item_id": (jobrow or {}).get("queue_item_id"),
                                                   "silent": True})
-        if st.state == RUNNING and job and self.w.get("photo_for_job") != job and self._near_end(st):
+        if (st.state == RUNNING and job and self.w.get("photo_for_job") != job and self._near_end(st)
+                and self._job(job) is not None):  # the "done" photo is for workshop prints only (light discipline)
             photo = self._snapshot()
             if photo is not None:
                 self.w["photo_for_job"], self.w["photo_path"] = job, str(photo)
@@ -409,8 +550,14 @@ class _Pass:
             ps.phase, ps.reason, ps.checks = "clear", "confirmed by the owner", 0
             self.w["plate_state"] = ps.to_dict()
             return
-        check = self._check_plate() if eject.needs_plate_check(ps, st, self.now, cool) else None
-        new, events = eject.step(ps, st, self.now, eject_planned=planned, plate=check, cool_temp_c=cool)
+        want = eject.needs_plate_check(ps, st, self.now, cool, eject_in_gcode=self.gcode_push)
+        if want and ps.phase == "needs_human":  # waiting for a person: re-checks back off (light discipline)
+            want = self._recheck_ok("needs_human", st, ps.job_name, want)
+            if want:
+                self._count_recheck()
+        check = self._check_plate() if want else None
+        new, events = eject.step(ps, st, self.now, eject_planned=planned, plate=check, cool_temp_c=cool,
+                                 eject_in_gcode=self.gcode_push)
         self.w["plate_state"] = new.to_dict()
         if self.first and set(events) <= {"plate_clear"}:
             return  # first pass: the plate of an old job is already clear, nothing to announce
@@ -422,6 +569,7 @@ class _Pass:
         job = new.job_name or st.job_name
         ctx, family = self._ctx(job, jobrow, st)
         ctx["eject_planned"] = bool(new.eject_planned)
+        ctx["eject_in_gcode"] = self.gcode_push
         last = new.last_check or {}
         ctx.update(reason=new.reason, plate_diff=last.get("difference_pct"))
         payload = {"phase": new.phase, "prev_phase": prev.phase, "events": list(events), "plate": last or None}
@@ -433,13 +581,17 @@ class _Pass:
                        detail=new.reason, **payload)
         if "finished" in ev:
             self._job_state(jobrow, "finished")
-            part = self._part_photo(job, take=True)
+            pushed = self.gcode_push and new.eject_planned  # the plate is already empty when all went well
+            part = self._part_photo(job, take=not pushed)
             if "plate_clear" in ev and new.eject_planned:
+                # one owner message: the finish facts, then the camera's opinion (with the fresh plate photo)
+                self._note("finished", job, dict(ctx, eject_result_follows=True), **payload)
                 self._job_state(jobrow, "cleared", "ejected")
                 self._note("finished_ejected", job, ctx, family=family, owner_media=self._snapshot(),
                            family_media=part, **payload)
             elif new.eject_planned and "plate_not_clear" not in ev:
-                self._note("finished", job, ctx, owner_media=part, **payload)  # family hears the eject outcome
+                # family hears the eject outcome; the owner sees what the camera sees now (or the last layers)
+                self._note("finished", job, ctx, owner_media=(self._fresh if pushed else None) or part, **payload)
             else:
                 self._note("finished", job, ctx, family=family, owner_media=part, family_media=part,
                            human="remove_part" if "plate_not_clear" in ev else "",
@@ -493,9 +645,11 @@ class _Pass:
             return True
         if ps.phase != "idle" or st.state != IDLE:
             return False
-        if self.now - float(self.w.get("idle_check_ts") or 0) < IDLE_CHECK_S:
+        base_ok = self.now - float(self.w.get("idle_check_ts") or 0) >= IDLE_CHECK_S
+        if not self._recheck_ok("idle", st, "", base_ok):
             return False
         self.w["idle_check_ts"] = self.now
+        self._count_recheck()
         check = self._check_plate()
         if not _says_empty(check):
             return False
@@ -545,7 +699,7 @@ class _Pass:
             ctx, _ = self._ctx(name, jobrow, None)
             ctx.update(next_job=pretty_job(name), next_id=nxt.id, plate_diff=diff, photo=photo is not None,
                        ahead=[{"id": q.id, "name": pretty_job(q.name)} for q in ahead],
-                       confirm_first=self._confirm_first(st))
+                       confirm_first=self._confirm_first(st), awaiting_clear=st.awaiting_plate_clear is True)
             self._note("ready_next", name, ctx, owner_media=photo, queue_item_id=nxt.id,
                        ahead_ids=[q.id for q in ahead])
             self.w["ready_notified_for"] = (notified + [nxt.id])[-50:]
@@ -577,11 +731,7 @@ class _Pass:
         if not unseen:
             self.w["missing_jobs"] = []
             return
-        try:
-            every = {int(q.id): q for q in self.backend.queue(include_done=True)}
-        except Exception as exc:
-            _log(f"queue(include_done) failed: {exc}")
-            return
+        every = {int(q.id): q for q in self._queue_all() or []}
         before = set(_ids(self.w.get("missing_jobs")))
         missing: list[int] = []
         for qid in sorted(unseen):
@@ -589,6 +739,9 @@ class _Pass:
             status = str(item.status or "").strip().lower() if item is not None else ""
             if item is None and qid not in before:
                 missing.append(qid)
+                continue
+            if item is not None and status == "failed" and not item.started_at:
+                self._start_failed(queued[qid], item)  # started elsewhere, but the printer never began
                 continue
             if item is None or status in _CANCELLED_QUEUE:
                 state, req_status = "cancelled", "cancelled"
@@ -605,6 +758,179 @@ class _Pass:
             except Exception as exc:
                 _log(f"close stale job {qid} failed: {exc}")
         self.w["missing_jobs"] = missing[-100:]
+
+    def reconcile(self, st: PrinterStatus) -> None:
+        """Workshop jobs the store still calls ``printing`` whose queue item already ended while the printer is idle
+        or on another job: a FINISH the watcher never saw (the next job started at once) gets its finished / failed
+        notice (with the stored last-layer photo) and is closed; an item that failed without ever starting is a
+        start that did not happen (owner notice with the printer manager's error). The plate state machine keeps
+        every print that is still on the printer."""
+        try:
+            printing = [j for j in self.store.jobs(state="printing", limit=50) if j.get("queue_item_id") is not None]
+        except Exception as exc:
+            _log(f"jobs(printing) failed: {exc}")
+            return
+        if not printing:
+            return
+        every = self._queue_all()
+        if every is None:
+            return
+        by_id = {int(q.id): q for q in every}
+        for job in printing:
+            try:
+                self._reconcile_one(job, by_id.get(int(job["queue_item_id"])), st)
+            except Exception as exc:  # one odd row never stops the pass
+                _log(f"reconcile job {job.get('queue_item_id')} failed: {exc}")
+
+    def _reconcile_one(self, job: dict, item: Optional[QueueItem], st: PrinterStatus) -> None:
+        qid = int(job["queue_item_id"])
+        status = str(item.status or "").strip().lower() if item is not None else ""
+        if item is None or not item.is_done or self._on_printer(qid, job, st):
+            return  # still waiting / printing, or the plate state machine follows it
+        if status == "failed" and not item.started_at:
+            self._start_failed(job, item)
+        elif status in ("completed", "failed"):
+            self._unseen_end(job, item, status, st)
+        else:  # cancelled / skipped in the printer manager
+            self._job_state(job, "cancelled", f"{status} in the printer queue")
+
+    def _on_printer(self, qid: int, job: dict, st: PrinterStatus) -> bool:
+        """Is the printer (still) showing this workshop job? Unknown states count as yes (nothing is closed)."""
+        if st.state == IDLE:
+            return False
+        if st.state not in (*ACTIVE_STATES, FINISH, FAILED):
+            return True
+        memo = self.w.get("job_memo")
+        if isinstance(memo, dict) and st.job_name and memo.get("name") == st.job_name:
+            return memo.get("qid") is not None and int(memo["qid"]) == qid
+        return bool(st.job_name) and _same_name(job.get("name") or "", st.job_name)
+
+    def _start_failed(self, job: dict, item: QueueItem) -> None:
+        """The printer manager gave up on the item before it started: tell the owner why, close job + request."""
+        name = job.get("name") or item.name or ""
+        err = str(item.error_message or "").strip()
+        ctx, _ = self._ctx(name, job, None)
+        ctx.update(error=err, queue_item_id=int(item.id))
+        self._job_state(job, "start_failed", ("start did not happen: " + (err or "failed in the printer queue"))[:200])
+        self._note("start_failed", name, ctx, queue_item_id=int(item.id), error=err[:300])
+
+    def _unseen_end(self, job: dict, item: QueueItem, status: str, st: PrinterStatus) -> None:
+        """Our print ended (completed / failed in the queue) without the watcher seeing its end."""
+        name = job.get("name") or item.name or ""
+        idle = st.state == IDLE
+        ctx, family = self._ctx(name, job, None)
+        ctx["missed_end"] = "idle" if idle else "busy"
+        photo = self._part_photo(name, take=False)
+        prev = self.w.get("prev_photo")
+        if photo is None and isinstance(prev, dict) and _same_name(str(prev.get("job") or ""), name) \
+                and prev.get("path") and Path(str(prev["path"])).is_file():
+            photo = Path(str(prev["path"]))  # the same file started again right away: its last-layer photo
+        if idle:  # the plate was never looked at: the next start waits for a camera check (or a person)
+            planned = bool(job.get("eject_planned"))
+            reason = ("print failed while the watcher was not looking: check the printer and the plate"
+                      if status == "failed" else "the print ended while the watcher was not looking: check the plate")
+            self.w["plate_state"] = eject.PlateState("needs_human", job_name=_stem(name), eject_planned=planned,
+                                                     finished_ts=self.now, reason=reason).to_dict()
+        if status == "completed":
+            self._job_state(job, "finished", "finished (the watcher did not see the end)")
+            self._note("finished", name, ctx, family=family, owner_media=photo, family_media=photo,
+                       queue_item_id=int(item.id), missed_end=ctx["missed_end"])
+        else:
+            self._job_state(job, "failed", "failed in the printer queue (the watcher did not see the end)")
+            if idle:
+                self._record_failure(_stem(name), "failed in the printer queue")
+            self._note("failed", name, ctx, family=family, owner_media=self._snapshot() if idle else photo,
+                       human="failure_check", detail="failed in the printer queue", queue_item_id=int(item.id),
+                       missed_end=ctx["missed_end"])
+
+    def approvals(self) -> None:
+        """Household requests the hook refused (start / resume / clear): tell the owner each one once, with the
+        exact command. A start request whose queue item is no longer waiting is dropped without a word."""
+        fn = getattr(self.store, "pending_approval_requests", None)
+        if not callable(fn):
+            return
+        try:
+            rows = list(fn() or [])
+        except Exception as exc:
+            _log(f"pending_approval_requests failed: {exc}")
+            return
+        for r in rows:
+            try:
+                rid = int(r.get("id"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            try:
+                self._approval_note(rid, r)
+            except Exception as exc:  # one odd row never stops the pass
+                _log(f"approval request {rid} failed: {exc}")
+
+    def _approval_note(self, rid: int, r: dict) -> None:
+        action = str(r.get("action") or "start").strip().lower()
+        action = {"home3d_start": "start", "clear_plate": "clear", "confirm_clear": "clear"}.get(action, action)
+        who = self._display_name(str(r.get("who") or r.get("requester") or ""))
+        raw_qid = r.get("queue_item_id", r.get("target"))
+        qid = int(raw_qid) if str(raw_qid or "").strip().isdigit() else None
+        jobrow: Optional[dict] = None
+        item: Optional[QueueItem] = None
+        items = self._queue() if action == "start" else None
+        if qid is not None:
+            try:
+                jobrow = self.store.get_job(qid)
+            except Exception:
+                jobrow = None
+            item = next((q for q in items or [] if int(q.id) == qid), None)
+        if action == "start" and items is not None and (item is None or not item.is_pending):
+            self._announced.append(rid)  # started, removed or finished meanwhile: nothing left to approve
+            return
+        ready = next((n for n in self.notes if n.kind == "ready_next" and qid is not None
+                      and n.payload.get("queue_item_id") == qid), None)
+        if ready is not None:  # this pass already says "ready, start it with ..." for the same job: one message
+            ready.ctx["asked_by"] = who
+            self._announced.append(rid)
+            return
+        name = (jobrow or {}).get("name") or (item.name if item else "")
+        if action != "start" and not name:
+            name = str(self.w.get("job_name") or "")
+        ctx, _ = self._ctx(name, jobrow, None)
+        meta: dict = {}
+        if jobrow and jobrow.get("sliced_file_id") is not None:
+            try:
+                meta = self.store.kv_get(f"slice:{jobrow['sliced_file_id']}") or {}
+            except Exception:
+                meta = {}
+        minutes = (item.print_time_s / 60.0) if item and item.print_time_s else (meta or {}).get("print_time_min")
+        ahead: list[dict] = []
+        if item is not None and items is not None:
+            try:
+                ours = {int(i) for i in self.store.active_job_ids()}
+            except Exception:
+                ours = set()
+            pending = [q for q in items if q.is_pending]
+            ahead = [{"id": q.id, "name": pretty_job(q.name)} for q in pending[: pending.index(item)]
+                     if q.id not in ours] if item in pending else []
+        ctx.update(action=action, who=who, queue_item_id=qid, duration_min=minutes,
+                   grams=(meta or {}).get("grams"), ahead=ahead)
+        self._note("approval_request", name, ctx, approval_request_id=rid, action=action, who=who)
+        self._announced.append(rid)
+
+    def _display_name(self, who: str) -> str:
+        """A household member's name for the owner text ("Mum"), from a name or a sender id."""
+        w = who.strip()
+        for p in self.s.people():
+            if w and w.lower() in {str(p.id or "").strip().lower(), p.name.strip().lower(),
+                                    (p.address_as or "").strip().lower()}:
+                return p.name
+        return w
+
+    def mark_announced(self) -> None:
+        fn = getattr(self.store, "mark_approval_request_announced", None)
+        if not callable(fn):
+            return
+        for rid in self._announced:
+            try:
+                fn(rid)
+            except Exception as exc:
+                _log(f"mark_approval_request_announced({rid}) failed: {exc}")
 
     def light_pending(self) -> None:
         """A plate check made by the hook or a tool could not switch the chamber light off again: tell the owner."""
@@ -694,7 +1020,7 @@ class _Pass:
         if not self.default_media or not self.out_dir.is_dir():
             return
         cutoff = time.time() - MEDIA_KEEP_S
-        keep = {self.w.get("photo_path") or ""}
+        keep = {self.w.get("photo_path") or "", str((self.w.get("prev_photo") or {}).get("path") or "")}
         for p in self.out_dir.iterdir():
             try:
                 if p.is_file() and str(p) not in keep and p.stat().st_mtime < cutoff:
@@ -704,6 +1030,8 @@ class _Pass:
 
     def run(self) -> list[dict]:
         st, err = self._status()
+        if st is None:
+            self._queue_tried = True  # the printer manager did not answer: no second slow call this pass
         if st is None or st.state == OFFLINE or not st.connected:
             self.offline(err or "printer offline")
         else:
@@ -711,11 +1039,14 @@ class _Pass:
             self.light_pending()
             self.transitions(st)
             self.plate(st)
+            self.reconcile(st)
             self.stale_jobs()
             self.ready_next(st)
             self.remember(st)
+        self.approvals()
         self.proposals()
         results = self.deliver_notes()
+        self.mark_announced()
         self.w.update(now=self.now, updated=time.time())
         self.store.kv_set(KV_KEY, _jsonable(self.w))
         self.prune_media()
@@ -727,10 +1058,19 @@ def _says_empty(check: Optional[PlateCheck]) -> bool:
     return check is not None and check.is_empty is True and getattr(check, "light_ok", None) is not False
 
 
-def _same_job(a: str, b: str) -> bool:
-    """Queue item name vs printer job name ("gul_kutusu.gcode.3mf" == "gul kutusu"); an empty side matches."""
+def _same_name(a: str, b: str) -> bool:
+    """Queue item / job name vs printer job name ("gul_kutusu.gcode.3mf" == "gul kutusu"); both must be set."""
     x, y = pretty_job(a).casefold(), pretty_job(b).casefold()
-    return not x or not y or x == y
+    return bool(x) and x == y
+
+
+def _stem(name: str) -> str:
+    """'towel_hook.gcode.3mf' -> 'towel_hook' (how the printer reports the job name)."""
+    n = (name or "").strip()
+    for suf in _SUFFIXES:
+        if n.lower().endswith(suf):
+            return n[: -len(suf)]
+    return n
 
 
 def _ids(raw: Any) -> list[int]:

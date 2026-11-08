@@ -217,6 +217,12 @@ def test_approve_never_runs_from_cron():
 def test_usage_and_unknown(rig):
     assert "approve start" in rig("")
     assert "approve start" in rig("help")
+    lines = rig("help").splitlines()  # judge F10: one line per subcommand, with what it does
+    assert len(lines) == len(commands.HELP_LINES) and all(ln.startswith("/home3d ") for ln in lines)
+    assert any("approve clear" in ln and "mark the plate clear" in ln for ln in lines)
+    assert any("moments" in ln and "step in" in ln for ln in lines)
+    tr = Rig(language="tr")("help")
+    assert "tablayı boş işaretle" in tr and "/home3d approve start <no> [jump]" in tr
     assert "Usage" in rig("approve", OWNER)
     assert "Usage" in rig("approve start abc", OWNER)
     assert "Unknown subcommand 'frobnicate'" in rig("frobnicate")
@@ -234,9 +240,33 @@ def test_status_whoami_moments_upgrades(rig):
     assert "No human-needed moments" in rig("moments")
     for _ in range(3):
         rig.store.add_human_needed("remove_part", "took it off", job_name="Box", who="Mum")
-    assert "remove_part 3" in rig("moments")
+    assert "remove_part 3" in rig("moments") and "took it off" in rig("moments")
     up = rig("upgrades")
     assert "💡" in up and "makerworld.com" in up
+
+
+def test_turkish_moments_and_upgrades_have_turkish_labels():
+    """judge F9: '/home3d moments' and 'upgrades' in Turkish showed English details and '[proposed]'."""
+    r = Rig(language="tr")
+    for _ in range(3):
+        r.store.add_human_needed("remove_part", "part still on the plate after 3 checks", job_name="kutu.gcode.3mf",
+                                 who="Annem")
+    text = r("moments")
+    assert "biten parçayı tabladan alma 3" in text and "part still on the plate" not in text
+    assert "kutu" in text and ".gcode.3mf" not in text
+    up = r("upgrades")
+    assert "[önerildi]" in up and "[proposed]" not in up and "Otomatik düşürme" in up
+
+
+def test_turkish_moments_show_details_only_when_translated():
+    """The hook's approval note and the watcher's plate reasons have Turkish forms (upgrades.detail_text); other
+    English details stay out of the Turkish list."""
+    r = Rig(language="tr")
+    r.store.add_human_needed("approve_start", "home3d_start start:1 waited for the owner's approval", who="Annem")
+    r.store.add_human_needed("other", "glued fingers", who="Babam")
+    text = r("moments")
+    assert "sahibin onayını bekledi" in text and "waited for the owner" not in text
+    assert "glued fingers" not in text and "elle müdahale" in text
 
 
 def test_turkish_replies():
@@ -244,6 +274,20 @@ def test_turkish_replies():
     assert "Sadece sahibi" in r("approve clear", MUM)
     assert "Kuyruk boş" in r("status")
     assert r("approve resume", OWNER).startswith("Yapılamadı")
+
+
+def test_status_names_the_real_reason_the_watcher_is_silent(rig, monkeypatch, tmp_path):
+    """judge F5: with the cron script installed but no gateway, status said 'run hermes home3d setup' again."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    assert "hermes home3d setup" in rig("status")
+    script = tmp_path / "hermes" / "scripts" / "home3d_watch.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# installed", encoding="utf-8")
+    text = rig("status")
+    assert "the Hermes scheduler is not running: start `hermes gateway`" in text and "home3d setup" not in text
+    assert "zamanlayıcısı çalışmıyor" in Rig(language="tr")("status")
+    rig.store.kv_set("watcher", {"state": "IDLE", "updated": __import__("time").time() - 3600})
+    assert "last pass 60 min ago" in rig("status")
 
 
 def test_never_raises_on_garbage(rig):
@@ -303,8 +347,8 @@ def test_demo_runs_the_whole_loop(data_dir):
     assert os.environ["HOME3D_DATA_DIR"] == str(data_dir) and "HOME3D_DRY_RUN" not in os.environ
     assert not Path(res["data_dir"]).exists()  # temporary dir removed
     kinds = res["events"]
-    assert kinds.index("finished") < kinds.index("finished_ejected") < kinds.index("ready_next") \
-        < kinds.index("plate_not_clear")
+    ejected = kinds.index("finished_ejected")  # the real A1 order: pushed inside the end G-code, then FINISH
+    assert kinds.index("finished") < ejected < kinds.index("plate_not_clear") and "ready_next" in kinds[ejected:]
     audiences = {(r["audience"], r["dry_run"]) for r in res["outbox"]}
     assert audiences == {("owner", True), ("family", True)}
     text = "\n".join(lines)
@@ -391,3 +435,14 @@ def test_status_says_when_the_printer_manager_waits_for_a_plate_clear():
     assert "bekliyor" in commands.format_status(data, "tr")
     data["printer"]["awaiting_plate_clear"] = False
     assert "approve clear" not in commands.format_status(data, "en")
+
+
+def test_a_started_reply_does_not_promise_reports_without_a_watcher(rig):
+    q1, q2 = rig.queue_job(), rig.queue_job()
+    reply = rig(f"approve start {q1}", OWNER)
+    assert reply.startswith("▶️") and "watcher is not running" in reply and "hermes home3d doctor" in reply
+    rig.be.stop()
+    rig.store.kv_set("watcher", {"state": "IDLE", "updated": __import__("time").time()})
+    rig.store.confirm_plate(rig.be.status().job_name, "Owner")
+    reply = rig(f"approve start {q2}", OWNER)
+    assert reply.startswith("▶️") and "watcher is not running" not in reply, reply

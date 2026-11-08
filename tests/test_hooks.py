@@ -1,11 +1,15 @@
 """hooks.py: who may start / clear / resume (D3), session identity (D2), the handler pass (D4), cron (fail
-closed), plate-check sharing, speaker context and audit. No Hermes."""
+closed), the bounded hook (no camera, deadline; fix round 2), family approval requests, speaker context and audit.
+No Hermes."""
 
 from __future__ import annotations
 
 import contextvars
 import json
+import socket
 import sys
+import threading
+import time
 import types
 
 import pytest
@@ -23,6 +27,7 @@ OWNER, MUM, STRANGER = "owner-id@s.whatsapp.net", "mum-id@s.whatsapp.net", "some
 
 def settings(**over) -> Settings:
     base = dict(backend="simulator", persona_name="Mıstık", language="tr", owner_name="Owner", owner_ids=[OWNER],
+                owner_target="whatsapp:<owner-chat>@g.us",
                 household=[{"id": MUM, "name": "Mum", "address_as": "Anneciğim"}, {"id": "dad-id", "name": "Dad"}])
     base.update(over)
     return Settings(**base)
@@ -74,6 +79,13 @@ class Rig:
 
     def pre(self, tool, args, session=""):
         return self.h["pre_tool_call"](tool_name=tool, args=args, task_id="t", session_id=session, tool_call_id="c1")
+
+    def handler(self, tool, args, session):
+        """The tool handler right after an approved hook call (what Hermes runs next)."""
+        from home3d_ws.home3d.tools import build_tools
+
+        fn = {n: h for n, _s, h in build_tools(self.rt)}[tool]
+        return json.loads(fn(args, session_id=session))
 
     def turn(self, session, sender="", platform="whatsapp", text="merhaba", first=True, parent=""):
         return self.h["pre_llm_call"](session_id=session, user_message=text, platform=platform, sender_id=sender,
@@ -169,14 +181,22 @@ def test_gate_failure_blocks_with_reasons(rig):
 
 
 def test_plate_not_verified_blocks_start_and_clear(rig):
+    """The hook defers the plate to the handler (no camera in the hook); the handler's check blocks, and for the next
+    2 minutes the hook blocks at once on that remembered result."""
     q1, q2 = rig.queue_job(), rig.queue_job()
     rig.be.set_scenario("eject_miss")  # the push misses: the part stays on the plate
     rig.be.start(q1)
     rig.be.advance(600)
     d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
-    assert d["action"] == "block" and "plate" in d["message"]
+    assert d["action"] == "approve" and "camera checks the plate right before starting" in d["message"]
+    assert rig.be.plate_checks == 0
+    res = rig.handler("home3d_start", {"queue_item_id": q2}, "s-owner")
+    assert res["ok"] is False and res["blocked"] and "plate" in res["error"] and rig.be.plate_checks == 1
+    d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
+    assert d["action"] == "block" and "plate is not empty" in d["message"]
     d = rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-owner")
     assert d["action"] == "block" and "plate" in d["message"].lower()
+    assert rig.be.plate_checks == 1  # neither hook call looked again
 
 
 def test_after_a_failed_print_only_a_confirmed_plate_allows_a_start(rig):
@@ -191,7 +211,7 @@ def test_after_a_failed_print_only_a_confirmed_plate_allows_a_start(rig):
     assert d["action"] == "block" and "approve clear" in d["message"]  # ... but that is not enough after a failure
     rig.store.confirm_plate(st.job_name, "Owner")  # what `/home3d approve clear` records
     d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
-    assert d["action"] == "approve" and "camera thinks the plate is empty" in d["message"].lower()
+    assert d["action"] == "approve" and "camera checks the plate right before starting" in d["message"].lower()
     assert "verified" not in d["message"].lower()
 
 
@@ -319,14 +339,14 @@ def test_owner_gets_the_human_approval_prompt_and_a_pass(rig):
         d = rig.pre("home3d_start", {"queue_item_id": qid}, session)
         assert d["action"] == "approve"
         assert f"#{qid}" in d["message"] and "Mum" in d["message"] and "auto-eject" in d["message"]
-        assert "camera thinks the plate is empty" in d["message"]
+        assert "The camera checks the plate right before starting" in d["message"]
         assert d["rule_key"].startswith(f"home3d:home3d_start:{qid}:")
         keys.add(d["rule_key"])
         assert rig.store.peek_pass("home3d_start", str(qid), session)
     assert len(keys) == 3  # unique: an "always" answer never pre-approves a later printer action
     assert not rig.store.peek_pass("home3d_start", str(qid), "s-mum")
     d = rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-owner")
-    assert d["action"] == "approve" and "plate" in d["message"]
+    assert d["action"] == "approve" and "looking at the plate yourself" in d["message"]
     assert d["rule_key"].startswith("home3d:home3d_clear_plate:-:")
     assert rig.store.peek_pass("home3d_clear_plate", "", "s-owner")
     d = rig.pre("home3d_start", {"queue_item_id": qid, "allow_jump": "yes"}, "s-owner")
@@ -388,22 +408,30 @@ def test_post_tool_call_drops_a_pass_the_handler_did_not_use(rig):
     assert not rig.store.peek_pass("home3d_stop", "", "s-owner")
 
 
-def test_hook_and_handler_share_one_plate_check(rig):
+def test_the_hook_never_runs_the_camera_the_handler_does(rig, monkeypatch):
+    """catalog F1: a lit plate check (light on, ~12 s wait, check) inside pre_tool_call could pass Hermes' 30 s hook
+    budget. The hook only reads status + queue; the handler checks the plate once; a recent check counts in the hook
+    for HOOK_PLATE_MAX_AGE_S."""
     qid = rig.queue_job()
     assert rig.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "approve"
-    assert rig.be.plate_checks == 1
+    assert rig.be.plate_checks == 0
     plate = rig.rt.plate_check()  # what the handler does right after
     assert plate.is_empty is True and rig.be.plate_checks == 1
-    rig.rt.plate_check(max_age_s=0)
-    assert rig.be.plate_checks == 2
+    d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-owner")  # a recent "empty" in this process
+    assert d["action"] == "approve" and "camera thinks the plate is empty" in d["message"]
+    assert rig.be.plate_checks == 1
     q2 = rig.queue_job()
     rig.be.set_scenario("eject_miss")
     rig.be.start(qid)
-    rig.be.advance(600)  # FINISH with the part still on the plate: a new state key, and "occupied" is not cached
-    rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
-    n = rig.be.plate_checks
-    rig.rt.plate_check()
-    assert rig.be.plate_checks == n + 1
+    rig.be.advance(600)  # FINISH with the part still on the plate: a new state key, the old "empty" does not count
+    assert rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")["action"] == "approve"
+    occupied = rig.rt.plate_check()
+    assert occupied.is_empty is not True and rig.be.plate_checks == 2
+    assert rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")["action"] == "block"
+    later = time.monotonic() + hooks_mod.HOOK_PLATE_MAX_AGE_S + 1
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    assert rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")["action"] == "approve"  # too old: deferred
+    assert rig.be.plate_checks == 2
 
 
 def test_backend_and_internal_errors_fail_closed(rig):
@@ -619,7 +647,8 @@ def test_a_failure_the_printer_forgot_still_needs_the_owners_confirmation(rig):
 
 
 def test_the_owner_can_get_out_of_the_false_positive_band(rig, monkeypatch):
-    """e2e NEW-1: an empty plate read at 19.9 % (light on, calibrated) blocked approve clear AND start forever."""
+    """e2e NEW-1: an empty plate read at 19.9 % (light on, calibrated) blocked approve clear AND start forever. The
+    hook defers the plate; a recent band reading shows up as "NOT sure" and passes for the owner's confirmation."""
     from home3d_ws.home3d.backends.base import PlateCheck
 
     band = PlateCheck(is_empty=None, difference_pct=19.9, message="uncertain: band", light_ok=True,
@@ -631,6 +660,7 @@ def test_the_owner_can_get_out_of_the_false_positive_band(rig, monkeypatch):
     st = rig.be.status()
     assert st.state == "FAILED"
     monkeypatch.setattr(rig.be, "check_plate", lambda: band)
+    rig.rt.plate_check()  # e.g. the confirm handler a moment ago
     assert rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")["action"] == "block"
     d = rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-owner")
     assert d["action"] == "approve" and "NOT sure" in d["message"] and "19.9" in d["message"]
@@ -642,6 +672,7 @@ def test_the_owner_can_get_out_of_the_false_positive_band(rig, monkeypatch):
     occupied = PlateCheck(is_empty=False, difference_pct=40.0, light_ok=True)
     monkeypatch.setattr(rig.be, "check_plate", lambda: occupied)
     rig.rt.forget_plate_check()
+    rig.rt.plate_check()
     assert rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")["action"] == "block"  # never "occupied"
 
 
@@ -657,14 +688,259 @@ def test_the_resume_pass_records_the_errors_the_owner_was_shown(rig):
 
 
 def test_a_light_left_on_reaches_the_owner(rig, monkeypatch):
-    """safety 10: a plate check from the hook that could not switch the light off again shows up in the approval
-    prompt, and is handed to the watcher (which alerts the owner even when the call was blocked)."""
+    """safety 10: a plate check (now the handler's) that could not switch the light off again is handed to the
+    watcher, and a recent one shows up in the next approval prompt."""
     from home3d_ws.home3d.backends.base import PlateCheck
 
     qid = rig.queue_job()
     lit = PlateCheck(is_empty=True, difference_pct=1.0, light_ok=True,
                      message="empty (light_left_on: the chamber light could not be switched off again (mqtt))")
     monkeypatch.setattr(rig.be, "check_plate", lambda: lit)
+    rig.rt.plate_check()
+    assert "light_left_on" in rig.store.kv_get("light_left_on:pending")["note"]
     d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-owner")
     assert d["action"] == "approve" and "chamber light could not be switched off" in d["message"]
-    assert "light_left_on" in rig.store.kv_get("light_left_on:pending")["note"]
+
+
+# ---- fix round 2 (R2-6): the hook is bounded --------------------------------------------------------------------
+class FakeBambuddy:
+    """A Bambuddy HTTP server stand-in: records every request (method, path, timeout) and answers GETs."""
+
+    def __init__(self, hang: "threading.Event | None" = None, timeout_hang: bool = False):
+        self.calls: list[tuple[str, str, float]] = []
+        self.hang, self.timeout_hang = hang, timeout_hang
+
+    def __call__(self, req, timeout):
+        import io
+        from urllib.parse import urlparse
+
+        path = urlparse(req.full_url).path.replace("/api/v1", "", 1)
+        self.calls.append((req.get_method(), path, float(timeout)))
+        if self.hang is not None:  # a printer manager that never answers
+            self.hang.wait(30)
+            raise socket.timeout("timed out")
+        if self.timeout_hang:  # what urllib raises once ``timeout`` has passed without an answer
+            raise socket.timeout("timed out")
+        if path.endswith("/status"):
+            body = {"connected": True, "state": "IDLE", "subtask_name": "", "progress": 0, "chamber_light": False,
+                    "temperatures": {"bed": 24.0, "nozzle": 25.0}, "hms_errors": []}
+        elif path.startswith("/queue"):
+            body = [{"id": 7, "status": "pending", "library_file_name": "box.gcode.3mf", "position": 1,
+                     "manual_start": True}]
+        else:
+            body = {"is_empty": True, "difference_percent": 1.0}
+
+        class Resp(io.BytesIO):
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return Resp(json.dumps(body).encode())
+
+
+def _bambuddy_rig(monkeypatch, fake):
+    from home3d_ws.home3d.backends import bambuddy
+
+    monkeypatch.setattr(bambuddy, "_urlopen", fake)
+    be = bambuddy.BambuddyBackend("http://192.168.1.50:8000", printer_id=1)
+    be._sleep = lambda s: None
+    store = Store()
+    rt = Runtime(None, settings=settings(backend="bambuddy", bambuddy_url="http://192.168.1.50:8000"), store=store,
+                 backend=be)
+    store.remember_sender("s-owner", OWNER, "whatsapp")
+    store.upsert_job(7, name="box.gcode.3mf", requester="Mum", state="queued", eject_planned=1)
+    return rt, hooks_mod.make_hooks(rt)["pre_tool_call"], store
+
+
+def test_the_hook_reads_only_status_and_queue_with_short_timeouts(monkeypatch):
+    fake = FakeBambuddy()
+    rt, pre, store = _bambuddy_rig(monkeypatch, fake)
+    d = pre("home3d_start", {"queue_item_id": 7}, session_id="s-owner")
+    assert d["action"] == "approve" and "camera checks the plate right before starting" in d["message"]
+    d = pre("home3d_clear_plate", {"action": "confirm"}, session_id="s-owner")
+    assert d["action"] == "approve"
+    pre("home3d_stop", {"action": "resume"}, session_id="s-owner")
+    paths = [(m, p) for m, p, _t in fake.calls]
+    assert set(paths) <= {("GET", "/printers/1/status"), ("GET", "/queue/")}, paths
+    assert not any("camera" in p or "chamber-light" in p or m != "GET" for m, p in paths)  # no camera, no light
+    assert max(t for _m, _p, t in fake.calls) <= hooks_mod.HOOK_REQUEST_TIMEOUT_S <= 5
+    assert rt.backend.timeout_cap is None  # the shared backend keeps its normal timeouts
+
+
+def test_a_bambuddy_that_times_out_blocks_within_the_budget(monkeypatch):
+    """Every request times out: the hook blocks ("not reachable"); the worst case it waited is the sum of the
+    per-request timeouts (status only: the gate stops there), far below Hermes' 30 s."""
+    fake = FakeBambuddy(timeout_hang=True)
+    rt, pre, store = _bambuddy_rig(monkeypatch, fake)
+    d = pre("home3d_start", {"queue_item_id": 7}, session_id="s-owner")
+    assert d["action"] == "block" and "not reachable" in d["message"] and "home3d_start was not run" in d["message"]
+    assert sum(t for _m, _p, t in fake.calls) <= 2 * hooks_mod.HOOK_REQUEST_TIMEOUT_S < 15
+    assert not store.peek_pass("home3d_start", "7", "s-owner")
+
+
+def test_a_hanging_bambuddy_cannot_hold_the_hook_past_its_deadline(monkeypatch):
+    """A printer manager that never answers (or a DNS lookup that hangs: no socket timeout covers it): the hook
+    returns a block at HOOK_DEADLINE_S, and the late result never turns into a pass."""
+    monkeypatch.setattr(hooks_mod, "HOOK_DEADLINE_S", 0.3)
+    hang = threading.Event()
+    fake = FakeBambuddy(hang=hang)
+    rt, pre, store = _bambuddy_rig(monkeypatch, fake)
+    t0 = time.monotonic()
+    d = pre("home3d_start", {"queue_item_id": 7}, session_id="s-owner")
+    took = time.monotonic() - t0
+    assert d["action"] == "block" and "did not answer within" in d["message"] and took < 2
+    hang.set()  # the stuck request finally ends: still no pass, nothing issued later
+    time.sleep(0.2)
+    assert not store.peek_pass("home3d_start", "7", "s-owner")
+    assert not any("camera" in p or "chamber-light" in p for _m, p, _t in fake.calls)
+
+
+def test_the_bounded_gate_still_sees_cron_markers(monkeypatch):
+    """The gate runs in a worker thread with the caller's context: a cron ContextVar stays visible (fail closed)."""
+    class NoCron:
+        def current_cron_execution(self):
+            return None
+
+    ei = types.ModuleType("cron.execution_identity")
+    ei._CURRENT = contextvars.ContextVar("hermes_cron_execution_thread_test", default=None)
+    monkeypatch.setitem(sys.modules, "cron.execution_identity", ei)
+    r = Rig(ctx=NoCron())
+    qid = r.queue_job()
+    ev = hooks_mod._Hooks(r.rt)
+    token = ei._CURRENT.set(object())
+    try:
+        out = ev._evaluate_bounded("start", {"queue_item_id": qid})
+    finally:
+        ei._CURRENT.reset(token)
+    assert out.ok is False and "cron" in out.reason
+
+
+# ---- fix round 2 (R2-7): a family member's ask reaches the owner ---------------------------------------------
+def _watcher_ran(store, minutes_ago: float = 1) -> None:
+    store.kv_set("watcher", {"state": "IDLE", "updated": time.time() - minutes_ago * 60})
+
+
+def test_a_family_ask_becomes_one_approval_request(rig):
+    qid = rig.queue_job()
+    _watcher_ran(rig.store)
+    d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert d["action"] == "block" and f"/home3d approve start {qid}" in d["message"]
+    assert "Owner gets this request on the next watcher pass (about 2 min)" in d["message"]
+    assert "Do not promise a start" in d["message"] and "you asked" not in d["message"]
+    pending = rig.store.pending_approval_requests()
+    assert [(r["action"], r["queue_item_id"], r["who"], r["sender_id"]) for r in pending] == \
+        [("start", qid, "Mum", MUM)]
+    rig.pre("home3d_start", {"queue_item_id": qid}, "s-mum")  # asking again (same day) adds nothing
+    assert len(rig.store.pending_approval_requests()) == 1
+    rig.store.mark_approval_request_announced(pending[0]["id"])
+    d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert "already got this request" in d["message"]
+    rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")
+    rig.pre("home3d_stop", {"action": "resume"}, "s-mum")
+    assert [(r["action"], r["queue_item_id"]) for r in rig.store.pending_approval_requests()] == \
+        [("clear_plate", None), ("resume", None)]
+    assert rig.be.plate_checks == 0
+
+
+@pytest.mark.parametrize("target", ["whatsapp:<owner-chat>@g.us", ""])
+def test_without_a_watcher_the_block_says_to_ask_the_owner_directly(target):
+    rig = Rig(owner_target=target)
+    qid = rig.queue_job()
+    d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-mum")  # the watcher never ran
+    assert "The watcher is off, so Owner is not told automatically: Mum should ask Owner directly" in d["message"]
+    _watcher_ran(rig.store, minutes_ago=60)  # stale
+    d = rig.pre("home3d_start", {"queue_item_id": qid, "allow_jump": True}, "s-mum")
+    assert "watcher is off" in d["message"] and f"/home3d approve start {qid} jump" in d["message"]
+
+
+def test_strangers_and_unknown_senders_leave_no_request(rig):
+    qid = rig.queue_job()
+    _watcher_ran(rig.store)
+    for session in ("s-stranger", "s-nobody", ""):
+        d = rig.pre("home3d_start", {"queue_item_id": qid}, session)
+        assert d["action"] == "block" and "is not told about this" in d["message"]
+    assert rig.store.pending_approval_requests() == []
+
+
+def test_the_owner_starting_it_settles_the_request(rig):
+    qid = rig.queue_job()
+    _watcher_ran(rig.store)
+    rig.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert len(rig.store.pending_approval_requests()) == 1
+    assert rig.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "approve"
+    res = rig.handler("home3d_start", {"queue_item_id": qid}, "s-owner")
+    assert res["ok"], res
+    assert rig.store.pending_approval_requests() == []  # started meanwhile: never announced
+
+
+def test_interval_text():
+    it = hooks_mod._interval_text
+    assert it("2m") == "2 min" and it("90s") == "90 s" and it("1h") == "1 h" and it("every 5m") == "5 min"
+    assert it("") == "2 min" and it("*/2 * * * *") == "*/2 * * * *"
+
+
+def test_a_second_ask_after_the_owner_settled_the_first_is_passed_on_again(rig):
+    """Mum asks to clear the plate, the owner clears it; later the same day she asks again: a new request that the
+    watcher passes on (not "already got this request", and not a promise that nobody keeps)."""
+    _watcher_ran(rig.store)
+    rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")
+    (first,) = rig.store.pending_approval_requests()
+    rig.store.mark_approval_request_announced(first["id"])
+    assert "already got this request" in rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")["message"]
+    rig.store.resolve_approval_requests("clear_plate", None, "cleared by Owner")
+    d = rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")
+    assert "Owner gets this request on the next watcher pass" in d["message"]
+    assert "already got" not in d["message"]
+    (second,) = rig.store.pending_approval_requests()
+    assert second["id"] != first["id"] and second["action"] == "clear_plate"
+    rig.store.mark_approval_request_announced(second["id"])
+    rig.store.resolve_approval_requests("resume", None, "resumed")  # another action settles nothing here
+    assert "already got this request" in rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")["message"]
+
+
+def test_without_an_owner_chat_the_block_does_not_promise_the_owner_is_told():
+    """owner_target empty: the watcher's owner notices only reach the cron output / outbox, so the block says to
+    ask the owner directly, even with a running watcher and after an announcement."""
+    r = Rig(owner_target="")
+    qid = r.queue_job()
+    _watcher_ran(r.store)
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert "No owner chat is set (owner_target), so Owner may not be told automatically: Mum should ask Owner " \
+           "directly" in d["message"]
+    assert "gets this request" not in d["message"]
+    (req,) = r.store.pending_approval_requests()
+    r.store.mark_approval_request_announced(req["id"])
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert "already got" not in d["message"] and "should ask Owner directly" in d["message"]
+
+
+def test_the_hook_deadline_follows_a_lower_hermes_hook_timeout(monkeypatch):
+    """plugins.hook_callback_timeout below 30 s: the gate's deadline shrinks to 0.4 of it, so the hook answers
+    (a block) before Hermes times it out (which would block every tool call, stop included, for 60 s)."""
+    fake_plugins = types.ModuleType("hermes_cli.plugins")
+    limit = {"t": 30.0}
+    fake_plugins._resolve_hook_callback_timeout = lambda: limit["t"]
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
+    assert hooks_mod.hook_deadline_s() == hooks_mod.HOOK_DEADLINE_S == 12
+    limit["t"] = 8.0
+    assert hooks_mod.hook_deadline_s() == pytest.approx(3.2)
+    limit["t"] = 0  # Hermes without a hook time limit: our own deadline
+    assert hooks_mod.hook_deadline_s() == 12
+    fake_plugins._resolve_hook_callback_timeout = lambda: (_ for _ in ()).throw(RuntimeError("config"))
+    assert hooks_mod.hook_deadline_s() == 12  # unreadable: Hermes' default (30 s) applies
+    limit["t"] = 1.0
+    fake_plugins._resolve_hook_callback_timeout = lambda: limit["t"]
+    hang = threading.Event()
+    fake = FakeBambuddy(hang=hang)
+    rt, pre, store = _bambuddy_rig(monkeypatch, fake)
+    t0 = time.monotonic()
+    d = pre("home3d_start", {"queue_item_id": 7}, session_id="s-owner")
+    took = time.monotonic() - t0
+    hang.set()
+    assert d["action"] == "block" and "did not answer within 0.4 s" in d["message"] and took < 1.0, (took, d)
+    time.sleep(0.2)
+    assert not store.peek_pass("home3d_start", "7", "s-owner")

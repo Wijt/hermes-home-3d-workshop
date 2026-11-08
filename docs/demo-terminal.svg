@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="805" height="1104" viewBox="0 0 805 1104" role="img" aria-labelledby="t d">
+<title id="t">hermes home3d demo (condensed terminal output)</title>
+<desc id="d">A condensed, real run of hermes home3d demo on the simulated printer: a family member's start is blocked, the watcher passes the request to the owner, the owner approves with /home3d approve, the watcher reports the finish and the auto-eject, a filament pause, a missed push and an upgrade proposal.</desc>
+<style>
+text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;font-size:13px;fill:#1f2328;white-space:pre}
+.prompt{fill:#1a7f37;font-weight:700}.header{fill:#0550ae;font-weight:700}
+.blocked{fill:#cf222e}.watcher{fill:#8250df;font-weight:600}.to{fill:#0a6b75;font-weight:600}
+.dim{fill:#57606a}.person{fill:#1f2328}.done{fill:#1a7f37;font-weight:600}.staged{fill:#8c959f}
+.bar{font-size:12px;fill:#57606a}
+</style>
+<rect x="0.5" y="0.5" width="804" height="1103" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+<path d="M0.5 30.5V8.5a8 8 0 0 1 8-8h788a8 8 0 0 1 8 8v22z" fill="#f6f8fa" stroke="#d0d7de"/>
+<circle cx="18" cy="15.5" r="5.5" fill="#ff5f57"/><circle cx="36" cy="15.5" r="5.5" fill="#febc2e"/><circle cx="54" cy="15.5" r="5.5" fill="#28c840"/>
+<text class="bar" x="402" y="19.5" text-anchor="middle">hermes home3d demo · simulated printer · real output, condensed</text>
+<text x="18" y="44" class="prompt" xml:space="preserve">$ hermes home3d demo</text>
+<text x="18" y="62" class="body" xml:space="preserve">home-3d-workshop demo · persona Mıstık · language en · simulated printer · nothing is sent</text>
+<text x="18" y="98" class="header" xml:space="preserve">── 2. Mum sends a voice note ──</text>
+<text x="18" y="116" class="person" xml:space="preserve">  🎙️ Mum (voice note, transcribed by the gateway) <tspan class="staged">[staged]</tspan>: Mıstık, can you print me a little gift</text>
+<text x="18" y="134" class="body" xml:space="preserve">    box for flowers?</text>
+<text x="18" y="170" class="header" xml:space="preserve">── 7. Mum says "print it": her chat may not start a print (her ask becomes a request to the ow… ──</text>
+<text x="18" y="188" class="person" xml:space="preserve">  💬 Mum <tspan class="staged">[staged]</tspan>: Lovely, print it please!</text>
+<text x="18" y="206" class="blocked" xml:space="preserve">  ⛔ home3d_start blocked by pre_tool_call (real gate):</text>
+<text x="18" y="224" class="blocked" xml:space="preserve">     BLOCKED: owner approval needed: Mum is not the owner. Sam sends `/home3d approve start 1`</text>
+<text x="18" y="242" class="blocked" xml:space="preserve">       (runs it right away, nothing is stored). Sam gets this request on the next watcher pass</text>
+<text x="18" y="260" class="blocked" xml:space="preserve">       (about 2 min); tell Mum you passed it on. Do not promise a start.</text>
+<text x="18" y="278" class="to" xml:space="preserve">  🤖 Mıstık → Mum <tspan class="staged">[staged]</tspan>:</text>
+<text x="18" y="296" class="body" xml:space="preserve">     It's in the queue (#1). I've passed it on to Sam: Sam decides when it starts.</text>
+<text x="18" y="332" class="header" xml:space="preserve">── 8. The next watcher pass tells the owner, with the exact command ──</text>
+<text x="18" y="350" class="to" xml:space="preserve">   Mıstık → Sam (owner chat):</text>
+<text x="18" y="368" class="body" xml:space="preserve">     ▶️ The camera thinks the plate is empty (diff 1.8%). Next workshop job ready: "Flower gift</text>
+<text x="18" y="386" class="body" xml:space="preserve">       box" (#1) · for Mum</text>
+<text x="18" y="404" class="body" xml:space="preserve">     🙋 Mum asked to start it.</text>
+<text x="18" y="422" class="body" xml:space="preserve">     Check the photo, then start it: /home3d approve start 1</text>
+<text x="18" y="458" class="header" xml:space="preserve">── 9. The owner approves with a slash command (no model call; it runs right away, nothing is s… ──</text>
+<text x="18" y="476" class="person" xml:space="preserve">  ⌨️  Sam <tspan class="staged">[staged]</tspan>: /home3d approve start 1</text>
+<text x="18" y="494" class="body" xml:space="preserve">     ▶️ Started #1 "Flower gift box" (Mum). The watcher reports the finish and the plate.</text>
+<text x="18" y="530" class="header" xml:space="preserve">── 12. End G-code: the bed cools and the part is pushed off while the printer still says RUNNI… ──</text>
+<text x="18" y="548" class="dim" xml:space="preserve">  ⏩ +5 min → FINISH · "Flower gift box" · bed 26°C</text>
+<text x="18" y="566" class="watcher" xml:space="preserve">  📣 watcher: finished_ejected · Flower gift box</text>
+<text x="18" y="584" class="to" xml:space="preserve">   Mıstık → family group:</text>
+<text x="18" y="602" class="body" xml:space="preserve">     ✅ Mum, "flower box" is done. It dropped off by itself, you can take it from the box.</text>
+<text x="18" y="638" class="header" xml:space="preserve">── 13. Filament run-out: the owner starts the coaster from his own chat ──</text>
+<text x="18" y="656" class="watcher" xml:space="preserve">  📣 watcher: paused · Coaster_116pct</text>
+<text x="18" y="674" class="body" xml:space="preserve">     ⏸️ Paused: "Coaster 116pct" (#2) · 30% · layer 7/23 · for Dad</text>
+<text x="18" y="710" class="header" xml:space="preserve">── 14. Resuming with a printer error active needs the owner to acknowledge it ──</text>
+<text x="18" y="728" class="blocked" xml:space="preserve">  ⛔ home3d_stop blocked by pre_tool_call (real gate):</text>
+<text x="18" y="746" class="blocked" xml:space="preserve">     BLOCKED: Cannot resume: printer error 0700-2000-0002-0001: the owner must acknowledge it</text>
+<text x="18" y="764" class="blocked" xml:space="preserve">       first (/home3d approve resume ack).</text>
+<text x="18" y="782" class="person" xml:space="preserve">  ⌨️  Sam <tspan class="staged">[staged]</tspan>: /home3d approve resume ack</text>
+<text x="18" y="800" class="body" xml:space="preserve">     ▶️ Resumed "Coaster_116pct".</text>
+<text x="18" y="818" class="watcher" xml:space="preserve">  📣 watcher: plate_not_clear · Coaster_116pct</text>
+<text x="18" y="836" class="to" xml:space="preserve">   Mıstık → family group:</text>
+<text x="18" y="854" class="body" xml:space="preserve">     🙏 Dad, "coaster" is done but stayed on the plate. Could you take it off when you have a</text>
+<text x="18" y="872" class="body" xml:space="preserve">       moment?</text>
+<text x="18" y="908" class="header" xml:space="preserve">── 19. Fast-forward: later that month another coaster stays on the plate (condensed) ──</text>
+<text x="18" y="926" class="watcher" xml:space="preserve">  📣 watcher: upgrade_proposed</text>
+<text x="18" y="944" class="body" xml:space="preserve">     💡 Upgrade proposal #1 (Mıstık): Auto-eject: tilted base + push-off preset</text>
+<text x="18" y="962" class="body" xml:space="preserve">     A person had to step in 3 times in 30 days (take a finished part off the plate).</text>
+<text x="18" y="980" class="body" xml:space="preserve">       https://makerworld.com/en/models/2335000</text>
+<text x="18" y="1016" class="header" xml:space="preserve">── 21. Outbox: what would have been sent (dry run; every message is shown above where it happe… ──</text>
+<text x="18" y="1034" class="body" xml:space="preserve">  20 messages: 14 to the owner chat, 6 to the family group</text>
+<text x="18" y="1052" class="body" xml:space="preserve">  blocked by the plugin's gates on the way: home3d_start ×2, home3d_stop ×1</text>
+<text x="18" y="1070" class="done" xml:space="preserve">✅ demo complete: request → find → import → slice → queue → non_owner_blocked → …</text>
+</svg>

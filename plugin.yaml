@@ -62,10 +62,10 @@ config_schema:
     description: "Name of the household character the family talks to."
   language:
     type: str
-    choices: [tr, en]
-    default: tr
+    choices: [en, tr]
+    default: en
     label: Household language
-    description: "Language of family-facing messages and the persona's replies (hermes home3d demo is English unless --lang tr)."
+    description: "Language of family-facing messages, owner notices, /home3d replies and the persona's replies about printing. English by default; a Turkish household sets tr (hermes home3d demo is English unless --lang tr)."
   owner_name:
     type: str
     default: "Owner"

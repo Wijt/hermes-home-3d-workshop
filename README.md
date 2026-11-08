@@ -1,5 +1,7 @@
 # home-3d-workshop
 
+[![CI](https://github.com/Wijt/hermes-home-3d-workshop/actions/workflows/ci.yml/badge.svg)](https://github.com/Wijt/hermes-home-3d-workshop/actions/workflows/ci.yml)
+
 A Hermes Agent plugin that gives a household a 3D-printing service with a character.
 
 Family members ask in plain words, often by voice note. The agent finds or adapts a model, slices it and
@@ -7,9 +9,38 @@ queues it. The owner approves the start. A zero-token watcher follows the print,
 family what happened, and checks that the build plate is clear for the next job. Each time a person must
 step in, the plugin records it. When the same need repeats, it proposes an upgrade to the workshop.
 
+## Quick start
+
+```bash
+hermes plugins install Wijt/hermes-home-3d-workshop --enable
+hermes home3d demo
+```
+
+The demo runs the whole loop on a simulated printer in a temporary folder, in about 10 seconds. It sends
+nothing. Keep `--enable`. Without it, Hermes asks whether to enable the plugin (the default is no), and
+`hermes home3d` is not found until the plugin is enabled.
+
+![A condensed, real run of hermes home3d demo: a blocked start, the owner's approval, watcher notices and an upgrade proposal](docs/demo-terminal.svg)
+
+## Why a plugin, not a skill
+
+A skill can only ask the model to behave. This plugin puts the parts that must not fail into code.
+
+| Need | With a skill only | In this plugin | Code |
+|---|---|---|---|
+| Safety gates | Rules in a prompt. The model can skip them. | Printer state, HMS errors, plate, queue order and "after a failure" are checked in code before a start, a resume or a plate clear. | [`gates.py`](home3d/gates.py) |
+| Owner approval | The model decides who may start. | `pre_tool_call` refuses non-owners. An owner session gets a single-use pass, bound to the tool, the target and the session. The tool refuses without it. | [`hooks.py`](home3d/hooks.py) |
+| Watching a print | An agent cron job that spends tokens on every run. In the original setup, about 9 in 10 of 323 runs had nothing to say. | A `--no-agent` cron script. No model, zero tokens. It writes only when something happens. | [`watcher.py`](home3d/watcher.py) |
+| Household memory | Chat history. | SQLite: who asked for what, in their own words; jobs, failures, approval requests and moments. | [`store.py`](home3d/store.py) |
+| Getting better | Notes, if somebody writes them. | Each time a person has to step in, the plugin logs it. Repeats become an upgrade proposal, for example a tilted base for auto-eject. | [`upgrades.py`](home3d/upgrades.py) |
+| Two audiences | One voice for everyone. | The owner gets a technical note with a photo. The family gets one plain line, by name. | [`notify.py`](home3d/notify.py), [`messages.py`](home3d/messages.py) |
+
+The skill (`skills/household-printing`) still does what a skill does well: the persona, the tone and the
+workflow.
+
 The character is called **Mıstık** by default. You can change the name (`persona_name`) and the language
-of the messages (`language`: `tr` or `en`). The default language is Turkish, the language of the home
-it comes from; set `language: en` for English.
+of the messages (`language`: `en` or `tr`). The default language is English. The home it comes from sets
+`language: tr`.
 
 It works with a Bambu Lab printer that [Bambuddy](https://github.com/maziggy/bambuddy) manages, or with
 the built-in simulated printer.
@@ -39,8 +70,8 @@ itself". Auto-eject became the default for parts that are safe to push. The agen
 a tall rose box, and the owner agreed it was right.
 
 Not everything went well, and the agent said so: "the part was not pushed at all". A pause went
-unnoticed for about four hours. Of more than 300 runs of the old agent watch jobs, about nine in ten had
-nothing to report. After it missed a failure, the agent changed its own rule: "Better to stop by
+unnoticed for about four hours. Of 323 runs of the old agent watch jobs, about nine in ten had nothing
+to report. After it missed a failure, the agent changed its own rule: "Better to stop by
 mistake than waste filament."
 
 That setup used a Hermes profile with skills and shell scripts. This plugin turns what it learned into
@@ -56,14 +87,15 @@ The plugin is new. This table shows what is verified, and where.
 | Lit photo + plate check in one light cycle, light restored to its earlier state | Verified (a part on the plate read as occupied) | Verified (fake HTTP) |
 | MakerWorld cards, import, slice with the auto-eject preset (G-code check: height, footprint, eject block) | Verified | Verified |
 | Scale a model (upload + slice the scaled file), add to queue with manual start, remove | Verified | Verified |
+| Read Bambuddy's `require_plate_clear` setting and the queue history (start errors) | Verified (GET only) | Verified |
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
 | Auto-eject push on the tilted base | Real in the original setup; with this plugin: planned | Simulated |
 
-`hermes plugins validate . --install-deps` passes on Hermes 0.22.5 (also in CI), and
-`hermes plugins install Wijt/hermes-home-3d-workshop` installs it. The real-hardware loop with this
-plugin is **planned, not done**. The family uses the printer every
-day, so we test on it only when no family job waits.
+`hermes plugins validate . --install-deps` passes on Hermes 0.22.5, and
+`hermes plugins install Wijt/hermes-home-3d-workshop --enable` installs it. CI runs validate and the test
+suite (more than 600 tests, no Hermes needed). The real-hardware loop with this plugin is **planned, not
+done**. The family uses the printer every day, so we test on it only when no family job waits.
 
 ## Install
 
@@ -76,25 +108,25 @@ hermes plugins install Wijt/hermes-home-3d-workshop --enable
 Hermes shows a banner for a Git install, because nobody reviewed it yet. The plugin starts with the
 simulated printer, so it does nothing to real hardware until you configure Bambuddy.
 
-## Quick try: the simulator
+## More with the simulator
 
 ```bash
-hermes home3d demo              # under 10 seconds, English, nothing is sent
+hermes home3d demo              # about 10 seconds, English, nothing is sent
 hermes home3d demo --lang tr    # the same run in Turkish
 ```
 
 The demo runs the full loop on a simulated printer in a temporary folder: a request, model cards,
-import, scale, slice, queue, a blocked start from a family member, the owner's approval, the print, the
-messages to the owner and the family, auto-eject, a missed push, a failure, a filament-runout pause, and
-an upgrade proposal. Scripted stand-ins (such as canned search results and the owner's tap on
-"approve") are marked `[staged]`.
+import, scale, slice, queue, a blocked start from a family member, the request passed on to the owner,
+the owner's approval, the print, the messages to the owner and the family, auto-eject, a missed push, a
+failure, a filament-runout pause, and an upgrade proposal. Scripted stand-ins (what people say, the
+model's chat replies, canned search results and the owner's tap on "approve") are marked `[staged]`.
 
 You can also talk to the agent while the simulator is active. Ask it to print a coaster. Then move the
 simulated time forward and run one watcher pass:
 
 ```bash
 hermes home3d simulate advance 60 --watch
-hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, offline
+hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, offline, dispatch_fail
 ```
 
 ## Set up with Bambuddy
@@ -123,7 +155,15 @@ hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, 
    (`hermes config env-path` prints its path).
 3. Check the setup: `hermes home3d doctor`. Use `/home3d whoami` in a chat to see the sender id to put
    in `owner_ids` or `household`.
-4. Start the watcher: `hermes home3d setup`. Remove it again with `hermes home3d teardown`.
+4. Start the watcher: `hermes home3d setup`. The cron job runs only while the Hermes scheduler runs, and
+   `hermes gateway` runs it (check with `hermes cron status`). If the job exists but no pass ran,
+   `hermes home3d doctor` says so. Remove the watcher with `hermes home3d teardown`.
+5. If you use auto-eject, turn on **Require plate clear** in Bambuddy's settings. `hermes home3d doctor`
+   warns when it is off. See "Bambuddy's own queue" under "Safety model". With it on, Bambuddy waits after
+   each print until the plate is marked clear, so the owner sends `/home3d approve clear` before
+   `/home3d approve start <id>`; the "next job ready" message says so.
+
+The watcher reads the plugin settings from `config.yaml` on each pass, so a change needs no new setup.
 
 Other settings: `public_url` (links sent to people), `send_profile` (the profile that owns the messaging
 adapters), `standard_printer_preset`, `process_presets`, `filament_presets`, `bed_type`,
@@ -131,9 +171,11 @@ adapters), `standard_printer_preset`, `process_presets`, `filament_presets`, `be
 `inject_context` (`auto`, `always` or `never`).
 
 **Auto-eject** needs a printer that is tilted forward and a Bambuddy printer preset whose end G-code
-pushes the cooled part off. The plugin does not ship this G-code and never sends G-code itself. The
-skill reference `skills/household-printing/references/auto-eject.md` explains the concept. Run the
-first tests with a person present.
+pushes the cooled part off. The plugin does not ship this G-code and never sends G-code itself. The push
+happens at the end of the print, inside the end G-code: the A1 still reports RUNNING at 100 % while the
+bed cools and the nozzle pushes, and reports FINISH after the push. At FINISH the watcher checks the plate
+with the camera at once. The skill reference `skills/household-printing/references/auto-eject.md`
+explains the concept. Run the first tests with a person present.
 
 ## Tools
 
@@ -154,8 +196,8 @@ first tests with a person present.
 | `home3d_upgrades` | List and manage upgrade proposals | No |
 
 Also: the `/home3d` slash command (`status`, `approve start <id> [jump]`, `approve clear`,
-`approve resume [ack]`, `whoami`, `upgrades`, `moments`), the `hermes home3d` terminal command (`setup`,
-`teardown`, `watch`, `status`, `doctor`, `simulate`, `demo`), the hooks `pre_tool_call`,
+`approve resume [ack]`, `whoami`, `upgrades`, `moments`, `help`), the `hermes home3d` terminal command
+(`setup`, `teardown`, `watch`, `status`, `doctor`, `simulate`, `demo`), the hooks `pre_tool_call`,
 `post_tool_call` and `pre_llm_call`, and the skill `home-3d-workshop:household-printing`.
 
 ## Safety model
@@ -164,7 +206,8 @@ The rules are in code, not only in the prompt.
 
 - **Gates.** Before a start, the code checks: the printer is online and idle, no active HMS error, the
   camera thinks the plate is empty (with the chamber light on), and no other person's job waits ahead
-  (unless the owner adds `jump`). After a failed print, the owner must confirm that the plate is clear
+  (unless the owner adds `jump`). The tool checks the plate with the camera right before the action, and
+  so does `/home3d approve`. After a failed print, the owner must confirm that the plate is clear
   (`/home3d approve clear`). The watcher remembers the failure, so this holds even when the printer is
   restarted or the print was cancelled to idle (if the watcher saw the failure). A plate clear needs a
   cool bed. If the code is not sure, it blocks.
@@ -173,11 +216,22 @@ The rules are in code, not only in the prompt.
   plate; the next start then accepts it. A plate the camera sees as occupied, or a check in the dark,
   is never overruled.
 - **Owner approval.** Start, resume and "plate is clear" need the owner. In the owner's own session,
-  Hermes shows its approval prompt. A family member or an unknown sender is blocked. The block message
-  gives the owner's command, for example `/home3d approve start <id>`. This command runs the gate again
-  and runs the action at once. Nothing is stored for later.
+  Hermes shows its approval prompt. A family member or an unknown sender is blocked before any printer
+  call. The block message gives the owner's command, for example `/home3d approve start <id>`. This
+  command runs the gate again and runs the action at once. Nothing is stored for later.
+- **Requests reach the owner.** When a household member is blocked, the plugin records the request. The
+  watcher tells the owner on its next pass, once, with the exact command. If the watcher is not running,
+  or no owner chat (`owner_target`) is set, the block says so, and the person must ask the owner directly.
+  Once the owner has acted on a request, a new ask is a new request. A request from an unknown sender is not
+  passed on.
 - **No shortcut around the hook.** The tool itself refuses a start, resume or plate confirm without a
   single-use pass from that approval. A call that skips the hook does nothing.
+- **A bounded hook.** Hermes gives each hook callback 30 seconds. If `pre_tool_call` times out, Hermes
+  blocks every tool call of the process for 60 seconds, stop included. So the hook never uses the camera
+  or the chamber light. It reads only the printer status and the queue, at most 5 seconds per request and
+  12 seconds in all. If the printer does not answer in time, the hook blocks the call. If you set Hermes'
+  `plugins.hook_callback_timeout` below 30 seconds, the hook allows itself 0.4 of it instead, and
+  `hermes home3d doctor` warns below 15 seconds.
 - **Never from cron, never unattended.** Scheduled runs cannot start, resume or clear. Neither can runs
   with nobody present: kanban workers, `hermes chat -q`, `hermes -z` and `--source tool` integrations.
   Both checks fail closed.
@@ -185,7 +239,11 @@ The rules are in code, not only in the prompt.
   (`/home3d approve resume ack`). The acknowledgement covers only the error codes the owner was shown;
   a new error blocks the resume.
 - **Stop always works.** Anyone can stop or pause a print. No approval, no gate.
-- **Queue is safe.** Items are always added with manual start. Nothing starts by itself.
+- **Queue is safe.** The plugin always adds items with manual start. Nothing it queues starts by itself.
+- **Bambuddy's own queue.** Bambuddy can start its own auto-start items when a print ends. With its
+  "Require plate clear" setting off, it may start one on a finished printer before the camera check,
+  for example on top of a part that the push missed. Turn the setting on. `hermes home3d doctor` warns
+  when it is off and an auto-eject preset is set.
 
 Choose "approve once". Every printer action asks again; "always" does not carry over.
 
@@ -200,16 +258,29 @@ hermes cron create "every 2m" --name home3d-watch --no-agent --script home3d_wat
 Each run is a short Python process. It calls no model and costs no tokens. It reads the printer and the
 queue, and it uses the camera only when it needs to. It speaks only when something happens: finish
 (with the photo taken before the push), failure, pause, a new HMS error, plate not clear, plate clear,
-next job ready, a job queued outside the workshop (once per item), printer offline, a chamber light it
-could not switch off again, or a new upgrade proposal. The owner gets the technical note with a
-photo. The family gets one plain line that names the person who asked, and the thing they asked for in
-their own words. Empty output sends nothing.
+next job ready, a household member's request for the owner's approval, a start that did not happen
+(with Bambuddy's error), a job queued outside the workshop (once per item), printer offline, a chamber
+light it could not switch off again, or a new upgrade proposal. The owner gets the technical note with
+a photo. The family gets one plain line that names the person who asked, and the thing they asked for
+in their own words. Empty output sends nothing.
+
+The job runs only while the Hermes scheduler runs (`hermes gateway`). Each pass reads the plugin
+settings from `config.yaml`; the snapshot that setup writes is only a fallback.
+
+The watcher switches the chamber light itself for its camera checks. One pass switches it at most once
+(the photo and the plate check share one light cycle), or twice when a camera request fails and the plate
+check is tried again. It takes one "done" photo near the end of each print the workshop queued. Other
+prints get no near-end photo, only one photo when they end. While a plate waits for a person, or a job waits
+on an idle printer, the re-checks back off: 15, 30, 60, then 120 minutes, at most 6 times. The count
+starts again when the printer state, the job or the first queued item changes.
 
 ## Human-needed moments become upgrades
 
 Each time a person must act, the plugin logs a moment: remove a part, clean the plate, swap filament,
 check the camera, check a failure, measure, post-process, or approve a start. When one kind repeats
-(for example, 3 part removals in 30 days), it creates an upgrade proposal for the owner. For part
+(for example, 3 part removals in 30 days), it creates an upgrade proposal for the owner. "Approve a
+start" is only logged: it never becomes a proposal, because the owner's approval is a safety step on
+purpose. For part
 removal, the proposal is the one from the story: a tilted base (MakerWorld model 2335000) plus an
 auto-eject preset. The owner accepts it, the parts print through the normal flow, and the proposal
 moves to "installed".
@@ -220,8 +291,15 @@ moves to "installed".
   `HOME3D_BAMBUDDY_API_KEY`, it goes in the `X-API-Key` header, unencrypted over plain HTTP. MakerWorld
   lookups and downloads go through Bambuddy; Bambuddy contacts makerworld.com, the plugin does not.
 - **Printer writes.** Import, scale, slice and queue add write to the Bambuddy library and queue
-  without an approval prompt. A photo switches the chamber light on for about 12 seconds and then sets
-  it back to its earlier state.
+  without an approval prompt. A photo or a plate check switches the chamber light on for about 12
+  seconds and then sets it back to its earlier state.
+- **Chamber light from the background job.** The cron watcher switches the light by itself for its plate
+  checks and photos: at most once per pass (twice when a camera request fails), one photo near the end of
+  each workshop print, a check when a print ends, and re-checks that back off from 15 to 120 minutes (at
+  most 6) while a plate or a job waits. See "Zero-token watcher".
+- **Bambuddy setting.** The plugin reads Bambuddy's settings (`GET /settings/`) and changes none. Turn
+  on "Require plate clear" when you use auto-eject. With it off, Bambuddy may start a queued auto-start
+  item on a finished printer before the camera check. `hermes home3d doctor` warns about this.
 - **Approvals.** In an owner session, Hermes `yolo` or `approvals.mode: off` skips the prompt. An answer
   of "always" adds one `command_allowlist` line to `config.yaml` that never matches again. The owner is
   whoever is in `owner_ids`, plus anyone in a local CLI, TUI or Desktop session while `local_is_owner`
@@ -230,6 +308,17 @@ moves to "installed".
   `local_is_owner` off if your dashboard is shared or reachable from outside. Runs with nobody present
   (cron, kanban workers, `chat -q`, `-z`, `--source tool`) are never treated as the owner for a printer
   action.
+- **Hook time.** `pre_tool_call` reads only the printer status and the queue (at most 5 seconds per
+  request, 12 seconds in all) and never the camera, so it stays inside Hermes' 30-second hook limit. With
+  a lower `plugins.hook_callback_timeout` it allows itself 0.4 of that limit.
+- **Hermes internals.** To find cron and unattended runs, the plugin uses the public
+  `ctx.current_cron_execution()`. It also reads Hermes internals that are not public API:
+  `gateway.session_context.get_session_env`, `cron.execution_identity._CURRENT` and
+  `gateway.session_finite`. It takes them from `sys.modules` and never imports or changes them. A check
+  that raises counts as cron or unattended (fail closed). If a later Hermes renames one of them, that
+  extra check is skipped; the public cron check and Hermes' own approval prompt stay. To size its hook
+  deadline it also reads `hermes_cli.plugins._resolve_hook_callback_timeout` the same way (missing or
+  failing: Hermes' default of 30 seconds is assumed).
 - **Subprocesses.** `hermes send` (owner and family notices, with `-p <send_profile>` when set),
   `hermes cron create`, `hermes cron list` and `hermes cron remove` (setup and teardown), and `openscad`
   (templates only, when installed).
@@ -238,10 +327,11 @@ moves to "installed".
   the plugin; after removal, use `hermes cron remove` and delete the script yourself. While the plugin
   is disabled or removed, the script reads `config.yaml`, prints nothing and exits.
 - **Files written.** `$HERMES_HOME/plugin-data/home-3d-workshop/` (database, `outbox.jsonl` with every
-  message, camera photos, model files, watcher log, a settings snapshot without secrets) and
+  message, camera photos, model files, watcher log, and a settings snapshot without secrets that the
+  watcher uses only when it cannot read `config.yaml`) and
   `$HERMES_HOME/scripts/home3d_watch.py`. The demo uses a temporary folder and deletes it.
-- **Personal data, kept locally.** Household sender ids and names, who asked for what, the messages
-  sent, and camera photos of the plate. Nothing is sent anywhere except Bambuddy and your own chats.
+- **Personal data, kept locally.** Household sender ids and names, who asked for what, who asked the
+  owner to approve what, the messages sent, and camera photos of the plate. Nothing is sent anywhere except Bambuddy and your own chats.
 - **Context.** The `pre_llm_call` hook adds a short context (persona, speaker, printer state; at most
   900 characters, no network). For household members and the local owner it comes on the first turn,
   on printing turns and when the printer state changes; other turns get one "Speaking: ..." line. Other
@@ -260,7 +350,7 @@ moves to "installed".
 - Auto-eject needs your own tilted base and end G-code. The code refuses PETG, TPU, thin, small and
   tall-narrow parts. It cannot see shape: the agent must turn eject off for round or fragile parts.
 - Voice notes depend on the Hermes gateway's transcription.
-- Messages are in Turkish and English only. Tested on Linux only.
+- Messages are in English and Turkish only. Tested on Linux only.
 - The sender id comes from the messaging platform. Check it with `/home3d whoami` before you trust it.
 
 ## License

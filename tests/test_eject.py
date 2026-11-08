@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 
 from home3d_ws.home3d.backends.base import PlateCheck, PrinterStatus
-from home3d_ws.home3d.eject import (EVENTS, GIVE_UP_S, PHASES, RECHECK_S, PlateState, needs_plate_check,
-                                    step)
+from home3d_ws.home3d.eject import (EJECT_RECHECK_S, EVENTS, GIVE_UP_S, PHASES, RECHECK_S, PlateState,
+                                    needs_plate_check, step)
 
 T0 = 1_000_000.0
 MIN = 60.0
@@ -237,6 +237,7 @@ def test_against_the_simulator(tmp_path):
 
     def run(scenario, preset):
         b = simmod.SimulatorBackend(tmp_path / f"sim-{scenario}-{preset or 'std'}.json")
+        gcode_push = b.eject_in_gcode
         b.set_scenario(scenario)
         lib = b.import_model(simmod.DEMO_MODEL_IDS[0])
         sliced = b.slice(lib.id, SliceOptions(printer_preset=preset))
@@ -245,8 +246,8 @@ def test_against_the_simulator(tmp_path):
         s, events, phases = PlateState("idle"), [], []
         for _ in range(400):
             status, now = b.status(), b.now()
-            plate = b.check_plate() if needs_plate_check(s, status, now) else None
-            s, ev = step(s, status, now, eject_planned=planned, plate=plate)
+            plate = b.check_plate() if needs_plate_check(s, status, now, eject_in_gcode=gcode_push) else None
+            s, ev = step(s, status, now, eject_planned=planned, plate=plate, eject_in_gcode=gcode_push)
             events += ev
             if not phases or phases[-1] != s.phase:
                 phases.append(s.phase)
@@ -255,10 +256,10 @@ def test_against_the_simulator(tmp_path):
             b.advance(2)
         return planned, phases, events
 
-    assert run("ok", "sim-autoeject") == (True, ["printing", "cooling", "ejecting", "clear"],
-                                          ["finished", "plate_clear"])
+    # the simulator pushes inside the end G-code (RUNNING at 100 %), so FINISH already shows the empty plate
+    assert run("ok", "sim-autoeject") == (True, ["printing", "clear"], ["finished", "plate_clear"])
     planned, phases, events = run("eject_miss", "sim-autoeject")
-    assert phases[-2:] == ["verifying", "needs_human"] and events == ["finished", "plate_not_clear"]
+    assert phases == ["printing", "verifying", "needs_human"] and events == ["finished", "plate_not_clear"]
     assert run("ok", "") == (False, ["printing", "needs_human"], ["finished", "plate_not_clear"])
 
 
@@ -283,3 +284,59 @@ def test_unknown_state_changes_nothing_and_asks_for_no_check():
         s2, ev = step(s, st("UNKNOWN", bed=24), T0 + 30 * MIN, eject_planned=True, plate=None)
         assert s2.phase == phase and ev == []
         assert not needs_plate_check(s, st("UNKNOWN", bed=24), T0 + 30 * MIN)
+
+
+# ---- fix round 2: the real A1 order (push inside the end G-code, FINISH after it) --------------------------
+def pushed(prev, status, now, plate):
+    return step(prev, status, now, eject_planned=True, plate=plate, eject_in_gcode=True)
+
+
+def test_real_order_checks_at_finish_without_waiting_for_the_bed():
+    s = PlateState("printing", job_name="Gift box", eject_planned=True)
+    hot = st("FINISH", bed=45.0)  # no cool-down gate: the camera does not need a cool bed
+    assert needs_plate_check(s, hot, T0, eject_in_gcode=True)
+    assert not needs_plate_check(s, hot, T0)  # the old model waits for the bed
+    s2, ev = pushed(s, hot, T0, EMPTY)
+    assert s2.phase == "clear" and ev == ["finished", "plate_clear"]
+
+
+def test_real_order_eject_miss_is_rechecked_once_then_asks_a_person():
+    s = PlateState("printing", job_name="Gift box", eject_planned=True)
+    s, ev = pushed(s, st("FINISH", bed=28), T0, OCCUPIED)
+    assert ev == ["finished"] and s.phase == "verifying" and s.checks == 1
+    assert s.verify_after_ts == T0 + EJECT_RECHECK_S
+    assert not needs_plate_check(s, st("FINISH", bed=28), T0 + 2 * MIN, eject_in_gcode=True)
+    s, ev = pushed(s, st("FINISH", bed=28), T0 + 2 * MIN, None)  # a pass without a check changes nothing
+    assert ev == [] and s.phase == "verifying"
+    assert needs_plate_check(s, st("FINISH", bed=28), T0 + 4 * MIN, eject_in_gcode=True)
+    s, ev = pushed(s, st("FINISH", bed=28), T0 + 4 * MIN, OCCUPIED)
+    assert s.phase == "needs_human" and ev == ["plate_not_clear"] and "2 checks" in s.reason
+    s, ev = pushed(s, st("FINISH", bed=27), T0 + 20 * MIN, OCCUPIED)
+    assert ev == [] and s.phase == "needs_human"
+
+
+def test_real_order_late_empty_reading_clears():
+    s = PlateState("printing", job_name="Gift box", eject_planned=True)
+    s, _ = pushed(s, st("FINISH", bed=28), T0, OCCUPIED)
+    s, ev = pushed(s, st("FINISH", bed=28), T0 + 4 * MIN, EMPTY)
+    assert s.phase == "clear" and ev == ["plate_clear"]
+
+
+def test_real_order_unsure_twice_is_eject_unverified_and_a_failing_check_gives_up_late():
+    s = PlateState("printing", job_name="Gift box", eject_planned=True)
+    s, _ = pushed(s, st("FINISH", bed=28), T0, UNSURE)
+    s, ev = pushed(s, st("FINISH", bed=28), T0 + 4 * MIN, UNSURE)
+    assert s.phase == "needs_human" and ev == ["eject_unverified"] and "inconclusive" in s.reason
+    s = PlateState("printing", job_name="Gift box", eject_planned=True)
+    s, ev = pushed(s, st("FINISH", bed=28), T0, None)  # the camera did not answer
+    assert ev == ["finished"] and s.phase == "verifying"
+    assert needs_plate_check(s, st("FINISH", bed=28), T0 + 2 * MIN, eject_in_gcode=True)
+    s, ev = pushed(s, st("FINISH", bed=28), T0 + GIVE_UP_S, None)
+    assert s.phase == "needs_human" and ev == ["eject_unverified"]
+
+
+def test_real_order_without_an_eject_plan_is_unchanged():
+    s = PlateState("printing", job_name="Gift box")
+    assert not needs_plate_check(s, st("FINISH", bed=28), T0, eject_in_gcode=True)
+    s, ev = step(s, st("FINISH", bed=28), T0, eject_planned=False, plate=None, eject_in_gcode=True)
+    assert s.phase == "needs_human" and ev == ["finished", "plate_not_clear"]

@@ -8,6 +8,8 @@ Tables:
   upgrades      upgrade proposals derived from human_needed (proposed -> accepted -> printing -> installed)
   approvals     audit of owner approvals (legacy; nothing authorises an action from it any more)
   passes        single-use handler passes: (tool, target, session) the owner approved a moment ago
+  approval_requests  a household member asked for a start / plate clear / resume the owner must approve; the
+                watcher tells the owner once (it authorises nothing: the owner still sends /home3d approve ...)
   kv            small key/value state (watcher last state, session -> sender map, plate confirmations, ...)
 
 One connection per call site; WAL mode lets the watcher script and the gateway write concurrently. Anything
@@ -109,6 +111,19 @@ CREATE TABLE IF NOT EXISTS passes (
   detail TEXT NOT NULL DEFAULT ''          -- what the owner saw, e.g. "hms_ack:<codes>" for a resume with an error
 );
 CREATE INDEX IF NOT EXISTS passes_key ON passes(tool, target, session_id, used);
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL NOT NULL,
+  action TEXT NOT NULL,                    -- start | clear_plate | resume
+  queue_item_id INTEGER,                   -- start only
+  who TEXT NOT NULL DEFAULT '',            -- the household member's name
+  sender_id TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
+  announced_ts REAL,                       -- the watcher told the owner (NULL: not yet)
+  resolved_ts REAL,                        -- the action ran meanwhile (NULL: still open)
+  outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS approval_requests_open ON approval_requests(announced_ts, resolved_ts);
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -120,6 +135,7 @@ _lock = threading.Lock()
 
 ACTIVE_JOB_STATES = ("queued", "printing")
 RECENT_JOB_S = 48 * 3600
+APPROVAL_REQUEST_DEDUPE_S = 24 * 3600
 PLATE_CONFIRM_TTL_S = 24 * 3600
 _JOB_SUFFIXES = (".gcode.3mf", ".3mf", ".gcode")
 _START_EVENTS = ("started", "start_requested")
@@ -495,3 +511,69 @@ class Store:
         rows = self._rows("SELECT * FROM approvals WHERE action=? AND target=? AND used=0 AND expires>=? "
                           "ORDER BY ts DESC LIMIT 1", (action, str(target), time.time()))
         return rows[0] if rows else None
+
+    # ---- family approval requests (the hook records them, the watcher tells the owner) ------------------------
+    @staticmethod
+    def _request_key(action: str, queue_item_id: Optional[int]) -> tuple[str, Optional[int]]:
+        qid = None
+        if queue_item_id is not None and not isinstance(queue_item_id, bool):
+            try:
+                qid = int(queue_item_id)
+            except (TypeError, ValueError):
+                qid = None
+        return str(action or "").strip().lower(), qid
+
+    def add_approval_request(self, action: str, queue_item_id: Optional[int], who: str, session_id: str = "", *,
+                             sender_id: str = "", dedupe_s: float = APPROVAL_REQUEST_DEDUPE_S) -> Optional[int]:
+        """Record that ``who`` (a household member) asked for ``action`` (start / clear_plate / resume) on
+        ``queue_item_id`` (start only). Returns the new id, or None when the same person asked for the same action
+        and item within ``dedupe_s`` and that ask is still open (one open request per action + item + person per
+        day; once the owner settled it, a new ask is a new request). Authorises nothing."""
+        action, qid = self._request_key(action, queue_item_id)
+        name = str(who or "").strip()
+        if not action:
+            return None
+        now = time.time()
+        with self._write_txn() as c:
+            row = c.execute("SELECT id FROM approval_requests WHERE action=? AND queue_item_id IS ? "
+                            "AND lower(who)=lower(?) AND ts>=? AND resolved_ts IS NULL ORDER BY id DESC LIMIT 1",
+                            (action, qid, name, now - max(0.0, float(dedupe_s)))).fetchone()
+            if row is not None:
+                return None
+            cur = c.execute("INSERT INTO approval_requests(ts,action,queue_item_id,who,sender_id,session_id) "
+                            "VALUES(?,?,?,?,?,?)", (now, action, qid, name, str(sender_id or ""),
+                                                    str(session_id or "")))
+            return int(cur.lastrowid)
+
+    def latest_approval_request(self, action: str, queue_item_id: Optional[int], who: str,
+                                within_s: float = APPROVAL_REQUEST_DEDUPE_S) -> Optional[dict]:
+        """The newest still-open request for (action, item, person) made within ``within_s``, or None."""
+        action, qid = self._request_key(action, queue_item_id)
+        rows = self._rows("SELECT * FROM approval_requests WHERE action=? AND queue_item_id IS ? "
+                          "AND lower(who)=lower(?) AND ts>=? AND resolved_ts IS NULL ORDER BY id DESC LIMIT 1",
+                          (action, qid, str(who or "").strip(), time.time() - max(0.0, float(within_s))))
+        return rows[0] if rows else None
+
+    def pending_approval_requests(self, max_age_s: float = APPROVAL_REQUEST_DEDUPE_S) -> list[dict]:
+        """Requests the owner has not been told about yet (and that did not run meanwhile), oldest first. Requests
+        older than ``max_age_s`` are not announced any more (a watcher that was off for days stays quiet)."""
+        return self._rows("SELECT * FROM approval_requests WHERE announced_ts IS NULL AND resolved_ts IS NULL "
+                          "AND ts>=? ORDER BY id", (time.time() - max(0.0, float(max_age_s)),))
+
+    def mark_approval_request_announced(self, request_id: int) -> bool:
+        """The watcher told the owner (once). False when it was already announced or does not exist."""
+        cur = self._exec("UPDATE approval_requests SET announced_ts=? WHERE id=? AND announced_ts IS NULL",
+                         (time.time(), int(request_id)))
+        return cur.rowcount == 1
+
+    def resolve_approval_requests(self, action: str, queue_item_id: Optional[int] = None,
+                                  outcome: str = "") -> int:
+        """The owner ran ``action`` (on ``queue_item_id`` for a start): open requests for it are settled and never
+        announced again. Returns how many were settled."""
+        action, qid = self._request_key(action, queue_item_id)
+        cur = self._exec("UPDATE approval_requests SET resolved_ts=?, outcome=? WHERE action=? AND queue_item_id IS ? "
+                         "AND resolved_ts IS NULL", (time.time(), str(outcome or "")[:200], action, qid))
+        return int(cur.rowcount or 0)
+
+    def approval_requests(self, limit: int = 20) -> list[dict]:
+        return self._rows("SELECT * FROM approval_requests ORDER BY id DESC LIMIT ?", (int(limit),))

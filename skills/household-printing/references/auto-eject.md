@@ -20,8 +20,13 @@ push baked into the end G-code, sturdy parts slide off into a box and the printe
    - Its start G-code also drops the purge line on the plate's front edge: thin lines can't be pushed off.
    This is a concept, not a drop-in file. Write it for the actual printer and run the first tests with a
    person present and a box in front of the printer.
+   All of this runs at the end of the print. On the A1 the printer still reports RUNNING at 100 % (last
+   layer) during the cool-down wait and the push, and reports FINISH only after the push.
 3. **Settings.** `autoeject_printer_preset` = that preset's Bambuddy id. `standard_printer_preset` = a
-   no-eject preset (ideally also without the purge line) for parts that must not be pushed.
+   no-eject preset (ideally also without the purge line) for parts that must not be pushed. In Bambuddy,
+   turn on "Require plate clear". With it off, Bambuddy may start one of its own auto-start queue items on a
+   finished printer before the camera check, on top of a part the push missed. `hermes home3d doctor` warns
+   about it.
 4. **Slicing.** `home3d_slice eject=auto` slices with the eject preset, checks the G-code and keeps the
    eject plan only when the part qualifies. Otherwise it re-slices with the standard preset and returns
    `eject.reasons`.
@@ -45,14 +50,23 @@ push baked into the end G-code, sturdy parts slide off into a box and the printe
 - Keep brims on eject-bound parts at 3 mm or less.
 
 ## Verification (the watcher does this)
-1. At the last layer, before the push, it takes the "done" photo. After the push there is nothing to show.
-2. After FINISH it waits for the bed to cool and the eject window (about 20 min) to pass.
-3. Then it checks the plate: lit camera photo plus the plate check, up to 3 times.
-   - Empty: "dropped off" to the owner and the requester; ready for the next job.
-   - Not empty: a person is needed (a `remove_part` moment); the family hears "it stayed on the plate".
-   - Unsure: "could not verify"; look at the photo yourself.
-4. Nothing new starts until the camera thinks the plate is empty (after a failed print the owner also
-   confirms it with `/home3d approve clear`). Say "the camera thinks it is empty", not "verified".
+1. At the last layers, before the push, it takes the "done" photo. After the push there is nothing to show.
+2. The push happens inside the end G-code, before FINISH. So at FINISH the watcher checks the plate at once:
+   lit camera photo plus the plate check.
+   - Empty: "dropped off" to the owner (with a fresh photo of the empty plate) and the requester (with the
+     photo from before the push); ready for the next job.
+   - Not empty or unsure: one more check about 3 minutes later. Still not empty: a person is needed (a
+     `remove_part` moment); the family hears "it stayed on the plate". Still unsure: "could not verify";
+     look at the photo yourself.
+   With a printer manager that pushes only after FINISH, the watcher waits for the bed to cool and the
+   eject window (about 20 min) before it checks.
+3. While a person is needed, the watcher checks again later, with growing waits (15, 30, 60, then 120
+   minutes, at most 6 checks), so the chamber light does not switch every few minutes.
+4. A workshop job starts only after the camera thinks the plate is empty (after a failed print the owner
+   also confirms it with `/home3d approve clear`), and only when the owner starts it. With Bambuddy's
+   "Require plate clear" on, Bambuddy also waits for `/home3d approve clear` after every print; the "next
+   job ready" message then names that command first. Say "the camera
+   thinks it is empty", not "verified".
 
 ## Plate check quirks
 - The camera needs the chamber light on long enough for auto-exposure. With a 2-3 s wait an empty plate

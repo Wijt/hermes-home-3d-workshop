@@ -800,6 +800,10 @@ def test_human_needed_to_upgrade_flow(rt):
     assert odd["kind"] == "other"
     listed = call(rt, "home3d_human_needed", {"action": "list"})
     assert listed["counts_30d"]["remove_part"] == 3 and listed["thresholds"]["remove_part"] == 3
+    # approve_start is logged but never proposed (owner approval is a safety step): no threshold is shown
+    assert "approve_start" not in listed["thresholds"] and listed["never_proposed"] == ["approve_start"]
+    waited = call(rt, "home3d_human_needed", {"action": "log", "kind": "approve_start"})
+    assert waited["ok"] and waited["proposes"] is False and waited["threshold"] is None
     ups = call(rt, "home3d_upgrades", {"action": "list"})
     assert ups["upgrades"][0]["id"] == uid and ups["upgrades"][0]["status"] == "proposed"
     assert call(rt, "home3d_upgrades", {"action": "accept", "upgrade_id": uid}, session="s-mum")["ok"] is False
@@ -829,3 +833,59 @@ def test_card_marks_native_and_a1_compatible_profiles(pkg):
     assert only_compat["a1_profiles"][0]["fit"] == "a1_compatible" and "re-slices" in only_compat["note"]
     none = T._card(ModelCard(model_id=3, title="y", instances=[ModelInstance(profile_id=8, printer_models=["A1 mini"])]))
     assert none["a1_profiles"] == [] and "no A1 print profile" in none["note"]
+
+
+# ---- fix round 2 ------------------------------------------------------------------------------------------------
+def test_request_text_is_named_where_the_agent_looks(rt):
+    """catalog F7: the schema and the hints never said request_text is needed, so the first import failed."""
+    out = call(rt, "home3d_find_models", {"urls": ["1"]})
+    assert "request_text" in out["next"] and "home3d_import" in out["next"]
+    spec = {name: desc for name, desc, *_ in tools_mod.SPECS}
+    assert "request_text" in spec["home3d_import"]
+
+
+def test_the_simulator_hint_lists_its_built_in_catalog(tmp_path):
+    from home3d_ws.home3d.backends import simulator
+    from home3d_ws.home3d.backends.simulator import SimulatorBackend
+
+    sim = Runtime(settings=settings(), store=Store(tmp_path / "s.db"), backend=SimulatorBackend())
+    hint = call(sim, "home3d_find_models", {"urls": []})["hint"]
+    ids = getattr(simulator, "CATALOG_IDS", ())
+    assert "site:makerworld.com" in hint
+    if ids:
+        assert "Simulated printer" in hint and str(ids[0][0]) in hint
+
+
+def test_status_says_why_the_watcher_is_silent(rt, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    w = call(rt, "home3d_status")["watcher"]
+    assert w["state"] == "not_installed" and "hermes home3d setup" in w["hint"]
+    script = tmp_path / "hermes" / "scripts" / "home3d_watch.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("#", encoding="utf-8")
+    w = call(rt, "home3d_status")["watcher"]
+    assert w["state"] == "never_ran" and "scheduler is not running" in w["hint"] and "hermes gateway" in w["hint"]
+    rt.store.kv_set("watcher", {"state": IDLE, "updated": time.time() - 1800})
+    w = call(rt, "home3d_status")["watcher"]
+    assert w["state"] == "stale" and "30 min ago" in w["hint"]
+    rt.store.kv_set("watcher", {"state": IDLE, "updated": time.time()})
+    w = call(rt, "home3d_status")["watcher"]
+    assert w["state"] == "ok" and w["fresh"] and "hint" not in w
+
+
+def test_running_the_action_settles_the_family_request(rt, be):
+    """R2-7: a request the owner already acted on is never announced afterwards."""
+    _, q = queued(rt)
+    qid = q["queue_item_id"]
+    rt.store.add_approval_request("start", qid, "Mum", "s-mum")
+    rt.store.add_approval_request("start", qid + 1, "Mum", "s-mum")
+    rt.store.add_approval_request("clear_plate", None, "Dad", "s-dad")
+    rt.store.add_approval_request("resume", None, "Mum", "s-mum")
+    assert gated(rt, "home3d_start", {"queue_item_id": qid})["ok"]
+    assert [(r["action"], r["queue_item_id"]) for r in rt.store.pending_approval_requests()] == \
+        [("start", qid + 1), ("clear_plate", None), ("resume", None)]
+    be.state.state, be.state.job_name, be.state.bed_temp = FINISH, "vase", 25.0
+    assert gated(rt, "home3d_clear_plate", {"action": "confirm"})["ok"]
+    be.state.state = PAUSE
+    assert gated(rt, "home3d_stop", {"action": "resume"})["ok"]
+    assert [r["queue_item_id"] for r in rt.store.pending_approval_requests()] == [qid + 1]

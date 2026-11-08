@@ -9,6 +9,7 @@ checks are never "empty"). See docs/DESIGN.md "Bambuddy mapping".
 
 from __future__ import annotations
 
+import copy
 import html
 import http.client
 import io
@@ -306,6 +307,9 @@ def parse_queue_item(d: dict) -> QueueItem:
         scheduled_time=d.get("scheduled_time"),
         created_at=d.get("created_at"),
         archive_id=_int(d.get("archive_id")),
+        # a dispatch Bambuddy could not carry out: status "failed", no ``started_at``, the reason here
+        error_message=_short(d.get("error_message") or "", 300),
+        started_at=str(d["started_at"]) if d.get("started_at") not in (None, "") else None,
     )
 
 
@@ -471,7 +475,11 @@ def truncate_gcode(text: str, max_bytes: int) -> str:
 
 class BambuddyBackend(Backend):
     name = "bambuddy"
+    # A real A1 with the auto-eject preset pushes the part off INSIDE its end G-code (M400 S900, then the sweeps)
+    # while it still reports RUNNING at 100 %; FINISH comes after the push.
+    eject_in_gcode = True
 
+    timeout_cap: Optional[float] = None  # ``with_timeout``: no request waits longer than this
     timeout_s = 20.0
     slice_timeout_s = 60.0  # POST /slice, POST /makerworld/resolve
     transfer_timeout_s = 120.0  # import / upload / download (files can be 20+ MB)
@@ -496,6 +504,15 @@ class BambuddyBackend(Backend):
         self._sleep = time.sleep
         self._clock = time.monotonic
 
+    def with_timeout(self, seconds: float) -> "BambuddyBackend":
+        """A copy whose every request (explicit per-call timeouts included) waits at most ``seconds`` per socket
+        operation. The ``pre_tool_call`` hook reads status + queue through one so it stays inside Hermes' hook
+        budget; the original is not changed."""
+        clone = copy.copy(self)
+        cap = max(0.1, float(seconds))
+        clone.timeout_cap = cap if self.timeout_cap is None else min(cap, self.timeout_cap)
+        return clone
+
     # ---- HTTP -----------------------------------------------------------------------------------
     def _request(self, method: str, path: str, *, params: Optional[dict] = None, json_body: Any = None,
                  data: Optional[bytes] = None, content_type: str = "", timeout: Optional[float] = None,
@@ -512,8 +529,11 @@ class BambuddyBackend(Backend):
         if content_type:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        wait = float(timeout or self.timeout_s)
+        if self.timeout_cap is not None:
+            wait = min(wait, float(self.timeout_cap))
         try:
-            with _urlopen(req, timeout or self.timeout_s) as resp:
+            with _urlopen(req, wait) as resp:
                 body = resp.read()
                 resp_headers = getattr(resp, "headers", None)
         except urllib.error.HTTPError as e:
@@ -752,6 +772,14 @@ class BambuddyBackend(Backend):
         return f"{self.public_url}/gcode-viewer?library_file={int(library_file_id)}&plate=1"
 
     # ---- extras (doctor / setup) -----------------------------------------------------------------
+    def settings(self) -> dict:
+        """Bambuddy's app settings (``GET /settings/``), e.g. ``require_plate_clear``: when it is false, Bambuddy's
+        queue manager may start a queued auto-start item on a FINISH printer before anyone looked at the plate."""
+        d = self._get("/settings/")
+        if not isinstance(d, dict):
+            raise BackendError("GET /settings/: unexpected response")
+        return d
+
     def presets(self) -> dict:
         """``{source: {kind: [{"id", "name", "filament_type"}]}}`` for the local and standard tiers."""
         d = self._get("/slicer/presets", timeout=self.slice_timeout_s) or {}

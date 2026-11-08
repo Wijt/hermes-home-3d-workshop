@@ -5,6 +5,10 @@
 baked in. No model calls: it reads the printer, sends owner/family notices through ``hermes send`` and
 prints nothing on success when an owner target is configured (empty stdout = silent cron run).
 
+The watcher reads the LIVE plugin settings from this profile's ``config.yaml`` (the snapshot in the data dir is
+only the fallback): the installed copy points ``HERMES_HOME`` at the profile it lives in when the environment does
+not name one.
+
 The installed copy only runs while Hermes would load the plugin. When the plugin is switched off
 (``plugins.disabled`` lists it, or ``plugins.enabled`` in ``config.yaml`` does not) or removed (its directory
 is gone), a leftover cron job prints nothing and exits 0: it neither messages the family nor raises a cron
@@ -197,6 +201,8 @@ def main() -> int:
     plugin_dir = _plugin_dir()
     if _installed() and plugin_state(plugin_dir, _hermes_home()) in (DISABLED, REMOVED):
         return 0  # switched off or removed: stay silent (hermes home3d teardown removes this job)
+    if _installed() and not os.environ.get("HERMES_HOME", "").strip():
+        os.environ["HERMES_HOME"] = str(_hermes_home())  # the live settings: <this profile>/config.yaml
     try:
         watcher = _load(plugin_dir)
     except Exception as exc:  # a broken install must not stay silent: non-zero exit -> cron alert

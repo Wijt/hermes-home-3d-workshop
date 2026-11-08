@@ -476,3 +476,112 @@ The re-check found no regression, but three gaps where the household could still
   passes in a row, in the printer manager become `cancelled` (no longer "ours"). `awaiting_plate_clear` from
   Bambuddy blocks a start until `/home3d approve clear`. `home3d_import` needs `request_text` (2-3 words in the
   requester's language) for a new request, so family texts never fall back to the English MakerWorld title.
+
+## Fix round 2 (review of the public repo: hardware, judge, catalog)
+A second review read the public repo at 34e355a with three lenses: the real printer, a hackathon judge
+and a catalog reviewer. Decisions R2-1 to R2-9. Each item names the finding ids.
+
+- **R2-1 Live settings for the watcher (hw/F1).** The cron watcher read only `watcher-config.json`, which
+  `hermes home3d setup` wrote once. A later settings change did not reach it. Now `load_settings()` without a
+  ctx reads `<HERMES_HOME>/config.yaml` → `plugins.entries.home-3d-workshop.settings` (PyYAML or ruamel.yaml
+  when importable). The snapshot is only the fallback. Inside Hermes, `Runtime.settings` rewrites the snapshot
+  when its content changed (hash in memory). `doctor` says where the watcher reads its settings and warns
+  when the snapshot differs from the live settings.
+- **R2-2 Jobs by queue item id (hw/F2, hw/F3).** When a queue item is `printing`, its id decides which
+  workshop job prints. No store row means not ours: no family message, no guess by name. The name match is
+  used only when no item is printing, and only among jobs that are still queued or printing. A job never
+  goes back to `printing` once it left the active states. Jobs in `printing` are reconciled with
+  `queue(include_done=True)`: an item that completed or failed while the printer is idle or on another job
+  gets its finished or failed notice (with the stored photo) and is closed. A failed item without
+  `started_at` is a start that did not happen: the owner gets "the start did not happen: <error_message>",
+  and the job and the request close as `start_failed`. `QueueItem` has `error_message` and `started_at`.
+- **R2-3 The push comes before FINISH (hw/F6).** On the real A1 the end G-code waits 15 min (`M400 S900`)
+  and pushes while the printer still reports RUNNING at 100 %. FINISH comes after the push.
+  `Backend.eject_in_gcode` (False by default; Bambuddy and the simulator set True) tells the plate state
+  machine. With it, the watcher checks the plate at FINISH at once, with no cool-down gate. Empty →
+  `finished_ejected` (the family gets the photo from before the push). Not empty or unsure → one re-check
+  about 3 min later, then `plate_not_clear` or `eject_unverified`. The simulator now runs in the real order.
+  `eject_in_gcode` False keeps the old flow.
+- **R2-4 Light discipline (hw/F7, cat/F5).** A pass switches the chamber light at most once:
+  `snapshot_and_check()` gives the photo and the plate check in one light cycle. No near-end photo for
+  prints the workshop did not queue. Plate re-checks while a person is needed, and on an idle printer with
+  a job waiting, back off 15 → 30 → 60 → 120 min, at most 6 per (printer state, job, queue head). The
+  count starts again when one of them changes.
+- **R2-5 Bambuddy's `require_plate_clear` (hw/F4).** The live Bambuddy has it off, so its queue may start an
+  auto-start item on a FINISH printer before any camera check. `BambuddyBackend.settings()` reads
+  `GET /settings/`. `doctor` warns when the setting is off and an auto-eject preset is set. The simulator
+  has the same flag (default True; a test covers False). README, catalog, PR and skill say so.
+- **R2-6 A bounded hook (cat/F1).** Hermes 0.22.5 runs a hook callback with a 30 s timeout. A timed-out
+  `pre_tool_call` blocks every tool call of the process for 60 s, `home3d_stop` included. The hook now uses
+  no camera, no chamber light and no slicing. It reads status and queue through `backend.with_timeout(5)`,
+  under a 12 s deadline in a worker thread, and blocks when the printer does not answer in time. A late
+  result is dropped, so no pass is issued after the deadline. `start_gate(..., plate_deferred=True)` does not
+  block on the plate and warns `plate_deferred`. A plate check of this process from the last 120 s that said
+  occupied or unsure still blocks. The handler checks the plate right before the action (the authoritative
+  check), and so does `/home3d approve`. The approval prompt says so.
+- **R2-7 Family requests reach the owner (cat/F2, cat/F3, cat/F4).** When the hook refuses a household
+  member's start, resume or plate clear, it calls `Store.add_approval_request()` (one per action, item and
+  person per 24 h). The watcher tells the owner each pending request once (`approval_request`, tr and en,
+  with the exact `/home3d approve` command) and marks it announced. When the same pass already says "next
+  job ready" for that item, the request goes into that message. The block text is true: watcher fresh →
+  "the owner gets this request on the next watcher pass"; watcher off → "ask the owner directly". An unknown
+  sender's request is not recorded. `approve_start` stays a logged moment but never becomes an upgrade
+  proposal. Skill examples never promise a start.
+- **R2-8 English first (judge/F3).** The default `language` is `en` in `plugin.yaml` and `config.py`. The
+  household that the plugin comes from sets `tr`.
+- **R2-9 Polish (judge/F4, F5, F9, F10, cat/F7).** `doctor` and `/home3d status` name the real cause when
+  the cron job exists but no pass ran: the Hermes scheduler is not running, start `hermes gateway`.
+  `/home3d help` and a bare `hermes home3d` print one line per subcommand with a description, in the
+  configured language. The Turkish demo uses Turkish names (Annem, Babam) and Turkish moment and upgrade
+  labels. `request_text` is named in the `home3d_import` description and in `home3d_find_models`' `next`.
+  The simulator takes a model's title from the URL slug and picks its size by keyword.
+- **Docs (judge/F1, F2, F6, F7, F8, F11, cat/F6, F8, F9, F10).** The README starts with a quick start
+  (install with `--enable`, then `hermes home3d demo`), a terminal picture of a real demo run
+  (`docs/demo-terminal.svg`) and a "why a plugin, not a skill" table that points at the code. The status
+  table stays honest: the full real-printer loop is still planned (judge/F1 needs a free printer and the
+  owner). The disclosure now covers the watcher's own light switching, the web dashboard as the local
+  owner, `require_plate_clear`, the bounded hook and the read-only use of non-public Hermes internals for
+  cron and unattended detection (fail closed when a marker raises; skipped when it is renamed). The
+  catalog entry and the PR draft match the README. `docs/DEMO.md` and the subtitles use `--enable`, follow
+  the current demo text, never promise a start, show the push at the end of the print and keep every cue
+  at 17 characters per second or slower. The skill describes the real hook order: a family member's block
+  says only that the owner must approve, so the agent checks `home3d_status` before it says anything about
+  readiness.
+- **Not changed.** judge/F12 (personal name and email in commit metadata) is the owner's decision. hw/F5
+  (no `--failure-deliver` on the cron job) is left for a later round.
+
+### Fix round 2, closing pass (verifier findings)
+
+- **R2-6 follow-up: the deadline follows Hermes' hook timeout.** With `plugins.hook_callback_timeout` set
+  below 30 s, the 12 s gate could outlast it, and Hermes then blocked every tool call (stop included) for
+  60 s. The gate's deadline is now `min(12 s, 0.4 × hook_callback_timeout)` (`hooks.hook_deadline_s`; no
+  limit when the timeout is 0 or less). The timeout comes from Hermes' own
+  `hermes_cli.plugins._resolve_hook_callback_timeout` (read from `sys.modules`, never imported; missing or
+  failing → 30 s). `doctor` shows the value and warns below 15 s (it falls back to `config.yaml` outside
+  Hermes).
+- **R2-1 follow-up: a printer switch starts the watcher over.** The watcher state carries
+  `backend_key` = [backend name, printer manager URL, printer id]. When it changes (config.yaml switched to
+  the simulator or to another printer), the state is dropped and the next pass is a first pass. Before, the
+  new camera "cleared" the old printer's job and could send `finished_ejected` to the family. A state
+  written before the key existed is kept and gets the key.
+- **R2-2 follow-up: name matches never beat the queue.** The name fallback is used only when the queue was
+  read, and never for a job whose own queue item is still pending or failed without `started_at` (the
+  print came from the printer screen, a phone app or an archive reprint). A pass that could not read the
+  queue decides nothing and remembers nothing; the next pass decides. Before, Mum's waiting "kutu" got a
+  "done" message for a print from elsewhere, and a failed dispatch next to a FINISH of the same file was
+  told as "done" instead of `start_failed`.
+- **R2-7 follow-up: truthful request texts.** The dedupe and "already got this request" look only at
+  requests that are still open, so a new ask after the owner acted is a new request that the watcher
+  passes on. Without `owner_target` the watcher's owner notices reach only the cron output, so the block
+  says "No owner chat is set (owner_target), so the owner may not be told automatically: ask them
+  directly" (the skill treats it like "the watcher is off").
+- **"Require plate clear" on.** Bambuddy then reports `awaiting_plate_clear` after every print and blocks
+  starts until the plate is marked clear. The "next job ready" text names `/home3d approve clear` before the
+  start command (once; a failed print's confirm line already names it).
+- **Docs.** A pass switches the light twice when a camera request fails (the plate check is tried again);
+  prints the workshop did not queue get one photo when they end; after a push the owner gets a fresh photo
+  of the empty plate and the requester the photo from before the push.
+- **Not changed (open).** A family auto-start item waiting while Bambuddy waits for "plate clear" still
+  blocks `/home3d approve clear` (`auto_start_pending`): the owner clears it in Bambuddy. A failed queue
+  item without `started_at` is taken as "the start did not happen" even when the printer did start (an
+  MQTT verification error after a real start): the owner then sees that print as not the workshop's.

@@ -241,3 +241,53 @@ def test_unconfirmed_failure_lives_until_a_person_confirms_the_plate(store):
     store.clear_failure("a new print started")
     assert store.unconfirmed_failure() is None
     assert store.kv_get("failure:last")["settled"] == "a new print started"
+
+
+# ---- fix round 2 (R2-7): family approval requests ---------------------------------------------------------------
+def test_approval_requests_dedupe_per_action_item_and_person_per_day(store, monkeypatch):
+    first = store.add_approval_request("start", 7, "Mum", "s-mum", sender_id="mum@s.whatsapp.net")
+    assert isinstance(first, int)
+    assert store.add_approval_request("start", 7, "mum", "s-other") is None  # same person (any case), same day
+    assert isinstance(store.add_approval_request("start", 8, "Mum", "s-mum"), int)  # another item
+    assert isinstance(store.add_approval_request("start", 7, "Dad", "s-dad"), int)  # another person
+    assert isinstance(store.add_approval_request("clear_plate", None, "Mum", "s-mum"), int)
+    assert store.add_approval_request("clear_plate", None, "Mum", "s-mum") is None
+    assert store.add_approval_request("", 7, "Mum") is None
+    pending = store.pending_approval_requests()
+    assert [(r["action"], r["queue_item_id"], r["who"]) for r in pending] == [
+        ("start", 7, "Mum"), ("start", 8, "Mum"), ("start", 7, "Dad"), ("clear_plate", None, "Mum")]
+    assert pending[0]["sender_id"] == "mum@s.whatsapp.net" and pending[0]["session_id"] == "s-mum"
+    later = time.time() + 25 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+    assert isinstance(store.add_approval_request("start", 7, "Mum", "s-mum"), int)  # a day later: a new ask
+    assert [r["queue_item_id"] for r in store.pending_approval_requests()] == [7]  # older ones are not announced
+
+
+def test_approval_requests_are_announced_once_and_settled_by_the_action(store):
+    a = store.add_approval_request("start", 7, "Mum", "s-mum")
+    b = store.add_approval_request("resume", None, "Dad", "s-dad")
+    assert store.mark_approval_request_announced(a) is True
+    assert store.mark_approval_request_announced(a) is False  # once
+    assert store.mark_approval_request_announced(9999) is False
+    assert [r["id"] for r in store.pending_approval_requests()] == [b]
+    assert store.latest_approval_request("start", 7, "MUM")["announced_ts"] is not None
+    assert store.latest_approval_request("start", 8, "Mum") is None
+    assert store.resolve_approval_requests("resume", None, "resumed by Owner") == 1
+    assert store.pending_approval_requests() == []
+    assert store.resolve_approval_requests("start", "7") == 1  # settled even after it was announced
+    rows = {r["id"]: r for r in store.approval_requests()}
+    assert rows[b]["outcome"] == "resumed by Owner" and rows[a]["resolved_ts"] is not None
+
+
+def test_a_new_ask_after_the_owner_settled_the_first_is_a_new_request(store):
+    """Same day, same person, same action: once the owner ran it, asking again is a new request (it is not
+    swallowed by the dedupe, and an old announcement does not count for it)."""
+    first = store.add_approval_request("clear_plate", None, "Mum", "s-mum")
+    assert store.mark_approval_request_announced(first) is True
+    assert store.add_approval_request("clear_plate", None, "Mum", "s-mum") is None  # still open: deduped
+    assert store.resolve_approval_requests("clear_plate", None, "cleared by Owner") == 1
+    assert store.latest_approval_request("clear_plate", None, "Mum") is None  # settled: not "already told"
+    second = store.add_approval_request("clear_plate", None, "Mum", "s-mum")
+    assert isinstance(second, int) and second != first
+    assert [r["id"] for r in store.pending_approval_requests()] == [second]
+    assert store.latest_approval_request("clear_plate", None, "Mum")["announced_ts"] is None

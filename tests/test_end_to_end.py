@@ -159,7 +159,7 @@ def test_request_to_plate_clear_full_loop(house):
     started = h.call("home3d_start", {"queue_item_id": qid}, "s-owner")
     assert started["ok"] and started["requester"] == "Mum" and started["eject_planned"] is True, started
     prompt = h.prompts[-1]["message"]
-    assert f"#{qid}" in prompt and "camera thinks the plate is empty" in prompt and "verified" not in prompt
+    assert f"#{qid}" in prompt and "camera checks the plate right before" in prompt and "verified" not in prompt
     assert h.store.consume_pass("home3d_start", str(qid), "s-owner") is False  # the pass was used up
     assert h.be.status().state in ("PREPARE", "RUNNING")
     assert h.store.get_job(qid)["state"] == "printing"
@@ -167,17 +167,15 @@ def test_request_to_plate_clear_full_loop(house):
     # Dad asks for a coaster meanwhile: queued behind Mum's job
     qid2 = h.request("s-dad", DAD, COASTER, "bardak altlığı")
 
-    # zero-token watcher: finish (owner only, the family hears the eject outcome) ...
-    h.run_until({"finished"})
-    fin = h.last("finished")
-    assert fin["owner_text"] and not fin["family_text"] and fin["owner_media"]
-    assert "Flower gift box" in fin["owner_text"]  # the owner sees the file name
-    assert h.store.get_job(qid)["state"] == "finished"
-
-    # ... bed cools, the end G-code pushes the part off, the camera thinks the plate is empty
-    seen = h.run_until({"finished_ejected"})
+    # zero-token watcher: the end G-code cools the bed and pushes the part off while the printer still says
+    # RUNNING (the real A1 order); at FINISH the camera looks at once. One owner message: the finish facts, then
+    # the camera's opinion with a fresh plate photo; the family hears the outcome with the last-layer photo.
+    seen = h.run_until({"finished"})
     assert "plate_not_clear" not in seen and "eject_unverified" not in seen
-    ej = h.last("finished_ejected")
+    fin, ej = h.last("finished"), h.last("finished_ejected")
+    assert fin["owner_text"] and not fin["family_text"]
+    assert "Flower gift box" in fin["owner_text"]  # the owner sees the file name
+    assert ej["owner_media"] and ej["family_media"] and ej["owner_media"] != ej["family_media"]
     assert ej["family_text"] == '✅ Anneciğim, "çiçek kutusu" bitti. Otomatik düşürüldü, kutudan alabilirsin.'
     assert "kameraya göre tabla boş" in ej["owner_text"]
     assert h.be.check_plate().is_empty is True
@@ -344,3 +342,84 @@ def test_eject_miss_three_times_becomes_one_upgrade_proposal(house):
     denied = h.call("home3d_upgrades", {"action": "installed", "upgrade_id": up["id"]}, "s-mum")
     assert not denied["ok"]  # only the owner decides
     assert len(h.store.upgrades()) == 1
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+def test_a_family_start_request_reaches_the_owner_through_the_watcher(house):
+    """cat/F2: the hook refuses Mum's start and records a request; the next watcher pass tells the owner once,
+    with the exact command (and nothing starts by itself)."""
+    h = house
+    h.watch()
+    h.local_turn("owner-local")
+    dad = h.request("s-dad", DAD, COASTER, "bardak altlığı")
+    assert h.call("home3d_start", {"queue_item_id": dad}, "owner-local")["ok"]
+    h.be.advance(10)
+    h.watch()
+    qid = h.request("s-mum", MUM, FLOWER_BOX, "çiçek kutusu")
+    assert h.call("home3d_start", {"queue_item_id": qid}, "s-mum")["blocked"]
+    (a,) = [r for r in h.watch() if r["kind"] == "approval_request"]
+    assert a["owner_text"].startswith(f'🙋 Mum #{qid} "Flower gift box" işinin başlatılmasını istiyor')
+    assert a["owner_text"].endswith(f"/home3d approve start {qid}") and not a["family_text"]
+    assert h.call("home3d_start", {"queue_item_id": qid}, "s-mum")["blocked"]  # asking again the same day ...
+    assert not [r for r in h.watch() if r["kind"] == "approval_request"]  # ... is not a second message
+    assert h.store.get_job(qid)["state"] == "queued"
+
+
+def test_a_dispatch_the_printer_manager_rejects_is_told_to_the_owner(house):
+    """hw/F2: the start is accepted, then the printer manager fails the item without starting it."""
+    h = house
+    h.watch()
+    qid = h.request("s-mum", MUM, COASTER, "bardak altlığı")
+    h.be.set_scenario("dispatch_fail")
+    assert h.slash(f"approve start {qid}").startswith("▶️")  # Bambuddy accepted the start ...
+    assert h.store.get_job(qid)["state"] == "printing"
+    h.run_until({"start_failed"}, step_min=2)  # ... and then gave up on it
+    sf = h.last("start_failed")
+    assert "Başlatma gerçekleşmedi" in sf["owner_text"] and "MQTT" in sf["owner_text"] and not sf["family_text"]
+    assert h.store.get_job(qid)["state"] == "start_failed" and h.be.status().state == "IDLE"
+    assert h.store.request_for_queue_item(qid)["status"] == "start_failed"
+    assert "finished" not in h.kinds() and "failed" not in h.kinds()
+
+
+def _family_auto_item(h) -> int:
+    from home3d_ws.home3d.backends.base import SliceOptions
+
+    sliced = h.be.slice(1, SliceOptions(printer_preset="std"))  # a family member queues in the printer manager
+    return h.be.queue_add(sliced.library_file_id, manual_start=False).id
+
+
+def test_our_finish_hidden_by_a_family_auto_start_is_still_reported(house):
+    """hw/F2, s5 shape on the simulator: the push runs inside the end G-code, FINISH comes, and the printer
+    manager dispatches the family's auto-start item at once; no watcher pass ever sees our FINISH."""
+    h = house
+    h.watch()
+    h.local_turn("owner-local")
+    qid = h.request("s-mum", MUM, COASTER, "bardak altlığı")
+    assert h.call("home3d_start", {"queue_item_id": qid}, "owner-local")["ok"]
+    fam = _family_auto_item(h)
+    seen = h.run_until({"finished"})
+    assert "finished_ejected" not in seen and "plate_not_clear" not in seen
+    fin = h.last("finished")
+    assert fin["family_text"] == '✅ Anneciğim, "bardak altlığı" bitti.' and fin["family_media"]
+    assert "Bitişini kaçırdım" in fin["owner_text"]
+    assert h.store.get_job(qid)["state"] == "finished" and h.store.request_for_queue_item(qid)["status"] == "done"
+    assert h.be.status().job_name == "Flower gift box"
+    assert {q.id: q.status for q in h.be.queue()}[fam] == "printing"
+    assert fam not in h.store.active_job_ids()  # the family's job is not the workshop's
+
+
+def test_require_plate_clear_off_lets_a_family_job_start_on_a_missed_push(house):
+    """R2-5: with Bambuddy's "Require plate clear" off, an auto-start item starts on a finished printer before any
+    camera check, here on top of a part the push missed. The plugin cannot prevent it (doctor warns); the owner
+    is told the plate was never checked."""
+    h = house
+    h.be.set_require_plate_clear(False)
+    h.be.set_scenario("eject_miss")
+    h.watch()
+    h.local_turn("owner-local")
+    qid = h.request("s-mum", MUM, COASTER, "bardak altlığı")
+    assert h.call("home3d_start", {"queue_item_id": qid}, "owner-local")["ok"]
+    _family_auto_item(h)
+    h.run_until({"finished"})
+    assert "tablayı kontrol edemedim" in h.last("finished")["owner_text"]
+    assert h.be.status().job_name == "Flower gift box"  # started on top of the coaster

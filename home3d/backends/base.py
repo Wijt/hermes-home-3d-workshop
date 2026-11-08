@@ -98,6 +98,12 @@ class QueueItem:
     scheduled_time: Optional[str] = None
     created_at: Optional[str] = None
     archive_id: Optional[int] = None
+    # Why the printer manager gave up on the item (Bambuddy ``error_message``), e.g. a dispatch the printer
+    # rejected; "" when none.
+    error_message: str = ""
+    # When the item really started printing (Bambuddy ``started_at``, ISO text); None = it never started. A
+    # ``failed`` item without it is a start that did not happen.
+    started_at: Optional[str] = None
 
     @property
     def is_pending(self) -> bool:
@@ -203,6 +209,12 @@ class Backend(ABC):
 
     name: str = "abstract"
 
+    # True when an auto-eject print pushes the part off INSIDE its end G-code, before the printer reports FINISH
+    # (the real A1 with the auto-eject preset: it waits ``M400 S900`` and sweeps the plate while the status still
+    # says RUNNING at 100 %). The plate state machine then checks the plate at once at FINISH (no cool-down wait).
+    # False keeps the older model: FINISH first, then cool-down and push.
+    eject_in_gcode: bool = False
+
     # ---- read -----------------------------------------------------------------------------
     @abstractmethod
     def status(self) -> PrinterStatus: ...
@@ -236,6 +248,16 @@ class Backend(ABC):
 
     def recent_archives(self, limit: int = 5) -> list[dict]:
         return []
+
+    def settings(self) -> dict:
+        """The printer manager's own settings that matter to the workshop (Bambuddy ``GET /settings/``, e.g.
+        ``require_plate_clear``); {} when the backend has none."""
+        return {}
+
+    def with_timeout(self, seconds: float) -> "Backend":
+        """This backend with every request bounded to ``seconds`` (a copy where it matters; backends without
+        network calls return themselves)."""
+        return self
 
     def preview_url(self, library_file_id: int) -> str:
         return ""

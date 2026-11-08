@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional
 
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
+from .config import watch_script_path
 from .gates import clear_plate_gate, describe, printer_blocks, resume_gate, start_gate
 from .gcode import assess_eject, inspect_gcode, material_family
 from .hooks import LIGHT_FLAG, acked_codes, approval_target
@@ -327,6 +328,44 @@ def _kv_age_s(store, key: str) -> Optional[float]:
     return (time.time() - float(updated)) if updated is not None else None
 
 
+def _watcher_info(age: Optional[float]) -> dict:
+    """Watcher freshness for status: ``state`` is ``ok`` | ``stale`` (it ran, but not lately) | ``never_ran`` (the
+    cron script is installed but no pass ran: the Hermes scheduler is not running) | ``not_installed``."""
+    fresh = age is not None and age < WATCHER_STALE_S
+    out: dict = {"last_run_age_s": round(age) if age is not None else None, "fresh": fresh}
+    if fresh:
+        out["state"] = "ok"
+        return out
+    try:
+        installed = watch_script_path().is_file()
+    except OSError:
+        installed = False
+    if age is not None:
+        out["state"] = "stale"
+        out["hint"] = (f"the last watcher pass was {round(age / 60)} min ago: notifications and plate checks are "
+                       "paused; is the Hermes scheduler running? (owner: start `hermes gateway`, check "
+                       "`hermes cron status`)")
+    elif installed:
+        out["state"] = "never_ran"
+        out["hint"] = ("the watcher is installed, but the Hermes scheduler is not running: no notifications or "
+                       "plate checks (owner: start `hermes gateway`, check `hermes cron status`)")
+    else:
+        out["state"] = "not_installed"
+        out["hint"] = ("the watcher is not set up: no notifications or plate checks (owner: 'hermes home3d setup', "
+                       "with `hermes gateway` running)")
+    return out
+
+
+def _resolve_requests(store, action: str, queue_item_id: Optional[int] = None, outcome: str = "") -> None:
+    """The action ran: family approval requests for it are settled (the watcher never announces them now)."""
+    fn = getattr(store, "resolve_approval_requests", None)
+    if callable(fn):
+        try:
+            fn(action, queue_item_id, outcome)
+        except Exception:
+            pass
+
+
 def _request_for_file(store, library_file_id: int) -> Optional[dict]:
     for r in store.requests(limit=50):
         if r.get("library_file_id") == library_file_id and r.get("status") in ("open", "queued"):
@@ -399,14 +438,10 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
         out["plate"] = {k: plate.get(k) for k in ("phase", "job_name", "eject_planned", "reason", "last_check")}
     updated = w.get("updated") if isinstance(w, dict) else None
     age = (time.time() - float(updated)) if isinstance(updated, (int, float)) else _kv_age_s(store, "watcher")
-    out["watcher"] = {"last_run_age_s": round(age) if age is not None else None,
-                      "fresh": age is not None and age < WATCHER_STALE_S}
+    out["watcher"] = _watcher_info(age)
     err = store.kv_get("watcher_error")
     if err:
         out["watcher"]["error"] = str(err)[:200]
-    if not out["watcher"]["fresh"]:
-        out["watcher"]["hint"] = ("the watcher has not run recently: notifications and plate checks are off "
-                                  "(owner: 'hermes home3d setup')")
     me, _ = _who(rt, kw)
     if me:
         out["speaking"] = me
@@ -460,6 +495,23 @@ def _card(c) -> dict:
     return d
 
 
+def _search_hint(rt) -> str:
+    """SEARCH_HINT; on the simulated printer also the built-in catalog ids (no web search needed to try it)."""
+    try:
+        if getattr(rt.backend, "name", "") != "simulator":
+            return SEARCH_HINT
+        from .backends import simulator
+
+        ids = getattr(simulator, "CATALOG_IDS", ())
+    except Exception:
+        return SEARCH_HINT
+    if not ids:
+        return SEARCH_HINT
+    listed = ", ".join(f"{mid} {title}" for mid, title in ids)
+    return (SEARCH_HINT + " Simulated printer: any MakerWorld link works (the title comes from the link), and "
+            f"these ids are its built-in catalog: {listed}.")
+
+
 def _h_find_models(rt, a: dict, kw: dict) -> dict:
     raw = a.get("urls")
     if isinstance(raw, str):
@@ -468,16 +520,17 @@ def _h_find_models(rt, a: dict, kw: dict) -> dict:
         raw = [raw] if raw else []
     urls = list(dict.fromkeys(str(u).strip() for u in (raw or []) if str(u).strip()))
     if not urls:
-        return {"ok": False, "error": "pass 1-6 MakerWorld links or model ids in 'urls'", "hint": SEARCH_HINT}
+        return {"ok": False, "error": "pass 1-6 MakerWorld links or model ids in 'urls'", "hint": _search_hint(rt)}
     cards, errors = [], []
     for u in urls[:MAX_FIND]:
         try:
             cards.append(_card(rt.backend.resolve_model(u)))
         except BackendError as e:
             errors.append({"input": u, "error": str(e)})
-    out = {"ok": bool(cards), "cards": cards, "errors": errors, "hint": SEARCH_HINT,
+    out = {"ok": bool(cards), "cards": cards, "errors": errors, "hint": _search_hint(rt),
            "next": ("Show the requester 2-4 options (cover picture, title, print time), let them choose, "
-                    "then call home3d_import with model_id and an A1 profile_id.")}
+                    "then call home3d_import with model_id, an A1 profile_id and request_text (2-3 words in the "
+                    "requester's own language naming the thing, e.g. 'flower box'; family messages use it).")}
     if len(urls) > MAX_FIND:
         out["skipped"] = urls[MAX_FIND:]
     if not cards:
@@ -827,6 +880,7 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
     store.upsert_job(qid, state="printing", started_ts=rt.now())
     if req:
         store.update_request(req["id"], status="printing")
+    _resolve_requests(store, "start", qid, f"started by {who or 'owner'}")
     job = store.get_job(qid) or {}
     store.add_event("start_requested", item.name or job.get("name", ""),
                     {"queue_item_id": qid, "who": who or "owner", "sender": sender})
@@ -890,6 +944,7 @@ def _h_stop(rt, a: dict, kw: dict) -> dict:
         return {"ok": False, "blocked": True, "error": describe(gate, "en"), "message": describe(gate, s.language),
                 "codes": gate.codes, "reasons": gate.reasons, "warnings": gate.warnings, "state": st.state}
     be.resume()
+    _resolve_requests(store, "resume", None, f"resumed by {by}")
     if ack and st.blocking_hms:
         payload["hms_acknowledged"] = [h.code for h in st.blocking_hms]
     store.add_event("resume_request", st.job_name, payload)
@@ -935,6 +990,7 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
         return out
     be.mark_plate_cleared()
     by = who or "owner"
+    _resolve_requests(store, "clear_plate", None, f"plate marked clear by {by}")
     store.confirm_plate(st.job_name or "", by)  # a person looked: after a failed print the next start may go
     for j in store.jobs(state="finished", limit=20):
         store.upsert_job(j["queue_item_id"], state="cleared")
@@ -1011,7 +1067,10 @@ def _h_human_needed(rt, a: dict, kw: dict) -> dict:
                                         | {"when": time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ts"]))}
                                         for r in rows],
                 "counts_30d": counts,
-                "thresholds": {k: v.get("threshold") for k, v in kinds.items() if isinstance(v, dict)}}
+                "thresholds": {k: v.get("threshold") for k, v in kinds.items()
+                               if isinstance(v, dict) and v.get("propose", True)},
+                "never_proposed": sorted(k for k, v in kinds.items()
+                                         if isinstance(v, dict) and not v.get("propose", True))}
     raw_kind = _str(a, "kind") or "other"
     normalize = getattr(upgrades, "normalize_kind", None)
     kind = normalize(raw_kind) if callable(normalize) else raw_kind.lower()
@@ -1021,8 +1080,11 @@ def _h_human_needed(rt, a: dict, kw: dict) -> dict:
     new = upgrades.evaluate(store, rt.settings) or []
     info = kinds.get(kind) if isinstance(kinds.get(kind), dict) else {}
     window = info.get("window_days", 30) if info else 30
+    proposes = bool(info.get("propose", True)) if info else True
     return {"ok": True, "id": mid, "kind": kind, "who": who,
-            "count": store.human_needed_counts(window).get(kind, 0), "threshold": info.get("threshold"),
+            "count": store.human_needed_counts(window).get(kind, 0),
+            "threshold": info.get("threshold") if proposes else None,
+            "proposes": proposes,
             "new_proposals": new,
             "next": "Tell the owner about the new upgrade proposal." if new else ""}
 
@@ -1091,7 +1153,8 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
                "description": "MakerWorld model links or numeric model ids."}}, ["urls"], _h_find_models),
     ("home3d_import",
      "Import a MakerWorld model into the printer library. Picks the A1 print profile when profile_id is "
-     "omitted and records who asked (request).",
+     "omitted and records who asked (request). A new request needs request_text: 2-3 words naming the thing in "
+     "the requester's own language (or pass request_id).",
      {"model_id": {"type": "integer", "description": "MakerWorld model id (from home3d_find_models)."},
       "profile_id": {"type": "integer", "description": "Print profile id from a card's a1_profiles "
                                                       "(a #profileId-N URL fragment is NOT a profile id)."},

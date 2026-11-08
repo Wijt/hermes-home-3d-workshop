@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .backends.base import ACTIVE_STATES, PAUSE, PREPARE, BackendError
+from .backends.base import ACTIVE_STATES, PAUSE, PREPARE, RUNNING, BackendError
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 SCRIPT_NAME = "home3d_watch.py"
@@ -40,7 +40,28 @@ _SUBCOMMAND_HELP = (
     ("simulate", "Drive the simulated printer (scenario/advance/clear/reset/status)"),
     ("demo", "Scripted end-to-end run on the simulator (no hardware, nothing sent)"),
 )
-SCENARIOS = ("ok", "fail", "pause_hms", "eject_miss", "busy", "offline")
+_SUBCOMMAND_HELP_TR = {
+    "setup": "Sıfır-token izleyiciyi kur (cron --no-agent betiği)",
+    "teardown": "setup'ın kurduğu izleyici cron işini ve betiği kaldır",
+    "watch": "İzleyiciyi ön planda çalıştır, olayları yaz",
+    "status": "Yazıcı, kuyruk, tabla ve izleyici durumu",
+    "doctor": "Ayarları, bağlantıyı, ön ayarları ve hedefleri kontrol et",
+    "simulate": "Benzetilmiş yazıcıyı sür (scenario/advance/clear/reset/status)",
+    "demo": "Benzetilmiş yazıcıda baştan sona senaryo (donanım yok, hiçbir şey gönderilmez)",
+}
+
+
+def cli_help(lang: str = "en") -> str:
+    """``hermes home3d`` without a subcommand: one line per subcommand, in ``lang``, then the demo hint."""
+    tr = lang == "tr"
+    width = max(len(n) for n, _h in _SUBCOMMAND_HELP)
+    lines = ["kullanım: hermes home3d <komut>" if tr else "usage: hermes home3d <command>", ""]
+    lines += [f"  {n:<{width}}  {_SUBCOMMAND_HELP_TR.get(n, h) if tr else h}" for n, h in _SUBCOMMAND_HELP]
+    lines += ["", "Donanımsız dene: hermes home3d demo" if tr else "Try it without hardware: hermes home3d demo"]
+    return "\n".join(lines)
+
+
+SCENARIOS = ("ok", "fail", "pause_hms", "eject_miss", "busy", "offline", "dispatch_fail")
 
 
 # ---- argparse --------------------------------------------------------------------------------------------
@@ -79,13 +100,17 @@ def setup_parser(subparser: argparse.ArgumentParser) -> None:
 
 def handle(args: argparse.Namespace, rt=None) -> int:
     sub = getattr(args, "home3d_command", None)
-    if not sub:
-        print("usage: hermes home3d {" + ",".join(n for n, _ in _SUBCOMMAND_HELP) + "}")
-        return 2
     if rt is None:
         from .runtime import Runtime
 
-        rt = Runtime(None)  # outside Hermes: the watcher snapshot or defaults
+        rt = Runtime(None)  # outside Hermes: the live config.yaml settings, else the watcher snapshot, else defaults
+    if not sub:
+        try:
+            lang = rt.settings.language
+        except Exception:
+            lang = "en"
+        print(cli_help(lang))
+        return 2
     try:
         return int(_DISPATCH[sub](rt, args) or 0)
     except KeyboardInterrupt:
@@ -97,12 +122,9 @@ def handle(args: argparse.Namespace, rt=None) -> int:
 
 # ---- setup --------------------------------------------------------------------------------------------
 def hermes_home() -> Path:
-    try:
-        from hermes_constants import get_hermes_home  # type: ignore
+    from .config import hermes_home as _home
 
-        return Path(get_hermes_home())
-    except Exception:
-        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+    return _home()
 
 
 def install_watch_script(home: Optional[Path] = None, plugin_dir: Path = PLUGIN_DIR) -> Path:
@@ -184,7 +206,13 @@ def _cmd_setup(rt, args) -> int:
     from .notify import hermes_bin
 
     s = rt.settings
-    print(f"settings snapshot : {write_snapshot(s)}")
+    print(f"settings snapshot : {write_snapshot(s)} (fallback only)")
+    try:
+        from .config import load_watcher_settings
+
+        print(f"watcher settings  : {load_watcher_settings()[1]}")
+    except Exception:
+        pass
     print(f"watcher script    : {install_watch_script()}")
     if s.backend == "simulator":
         print("note              : backend is 'simulator' (the watcher watches the simulated printer)")
@@ -204,6 +232,8 @@ def _cmd_setup(rt, args) -> int:
     if out:
         print(out)
     if proc.returncode == 0:
+        print("note              : the job runs while the Hermes scheduler runs (`hermes gateway`); check with "
+              "hermes home3d doctor")
         print("undo with         : hermes home3d teardown")
     return 0 if proc.returncode == 0 else 1
 
@@ -350,6 +380,8 @@ def _cmd_doctor(rt, args) -> int:
         add("ok", "data dir", str(d))
     except OSError as e:
         add("FAIL", "data dir", str(e))
+    _doctor_watcher_settings(s, add)
+    _doctor_hook_timeout(add)
     binary = hermes_bin()
     add("ok" if binary else "warn", "hermes binary", binary or "not found: notifications cannot be sent")
 
@@ -366,6 +398,7 @@ def _cmd_doctor(rt, args) -> int:
         add("FAIL", "printer", str(e))
     if be is not None:
         _doctor_presets(rt, be, add)
+        _doctor_plate_clear_setting(rt, be, add)
         if args.plate:
             try:
                 p = be.check_plate()
@@ -374,15 +407,7 @@ def _cmd_doctor(rt, args) -> int:
             except BackendError as e:
                 add("warn", "plate check", str(e))
 
-    w = rt.store.kv_get("watcher") or {}
-    upd = w.get("updated") if isinstance(w, dict) else None
-    if isinstance(upd, (int, float)):
-        age = time.time() - upd
-        add("ok" if age < 10 * 60 else "warn", "watcher", f"last pass {round(age / 60)} min ago")
-    else:
-        add("warn", "watcher", "never ran: hermes home3d setup")
-    script = hermes_home() / "scripts" / SCRIPT_NAME
-    add("ok" if script.is_file() else "warn", "cron script", str(script) if script.is_file() else "not installed")
+    _doctor_watcher(rt, binary, add)
     from .plugin import SKILL_PATH as skill
 
     add("ok" if skill.is_file() else "FAIL", "skill", str(skill))
@@ -393,6 +418,120 @@ def _cmd_doctor(rt, args) -> int:
     fails = sum(1 for r in rows if r[0] == "FAIL")
     print("ready." if not fails else f"{fails} problem(s) to fix.")
     return 1 if fails else 0
+
+
+SCHEDULER_DOWN = ("installed, but the Hermes scheduler is not running: start `hermes gateway` "
+                  "(check `hermes cron status`)")
+
+
+def _doctor_watcher(rt, binary: Optional[str], add) -> None:
+    """The cron job, the script and the last pass. A job (or script) without any pass means no scheduler runs it."""
+    script = hermes_home() / "scripts" / SCRIPT_NAME
+    jobs: Optional[list[dict]] = None
+    if binary:
+        listing = _cron_list(binary, all_jobs=False)
+        jobs = watcher_cron_jobs(listing) if listing is not None else None
+    if jobs is None:
+        add("warn", "cron job", "unknown (hermes cron list did not run)" if binary else "unknown (no hermes binary)")
+    elif not jobs:
+        add("warn", "cron job", f"none named {CRON_NAME}: hermes home3d setup")
+    elif len(jobs) > 1:
+        add("warn", "cron job", f"{len(jobs)} watcher jobs ({', '.join(j['id'] for j in jobs)}): remove the extra "
+                                "one with hermes cron remove <id>")
+    else:
+        add("ok", "cron job", f"{jobs[0]['id']} ({jobs[0]['name'] or jobs[0]['script']})")
+    add("ok" if script.is_file() else "warn", "cron script", str(script) if script.is_file() else "not installed")
+    installed = bool(jobs) or (jobs is None and script.is_file())
+    w = rt.store.kv_get("watcher") or {}
+    upd = w.get("updated") if isinstance(w, dict) else None
+    if isinstance(upd, (int, float)):
+        age = time.time() - upd
+        if age < 10 * 60:
+            add("ok", "watcher", f"last pass {round(age / 60)} min ago")
+        else:
+            add("warn", "watcher", f"last pass {round(age / 60)} min ago: "
+                + ("is the Hermes scheduler running? start `hermes gateway` (check `hermes cron status`)"
+                   if installed else "hermes home3d setup"))
+    else:
+        add("warn", "watcher", SCHEDULER_DOWN if installed else "never ran: hermes home3d setup")
+
+
+def _doctor_watcher_settings(s, add) -> None:
+    """What the cron watcher will read (the live config.yaml, else the snapshot) against these settings, and whether
+    the fallback snapshot is stale."""
+    from .config import SOURCE_CONFIG, load_settings, load_watcher_settings, read_snapshot, settings_diff
+
+    try:
+        view, source = load_watcher_settings()
+    except Exception as e:
+        add("warn", "watcher settings", f"could not resolve them: {type(e).__name__}: {e}")
+        return
+    diff = settings_diff(view, s)
+    live_read = source.startswith(SOURCE_CONFIG)
+    if diff:
+        add("warn", "watcher settings",
+            f"the watcher reads {source}, which differs from these settings in {', '.join(diff[:8])}"
+            + ("" if live_read else ": run `hermes home3d setup` inside Hermes to rewrite the snapshot"))
+    else:
+        add("ok", "watcher settings", f"the watcher reads {source}")
+    snap = read_snapshot()
+    if snap and live_read:  # (when the watcher reads the snapshot itself, the row above already compared it)
+        stale = settings_diff(load_settings(overrides=snap), s)
+        if stale:
+            add("warn", "settings snapshot", f"differs from the live settings in {', '.join(stale[:8])} (only the "
+                                             "fallback; it is rewritten on the next settings read inside Hermes)")
+
+
+HOOK_TIMEOUT_MIN_S = 15.0  # below this Hermes hook timeout the printer gate before a start gets under 6 s
+
+
+def _doctor_hook_timeout(add) -> None:
+    """Hermes' ``plugins.hook_callback_timeout``: the printer gate in ``pre_tool_call`` gets 0.4 of it when it is
+    below 30 s, so a low value makes starts fail on a slow printer manager (a block, never an unsafe start)."""
+    from .config import hook_callback_timeout
+    from .hooks import deadline_for
+
+    try:
+        limit, source = hook_callback_timeout()
+    except Exception as e:
+        add("warn", "hook timeout", f"could not read plugins.hook_callback_timeout: {type(e).__name__}: {e}")
+        return
+    gate = f"{deadline_for(limit):.3g}"
+    if limit <= 0:
+        add("ok", "hook timeout", f"plugins.hook_callback_timeout is off (no limit); the printer gate stops "
+                                  f"after {gate} s")
+    elif limit < HOOK_TIMEOUT_MIN_S:
+        add("warn", "hook timeout", f"plugins.hook_callback_timeout is {limit:g} s ({source}): the printer check "
+                                    f"before a start gets only {gate} s and may block starts; set it to "
+                                    f"{HOOK_TIMEOUT_MIN_S:g} s or more (default 30)")
+    else:
+        add("ok", "hook timeout", f"{limit:g} s ({source}); the printer gate stops after {gate} s")
+
+
+def _doctor_plate_clear_setting(rt, be, add) -> None:
+    """Bambuddy's ``require_plate_clear``: off, its queue manager may start a queued auto-start item on a FINISH
+    printer before the watcher's camera check (with auto-eject: on top of a part the push missed)."""
+    fn = getattr(be, "settings", None)
+    if not callable(fn):
+        return
+    try:
+        d = fn() or {}
+    except BackendError as e:
+        add("warn", "require plate clear", f"Bambuddy settings not readable: {e}")
+        return
+    if not isinstance(d, dict) or "require_plate_clear" not in d:
+        if getattr(be, "name", "") != "simulator":
+            add("warn", "require plate clear", "unknown (not in the Bambuddy settings)")
+        return
+    s = rt.settings
+    eject = bool(str(s.autoeject_printer_preset or "").strip()) or getattr(be, "name", "") == "simulator"
+    if d.get("require_plate_clear") is True:
+        add("ok", "require plate clear", "on: queued jobs wait until the plate is marked clear")
+    elif eject:
+        add("warn", "require plate clear", "off: Bambuddy may auto-start a queued auto-start item on a finished "
+                                           "printer before the camera check: turn on 'Require plate clear'")
+    else:
+        add("ok", "require plate clear", "off (no auto-eject preset; turning it on is still safer)")
 
 
 def _doctor_presets(rt, be, add) -> None:
@@ -494,6 +633,10 @@ STAGED = "[staged]"
 DEMO_LEGEND = (f"{STAGED} marks scripted stand-ins: what people say and do, the model's chat replies, the web search "
                "and approval taps. Everything else is the plugin's own code (hooks, tools, safety gates, watcher, "
                "messages) driving a simulated printer.")
+DEMO_OWNER_NAME = "Sam"  # the demo's owner when the configured owner_name is the default "Owner"
+# (English, Turkish) display names and how the persona addresses them
+DEMO_PEOPLE = {DEMO_MUM: (("Mum", "Mum"), ("Annem", "Anneciğim")),
+               DEMO_DAD: (("Dad", "Dad"), ("Babam", "Babacığım"))}
 # (English, Turkish) lines of the script. Turkish is the household language of the original install.
 _LINES = {
     "mum_voice": ("{p}, can you print me a little gift box for flowers?",
@@ -503,8 +646,8 @@ _LINES = {
                     "2) saksı, yaklaşık {tb}\nHangisi olsun?"),
     "mum_pick": ("The first one, the white box.", "İlki olsun, beyaz kutu."),
     "mum_start": ("Lovely, print it please!", "Çok güzel, bas lütfen!"),
-    "mum_waiting": ("It's in the queue (#{q}). It starts as soon as {o} approves.",
-                    "Sıraya ekledim (#{q}). {o} onaylayınca başlıyor."),
+    "mum_waiting": ("It's in the queue (#{q}). I've passed it on to {o}: {o} decides when it starts.",
+                    "Sıraya ekledim (#{q}). {o_dat} ilettim, ne zaman başlayacağına o karar verecek."),
     "dad_ask": ("Could you print me a coaster? Our mugs are wide, make it 11 cm.",
                 "Bana bir bardak altlığı basar mısın? Kupalarımız geniş, 11 cm olsun."),
     "dad_ready": ("Dad, it's {w0} cm as designed; I made it {w} cm. About {t}, {g} g of black. It's in the queue "
@@ -554,11 +697,14 @@ class _Demo:
         from .tools import build_tools
 
         self.out, self.lang, self.tr = out, lang, lang == "tr"
+        (mum, mum_addr), (dad, dad_addr) = (DEMO_PEOPLE[DEMO_MUM][1 if self.tr else 0],
+                                            DEMO_PEOPLE[DEMO_DAD][1 if self.tr else 0])
+        self.mum, self.dad = mum, dad
         self.settings = Settings(
             backend="simulator", persona_name=persona, language=lang, owner_name=owner_name,
             owner_ids=[DEMO_OWNER],
-            household=[{"id": DEMO_MUM, "name": "Mum", "address_as": "Anneciğim" if self.tr else "Mum"},
-                       {"id": DEMO_DAD, "name": "Dad", "address_as": "Babacığım" if self.tr else "Dad"}],
+            household=[{"id": DEMO_MUM, "name": mum, "address_as": mum_addr},
+                       {"id": DEMO_DAD, "name": dad, "address_as": dad_addr}],
             owner_target="whatsapp:<owner-chat>@g.us", family_target="whatsapp:<family-group>@g.us",
             eject_cool_temp_c=30.0)
         self.be = SimulatorBackend()
@@ -573,7 +719,7 @@ class _Demo:
         self.blocked: list[str] = []
         self.n = 0
         self._seen_context: dict[str, set] = {}
-        self.names = {DEMO_OWNER: owner_name, DEMO_MUM: "Mum", DEMO_DAD: "Dad"}
+        self.names = {DEMO_OWNER: owner_name, DEMO_MUM: mum, DEMO_DAD: dad}
 
     # -- output --
     def step(self, title: str) -> None:
@@ -655,16 +801,22 @@ class _Demo:
         self.say(f"  ⏩ +{minutes:g} min → {_status_line(st)}")
         return self.watch()
 
-    def print_job(self, until_pause: bool = False):
+    def print_job(self, until_pause: bool = False, stop_at_end_gcode: bool = False):
         """Advance through the running job in a few big steps: warm-up, half way, the last minute (the watcher takes
-        the "done" photo there), the end. Stops early at a pause."""
-        for _ in range(12):
+        the "done" photo there), the end G-code (with auto-eject the bed cools and the part is pushed off while the
+        printer still says RUNNING at 100 %), the end. Stops early at a pause, or at the end G-code when asked."""
+        for _ in range(24):
             st = self.be.status()
             if st.state not in ACTIVE_STATES or (until_pause and st.state == PAUSE):
+                return st
+            end_gcode = st.state == RUNNING and (st.progress or 0) >= 99.95
+            if end_gcode and stop_at_end_gcode:
                 return st
             rem = st.remaining_min if st.remaining_min is not None else 10
             if st.state == PREPARE:
                 m = 3
+            elif end_gcode:
+                m = 5
             elif rem > 30 and (st.progress or 0) < 45:
                 m = max(1, rem // 2)
             elif rem > 2:
@@ -674,14 +826,19 @@ class _Demo:
             self.advance(m)
         return self.be.status()
 
-    def after_finish(self, until: set[str], steps: tuple = (16, 5, 2, 2, 5, 5, 5, 5)) -> list[str]:
-        """Simulated minutes after a finish: bed cool-down, the push, the camera checks."""
-        seen: list[str] = []
+    def kinds(self, since: int = 0) -> list[str]:
+        return [r["kind"] for r in self.events[since:]]
+
+    def after_finish(self, until: set[str], steps: tuple = (5, 5, 5, 5, 5, 10, 15, 15, 30),
+                     since: Optional[int] = None) -> list[str]:
+        """Simulated minutes after the end of a print (the end G-code, FINISH, the camera checks) until one of
+        ``until`` was announced since event index ``since`` (default: now). Returns the kinds since then."""
+        start = len(self.events) if since is None else since
         for m in steps:
-            seen += [r["kind"] for r in self.advance(m)]
-            if until & set(seen):
+            if until & set(self.kinds(start)):
                 break
-        return seen
+            self.advance(m)
+        return self.kinds(start)
 
     def quietly(self, fn: Callable[[], Any]) -> Any:
         """Run ``fn`` without printing its steps (the condensed fast-forward)."""
@@ -703,15 +860,17 @@ class _Demo:
         qid = q.get("queue_item_id")
         if not self.call("home3d_start", {"queue_item_id": qid}, "demo-owner").get("ok"):
             return qid, ["start blocked"]
+        since = len(self.events)
         self.print_job()
-        seen = self.after_finish({"plate_not_clear", "eject_unverified"})
+        self.after_finish({"plate_not_clear", "eject_unverified"}, since=since)
         self.be.human_clears_plate()
-        seen += self.after_finish({"plate_clear"}, steps=(15, 5, 5))
-        return qid, seen
+        self.after_finish({"plate_clear"}, steps=(15, 15, 30, 60))
+        return qid, self.kinds(since)
 
     # -- the script --
     def run(self) -> None:
         tr, persona, owner = self.tr, self.settings.persona_name, self.settings.owner_name
+        mum, dad = self.mum, self.dad
         self.step("Baseline watcher pass (silent: it only records the printer state)")
         self.watch()
 
@@ -722,7 +881,7 @@ class _Demo:
 
         self.step("The agent looks for ready models (web search → home3d_find_models)")
         self.staged("canned web search: the demo hands over two fixed MakerWorld links; the simulator makes up "
-                    "the model cards (titles, likes, times)")
+                    "the model cards (likes, times)")
         found = self.call("home3d_find_models", {"urls": ["https://makerworld.com/en/models/1440000",
                                                           "https://makerworld.com/en/models/1440004"]}, "demo-mum")
         cards = found.get("cards") or []
@@ -733,7 +892,7 @@ class _Demo:
         if len(cards) >= 2:
             self.mark("find")
             t = [_dur((c.get("a1_profiles") or [{}])[0].get("print_time_min"), tr) for c in cards[:2]]
-            self.reply("Mum", _l("mum_options", tr, a=cards[0]["title"], b=cards[1]["title"], ta=t[0], tb=t[1]))
+            self.reply(mum, _l("mum_options", tr, a=cards[0]["title"], b=cards[1]["title"], ta=t[0], tb=t[1]))
 
         self.step("Mum picks the first one → home3d_import (records who asked, and that it was a voice note)")
         self.user_turn("demo-mum", DEMO_MUM, _l("mum_pick", tr), first=False)
@@ -765,12 +924,18 @@ class _Demo:
             self.mark("queue")
 
         # ---- who may start ----
-        self.step("Mum says \"print it\": her chat may not start a print")
+        self.step("Mum says \"print it\": her chat may not start a print (her ask becomes a request to the owner)")
         self.user_turn("demo-mum", DEMO_MUM, _l("mum_start", tr), first=False)
         blocked = self.call("home3d_start", {"queue_item_id": qid1}, "demo-mum")
         if blocked.get("blocked"):
             self.mark("non_owner_blocked")
-            self.reply("Mum", _l("mum_waiting", tr, q=qid1, o=owner))
+            self.reply(mum, _l("mum_waiting", tr, q=qid1, o=owner, o_dat=_dative(owner)))
+
+        self.step("The next watcher pass tells the owner, with the exact command")
+        self.watch()
+        asked = self.store.latest_approval_request("start", qid1, mum) or {}
+        if asked.get("announced_ts") is not None:  # told once (on its own or inside the "next job ready" note)
+            self.mark("owner_told_request")
 
         self.step("The owner approves with a slash command (no model call; it runs right away, nothing is stored)")
         reply = self.slash(f"/home3d approve start {qid1}", DEMO_OWNER, "demo-owner-chat")
@@ -799,21 +964,24 @@ class _Demo:
         qid2 = q2.get("queue_item_id")
         self.say(f"  sliced {sl2.get('sliced_file_id')} · {sl2.get('print_time_min')} min · {sl2.get('grams')} g · "
                  f"auto-eject {'planned' if (sl2.get('eject') or {}).get('planned') else 'off'} · queue #{qid2}")
+
         def cm(mm: Any) -> str:
             return f"{float(mm) / 10:.3g}".replace(".", "," if tr else ".")
 
-        self.reply("Dad", _l("dad_ready", tr, w0=cm((cus.get("size_before_mm") or [95])[0]),
-                             w=cm((cus.get("size_mm") or [110])[0]),
-                             t=_dur(sl2.get("print_time_min"), tr), g=f"{float(sl2.get('grams') or 0):.0f}", q=qid2))
+        self.reply(dad, _l("dad_ready", tr, w0=cm((cus.get("size_before_mm") or [95])[0]),
+                           w=cm((cus.get("size_mm") or [110])[0]),
+                           t=_dur(sl2.get("print_time_min"), tr), g=f"{float(sl2.get('grams') or 0):.0f}", q=qid2))
 
         # ---- the happy path ----
         self.step("Mum's print runs; the zero-token watcher reports (simulated time)")
-        self.print_job()
-        if "finished" in [e["kind"] for e in self.events]:
-            self.mark("finished")
+        since = len(self.events)
+        self.print_job(stop_at_end_gcode=True)
 
-        self.step("Bed cools, the end G-code pushes the part off, the camera looks at the plate")
-        seen = self.after_finish({"ready_next", "plate_not_clear", "eject_unverified"})
+        self.step("End G-code: the bed cools and the part is pushed off while the printer still says RUNNING; "
+                  "at FINISH the camera looks at the plate")
+        seen = self.after_finish({"ready_next", "plate_not_clear", "eject_unverified"}, since=since)
+        if {"finished", "finished_ejected"} & set(seen):
+            self.mark("finished")
         if "finished_ejected" in seen:
             self.mark("auto_eject_camera_ok")
         if "ready_next" in seen:
@@ -830,7 +998,7 @@ class _Demo:
             self.mark("owner_session_start")
         self.watch()
         st = self.print_job(until_pause=True)
-        if st.state == PAUSE and "paused" in [e["kind"] for e in self.events]:
+        if st.state == PAUSE and "paused" in self.kinds():
             self.mark("paused")
 
         self.step("Resuming with a printer error active needs the owner to acknowledge it")
@@ -844,8 +1012,9 @@ class _Demo:
             self.mark("resumed")
         self.be.set_scenario("eject_miss")
         self.staged("simulator scenario eject_miss: this time the push will not move the part")
+        since = len(self.events)
         self.print_job()
-        seen = self.after_finish({"plate_not_clear", "eject_unverified"})
+        seen = self.after_finish({"plate_not_clear", "eject_unverified"}, since=since)
         if "plate_not_clear" in seen and self.store.human_needed(kind="remove_part"):
             self.mark("human_needed_logged")
 
@@ -856,7 +1025,7 @@ class _Demo:
         self.step("Dad takes the coaster off; the watcher sees an empty plate")
         self.staged("Dad takes the coaster off the plate")
         self.be.human_clears_plate()
-        seen = self.after_finish({"plate_clear"}, steps=(15, 5, 5))
+        seen = self.after_finish({"plate_clear"}, steps=(15, 15, 30, 60))
         if "plate_clear" in seen:
             self.mark("plate_clear_again")
 
@@ -876,7 +1045,7 @@ class _Demo:
                  f"auto-eject {'planned' if (sl3.get('eject') or {}).get('planned') else 'off'} · queue #{qid3}")
         self.slash(f"/home3d approve start {qid3}", DEMO_OWNER, "demo-owner-chat")
         self.print_job()
-        if "failed" in [e["kind"] for e in self.events]:
+        if "failed" in self.kinds():
             self.mark("failed")
 
         self.step("After a failure nothing starts until a person has confirmed the plate")
@@ -890,7 +1059,7 @@ class _Demo:
             self.mark("start_blocked_after_failure")
         self.staged(f"{owner} takes the loose clip off the plate")
         self.be.human_clears_plate()
-        self.after_finish({"plate_clear"}, steps=(15, 5, 5))
+        self.after_finish({"plate_clear"}, steps=(15, 15, 30, 60))
         reply = self.slash("/home3d approve clear", DEMO_OWNER, "demo-owner-chat")
         if reply.startswith("✅"):
             self.mark("plate_confirmed")
@@ -899,11 +1068,12 @@ class _Demo:
         reply = self.slash(f"/home3d approve start {qid4}", DEMO_OWNER, "demo-owner-chat")
         if reply.startswith("▶️"):
             self.mark("reprint_started")
+        since = len(self.events)
         self.print_job()
-        self.after_finish({"plate_not_clear", "eject_unverified"})
+        self.after_finish({"plate_not_clear", "eject_unverified"}, since=since)
         self.staged("Mum takes the clip off the plate")
         self.be.human_clears_plate()
-        self.after_finish({"plate_clear"}, steps=(15, 5, 5))
+        self.after_finish({"plate_clear"}, steps=(15, 15, 30, 60))
 
         # ---- self-upgrade ----
         from .notify import read_outbox
@@ -914,8 +1084,8 @@ class _Demo:
         before = len(self.events)
         qid, _seen = self.quietly(self.miss_round)
         n = len(self.store.human_needed(kind="remove_part"))
-        flow = [r["kind"] for r in self.events[before:] if r["kind"] in (
-            "finished", "plate_not_clear", "eject_unverified", "plate_clear", "upgrade_proposed")]
+        flow = [k for k in self.kinds(before) if k in (
+            "finished", "finished_ejected", "plate_not_clear", "eject_unverified", "plate_clear", "upgrade_proposed")]
         self.say(f"  #{qid} Coaster: {' → '.join(flow) or 'nothing'} · remove_part moments: {n}")
         new = [r for r in self.events[before:] if r["kind"] == "upgrade_proposed"]
         if new:
@@ -942,19 +1112,28 @@ class _Demo:
         self.say(f"  blocked by the plugin's gates on the way: {blocked or 'nothing'}")
 
 
-DEMO_MILESTONES = ("request", "find", "import", "slice", "queue", "non_owner_blocked", "owner_approved_start",
-                   "customize", "finished", "auto_eject_camera_ok", "ready_next", "owner_session_start", "paused",
-                   "resume_blocked_hms", "resumed", "human_needed_logged", "plate_clear_again", "failed",
-                   "start_blocked_after_failure", "plate_confirmed", "reprint_started", "upgrade_proposed")
+def _dative(name: str) -> str:
+    from .messages import dative
+
+    return dative(name)
 
 
-def run_demo(*, lang: str = "en", persona: str = "Mıstık", owner_name: str = "Owner",
+DEMO_MILESTONES = ("request", "find", "import", "slice", "queue", "non_owner_blocked", "owner_told_request",
+                   "owner_approved_start", "customize", "finished", "auto_eject_camera_ok", "ready_next",
+                   "owner_session_start", "paused", "resume_blocked_hms", "resumed", "human_needed_logged",
+                   "plate_clear_again", "failed", "start_blocked_after_failure", "plate_confirmed", "reprint_started",
+                   "upgrade_proposed")
+
+
+def run_demo(*, lang: str = "en", persona: str = "Mıstık", owner_name: str = DEMO_OWNER_NAME,
              data_dir: Optional[str] = None, keep: bool = False,
              out: Callable[[str], None] = print) -> dict:
     """Scripted simulator run of the whole loop. Returns {"ok", "milestones", "missing", "data_dir", "outbox",
-    "events", "seconds"}. Deterministic: simulated time only moves through ``advance()``."""
+    "events", "seconds"}. Deterministic: simulated time only moves through ``advance()``. The owner is called
+    ``DEMO_OWNER_NAME`` unless a real name is given (the settings default "Owner" counts as none)."""
     t0 = time.monotonic()
     lang = lang if lang in ("tr", "en") else "en"
+    owner_name = owner_name if owner_name and owner_name.strip() not in ("", "Owner") else DEMO_OWNER_NAME
     saved = {k: os.environ.get(k) for k in _DEMO_ENV}
     tmp = Path(data_dir).expanduser() if data_dir else Path(tempfile.mkdtemp(prefix="home3d-demo-"))
     tmp.mkdir(parents=True, exist_ok=True)
@@ -998,7 +1177,7 @@ def run_demo(*, lang: str = "en", persona: str = "Mıstık", owner_name: str = "
 def _cmd_demo(rt, args) -> int:
     s = rt.settings
     res = run_demo(lang=getattr(args, "lang", None) or "en", persona=s.persona_name or "Mıstık",
-                   owner_name=s.owner_name or "Owner", data_dir=args.data_dir, keep=args.keep)
+                   owner_name=s.owner_name or DEMO_OWNER_NAME, data_dir=args.data_dir, keep=args.keep)
     return 0 if res["ok"] else 1
 
 
@@ -1008,4 +1187,4 @@ _DISPATCH: dict[str, Callable[[Any, Any], int]] = {
 }
 
 __all__ = ["setup_parser", "handle", "run_demo", "install_watch_script", "cron_command", "hermes_home",
-           "parse_cron_list", "watcher_cron_jobs", "DEMO_MILESTONES"]
+           "parse_cron_list", "watcher_cron_jobs", "DEMO_MILESTONES", "cli_help", "SCHEDULER_DOWN"]

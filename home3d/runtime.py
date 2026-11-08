@@ -1,8 +1,10 @@
 """Runtime: the one object every Hermes surface (tools, hooks, commands, CLI) shares.
 
-It resolves settings lazily on each access (so Desktop/config edits apply without a restart), owns the
-store, creates the backend on demand, answers "who is talking" / "are we inside cron", and keeps a short
-in-memory plate-check cache so the ``pre_tool_call`` hook and the handler of one start share one camera check.
+It resolves settings lazily on each access (so Desktop/config edits apply without a restart) and, inside Hermes,
+rewrites the watcher's fallback snapshot whenever they changed; it owns the store, creates the backend on demand,
+answers "who is talking" / "are we inside cron", and remembers the last plate check: a confident "empty" is reused
+by the next check (one camera check per start), and any recent result is what the ``pre_tool_call`` hook sees
+(the hook never runs the camera itself, see hooks.py).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .backends import Backend, make_backend
-from .config import Person, Settings, data_dir, load_settings
+from .config import Person, Settings, data_dir, load_settings, settings_hash, sync_snapshot
 from .store import Store
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -117,14 +119,34 @@ class Runtime:
         self._backend = backend
         self._backend_key: Optional[tuple] = None
         self._plate_lock = threading.Lock()
-        self._plate_cache: Optional[tuple[tuple, float, Any]] = None  # (key, ts, PlateCheck)
+        self._plate_cache: Optional[tuple[tuple, float, Any]] = None  # (key, ts, PlateCheck): a confident "empty"
+        self._plate_last: Optional[tuple[tuple, float, Any]] = None  # (key, ts, PlateCheck): the last result, any
+        self._snap_lock = threading.Lock()
+        self._snap_hash: Optional[str] = None
 
     # ---- settings / store / backend --------------------------------------------------------
     @property
     def settings(self) -> Settings:
         if self._fixed_settings is not None:
             return self._fixed_settings
-        return load_settings(self.ctx)
+        s = load_settings(self.ctx)
+        if self.ctx is not None and hasattr(self.ctx, "get_config"):
+            self._sync_snapshot(s)
+        return s
+
+    def _sync_snapshot(self, s: Settings) -> None:
+        """Inside Hermes: keep the watcher's fallback snapshot equal to the live settings (written only when the
+        content changed; the hash of the last synced content is kept in memory). Never raises."""
+        try:
+            h = settings_hash(s)
+            if h == self._snap_hash:
+                return
+            with self._snap_lock:
+                if h != self._snap_hash:
+                    sync_snapshot(s)
+                    self._snap_hash = h
+        except Exception:
+            pass  # a read-only data dir must not break a tool call; doctor reports the stale snapshot
 
     @property
     def store(self) -> Store:
@@ -154,17 +176,22 @@ class Runtime:
         return p
 
     # ---- plate check (shared by the hook and the handler) -------------------------------------
+    @staticmethod
+    def _plate_key(be: Any, st: Any) -> tuple:
+        return (id(be), str(getattr(st, "state", "") or ""), str(getattr(st, "job_name", "") or ""))
+
     def plate_check(self, max_age_s: float = 90, status: Any = None):
         """``backend.check_plate()`` with a short cache keyed by (backend, printer state, job name).
 
-        Only a confident "empty" result is cached (``is_empty is True`` and the light was not reported broken):
+        Only a confident "empty" result is reused (``is_empty is True`` and the light was not reported broken):
         a "not empty" / uncertain answer is re-checked every time, so a person who just cleared the plate is not
-        told it is still occupied. ``status`` (a ``PrinterStatus`` the caller already read) saves a status call.
-        Raises ``BackendError`` like the backend; errors are never cached.
+        told it is still occupied. Every result is remembered for ``recent_plate_check`` (the hook).
+        ``status`` (a ``PrinterStatus`` the caller already read) saves a status call. Raises ``BackendError``
+        like the backend; errors are never cached.
         """
         be = self.backend
         st = status if status is not None else be.status()
-        key = (id(be), str(getattr(st, "state", "") or ""), str(getattr(st, "job_name", "") or ""))
+        key = self._plate_key(be, st)
         now = time.monotonic()
         with self._plate_lock:
             cached = self._plate_cache
@@ -177,15 +204,31 @@ class Runtime:
             except Exception:
                 pass
         with self._plate_lock:
+            stamp = time.monotonic()
+            self._plate_last = (key, stamp, plate)
             if getattr(plate, "is_empty", None) is True and getattr(plate, "light_ok", None) is not False:
-                self._plate_cache = (key, time.monotonic(), plate)
+                self._plate_cache = (key, stamp, plate)
             else:
                 self._plate_cache = None
         return plate
 
+    def recent_plate_check(self, max_age_s: float = 120, status: Any = None):
+        """The last plate check of this process (any result) when it is at most ``max_age_s`` old and was made for
+        the same printer state and job (``status``); else None. No camera, no network: what the ``pre_tool_call``
+        hook uses."""
+        be = self.backend
+        with self._plate_lock:
+            last = self._plate_last
+        if last is None or time.monotonic() - last[1] > max(0.0, float(max_age_s)):
+            return None
+        if status is not None and last[0] != self._plate_key(be, status):
+            return None
+        return last[2]
+
     def forget_plate_check(self) -> None:
         with self._plate_lock:
             self._plate_cache = None
+            self._plate_last = None
 
     # ---- identity / context ------------------------------------------------------------------
     def sender_id(self, session_id: Optional[str]) -> str:

@@ -6,10 +6,14 @@ removes that step: for ``remove_part`` that is the printed tilt base + auto-ejec
 built for itself. A kind with an open (non-rejected) proposal only gets its evidence count bumped; after
 a rejection, a new proposal needs ``threshold`` fresh moments logged after the rejection.
 Statuses (advanced by the ``home3d_upgrades`` tool): proposed -> accepted -> printing -> installed.
+
+A kind with ``propose: False`` is logged and counted but never becomes a proposal: ``approve_start`` (waiting for
+the owner's approval) is a deliberate safety step, not friction to remove.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .config import Settings
@@ -93,13 +97,15 @@ KINDS: dict[str, dict] = {
         "model_ref": "",
     },
     "approve_start": {
+        # Logged so the owner can see how often the family waited, but NEVER proposed: owner approval of every
+        # start is a deliberate safety step (approvals are never stored or widened).
         "label": "wait for the owner to approve a start", "label_tr": "başlatma onayını bekleme",
-        "threshold": 5, "window_days": 14,
-        "title": "Standing approval window", "title_tr": "Süreli başlatma onayı",
-        "proposal": ("Owner approval is the bottleneck: grant a standing approval window (e.g. this evening) for "
-                     "jobs that pass every safety gate (empty plate, no errors, our job next)."),
-        "proposal_tr": ("Onay beklemek darboğaz oldu: tüm güvenlik kontrollerinden geçen işler (boş tabla, hata "
-                        "yok, sıra bizde) için süreli bir onay penceresi ver (ör. bu akşam)."),
+        "threshold": 5, "window_days": 14, "propose": False,
+        "title": "Owner approvals (no upgrade)", "title_tr": "Sahip onayı (yükseltme yok)",
+        "proposal": ("Nothing to change: every start needs the owner's approval on purpose. The watcher already "
+                     "tells the owner about each request with the exact /home3d approve command."),
+        "proposal_tr": ("Değişecek bir şey yok: her başlatma bilerek sahibin onayını bekler. İzleyici her isteği "
+                        "tam /home3d approve komutuyla sahibine zaten bildiriyor."),
         "model_ref": "",
     },
     "other": {
@@ -111,6 +117,46 @@ KINDS: dict[str, dict] = {
         "model_ref": "",
     },
 }
+
+
+STATUS_LABELS_TR = {"proposed": "önerildi", "accepted": "kabul edildi", "printing": "basılıyor",
+                    "installed": "takıldı", "rejected": "reddedildi"}
+
+# English moment details written by the watcher / hooks -> Turkish (unknown details pass through unchanged)
+_DETAILS_TR = (
+    (re.compile(r"(\S+) (\S*) ?waited for the owner's approval"), "{0} {1}: sahibin onayını bekledi"),
+    (re.compile(r"paused without HMS"), "hata kodu olmadan duraklatıldı"),
+    (re.compile(r"no auto-eject planned"), "otomatik düşürme planlanmamıştı"),
+)
+
+
+def status_label(status: Any, lang: str) -> str:
+    """'proposed' -> 'önerildi' (tr); other languages get the status as it is."""
+    st = str(status or "").strip().lower()
+    return STATUS_LABELS_TR.get(st, st) if lang == "tr" else st
+
+
+def detail_text(detail: Any, lang: str) -> str:
+    """A logged moment's detail in ``lang``: the watcher's English plate reasons (``messages.reason_text``) and the
+    hook's approval note are translated for tr; anything else is shown as written."""
+    d = str(detail or "").strip()
+    if lang != "tr" or not d:
+        return d
+    from .messages import reason_text
+
+    out = reason_text(d, "tr")
+    if out != d:
+        return out
+    for rx, tpl in _DETAILS_TR:
+        m = rx.fullmatch(d)
+        if m:
+            return re.sub(r"\s+", " ", tpl.format(*m.groups())).replace(" :", ":").strip()
+    return d
+
+
+def proposes(kind: Any) -> bool:
+    """Can moments of ``kind`` ever become an upgrade proposal? (False for approve_start.)"""
+    return bool(KINDS[normalize_kind(kind)].get("propose", True))
 
 
 def normalize_kind(kind: Any) -> str:
@@ -149,6 +195,8 @@ def evaluate(store: Store, settings: Settings) -> list[dict]:
     lang = getattr(settings, "language", "en") or "en"
     created: list[dict] = []
     for kind, spec in KINDS.items():
+        if not spec.get("propose", True):
+            continue  # logged and counted, never proposed (approve_start: a deliberate safety step)
         all_moments = store.human_needed(kind, limit=_EVIDENCE_LIMIT)
         if not all_moments:
             continue

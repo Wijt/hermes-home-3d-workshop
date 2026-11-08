@@ -196,3 +196,71 @@ def test_eject_unverified_tells_the_owner_how_to_confirm_an_empty_plate():
         text = M.render("eject_unverified", "owner", lang, persona="Mıstık", owner="Sam", job="kutu",
                         reason="plate check inconclusive after 3 checks", plate_diff=19.9)
         assert "/home3d approve clear" in text and word in text
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_finish_text_for_the_real_eject_order(lang):
+    """hw/F6: with the push inside the end G-code, FINISH means the push already ran."""
+    text = M.render("finished", "owner", lang, job="Vazo", queue_item_id=7, eject_planned=True, eject_in_gcode=True)
+    assert ("Baskının sonunda itildi; kamerayla kontrol ediyorum." if lang == "tr"
+            else "Pushed off at the end of the print; checking the camera.") in text
+    assert "bekleniyor" not in text and "pending" not in text
+    combined = M.render("finished", "owner", lang, job="Vazo", queue_item_id=7, eject_planned=True,
+                        eject_in_gcode=True, eject_result_follows=True)
+    assert len(combined.splitlines()) == 1  # the camera's opinion follows in the same message
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_a_missed_end_promises_nothing_about_the_plate(lang):
+    fam = M.render("finished", "family", lang, job="Vazo", address_as="Anneciğim", missed_end="busy")
+    assert fam == ('✅ Anneciğim, "Vazo" bitti.' if lang == "tr" else '✅ Anneciğim, "Vazo" is done.')
+    busy = M.render("finished", "owner", lang, job="Vazo", queue_item_id=7, missed_end="busy")
+    idle = M.render("finished", "owner", lang, job="Vazo", queue_item_id=7, missed_end="idle")
+    assert ("başka bir işe geçti" if lang == "tr" else "went straight on to another job") in busy
+    assert ("kamerayla kontrol edeceğim" if lang == "tr" else "check the plate with the camera") in idle
+
+
+def test_start_failed_quotes_the_printer_managers_error():
+    text = M.render("start_failed", "owner", "en", job="towel hook", queue_item_id=200, requester="Mum",
+                    error="The printer rejected the print command: MQTT command verification failed.")
+    assert text.startswith('⚠️ The start did not happen: "towel hook" (#200) · for Mum')
+    assert "Bambuddy: The printer rejected the print command" in text and "queue it again" in text
+    assert M.render("start_failed", "family", "en", job="x") == ""
+    long = M.render("start_failed", "owner", "tr", job="x", error="e" * 1000)
+    assert "Başlatma gerçekleşmedi" in long and len(long) < 500
+
+
+def test_approval_request_texts_give_the_exact_command_and_never_promise_a_start():
+    start = M.render("approval_request", "owner", "en", who="Mum", action="start", queue_item_id=7, job="Gül kutusu",
+                     duration_min=80, grams=35.2)
+    assert start == '🙋 Mum asks to start #7 "Gül kutusu" (1 h 20 min, 35 g).\nTo start it: /home3d approve start 7'
+    tr = M.render("approval_request", "owner", "tr", who="Annem", action="start", queue_item_id=7, job="Gül kutusu",
+                  duration_min=80, grams=35.2)
+    assert tr == ('🙋 Annem #7 "Gül kutusu" işinin başlatılmasını istiyor (1 sa 20 dk, 35 g).\n'
+                  'Başlatmak için: /home3d approve start 7')
+    ahead = M.render("approval_request", "owner", "en", who="Mum", queue_item_id=7, job="x",
+                     ahead=[{"id": 73, "name": "soap dish"}])
+    assert '"soap dish" (#73)' in ahead and ahead.endswith("/home3d approve start 7 jump")
+    for action, cmd in (("resume", "/home3d approve resume"), ("clear_plate", "/home3d approve clear")):
+        for lang in ("tr", "en"):
+            text = M.render("approval_request", "owner", lang, who="Dad", action=action)
+            assert text.endswith(cmd) and "Dad" in text
+    for lang in ("tr", "en"):
+        text = M.render("approval_request", "owner", lang, who="Mum", queue_item_id=7)
+        assert "başlayacak" not in text and "will start" not in text
+
+
+@pytest.mark.parametrize("lang", ["tr", "en"])
+def test_ready_next_says_to_mark_the_plate_clear_first_when_bambuddy_waits_for_it(lang):
+    """With Bambuddy's "Require plate clear" on, a start is blocked until the plate is marked clear: the owner text
+    says so before the start command (once: a failed print's confirm line already names the command)."""
+    text = M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13, awaiting_clear=True)
+    line = ("Bambuddy tablanın boş işaretlenmesini bekliyor: önce /home3d approve clear" if lang == "tr"
+            else "Bambuddy waits for the plate to be marked clear: first /home3d approve clear")
+    assert line in text and text.index(line) < text.index("/home3d approve start 13")
+    assert text.rstrip().endswith("/home3d approve start 13")
+    both = M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13, awaiting_clear=True,
+                    confirm_first=True)
+    assert both.count("/home3d approve clear") == 1
+    assert "/home3d approve clear" not in M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13)

@@ -51,7 +51,8 @@ def _first_layer_bbox(text):
 # ---- library / models ----------------------------------------------------------------------------
 def test_seeded_library_and_resolve(sim):
     card = sim.resolve_model("https://makerworld.com/en/models/1440000-gift-box#profileId-77")
-    assert card.title == "Flower gift box"
+    assert card.title == "Gift box"  # the title comes from the link's slug (R2-9)
+    assert "80 x 80 x 45 mm" in card.summary  # sized like the catalogue's box
     assert card.license in {"Standard Digital File License", "CC BY"}
     assert len(card.instances) == 2
     assert any("A1" in i.printer_models for i in card.instances)
@@ -152,7 +153,7 @@ def test_download_and_upload_files(sim, tmp_path):
 
 # ---- print progression ---------------------------------------------------------------------------
 def test_progression_with_advance(sim):
-    res, item = _queued(sim)
+    res, item = _queued(sim, STD)
     sim.start(item.id)
     st = sim.status()
     assert st.state == PREPARE and st.job_name == "Flower gift box" and st.layer == 0
@@ -173,18 +174,28 @@ def test_progression_with_advance(sim):
 
 
 def test_plate_after_finish_with_eject_marker(sim):
+    """The REAL A1 order (R2-3): the end G-code cools the bed (M400 S900) and pushes the part while the printer
+    still reports RUNNING at 100 %; FINISH comes after the push."""
+    assert sim.eject_in_gcode is True
     res, item = _queued(sim, AUTO)
     sim.start(item.id)
     assert sim.check_plate().is_empty is True  # PREPARE: nothing printed yet
     sim.advance(3)
     assert sim.check_plate().is_empty is False  # part is being printed
-    sim.advance(res.print_time_s / 60 - 1 + 0.01)  # 2 min PREPARE + duration since start
-    assert sim.status().state == FINISH and sim.check_plate().is_empty is False
-    sim.advance(14)
-    assert sim.check_plate().is_empty is False
-    sim.advance(1.1)
+    sim.advance(res.print_time_s / 60 - 1 + 0.01)  # 2 min PREPARE + duration since start: last layer done
+    st = sim.status()
+    assert st.state == RUNNING and st.progress == 100.0 and st.layer == st.total_layers
+    assert st.remaining_min == 15 and st.bed_target == 0.0 and sim.check_plate().is_empty is False
+    assert sim.queue()[0].status == "printing"
+    st = sim.advance(14)
+    assert st.state == RUNNING and st.bed_temp <= 30 and sim.check_plate().is_empty is False  # still cooling
+    st = sim.advance(1.1)
+    assert st.state == FINISH and st.progress == 100.0  # FINISH only after the push
     pc = sim.check_plate()
     assert pc.is_empty is True and pc.difference_pct < 26
+    done = sim.queue(include_done=True)[0]
+    assert done.status == "completed" and done.started_at and done.error_message == ""
+    assert sim.advance(10).bed_temp <= 26.0  # keeps cooling from where the end G-code left it
 
 
 def test_plate_after_finish_without_eject_marker(sim):
@@ -232,7 +243,7 @@ def test_fail_set_mid_print_fires_at_current_progress(sim):
 
 
 def test_pause_hms_scenario(sim):
-    res, item = _queued(sim)
+    res, item = _queued(sim, STD)
     sim.set_scenario("pause_hms")
     sim.start(item.id)
     st = _run_to_finish(sim, res)
@@ -440,3 +451,82 @@ def test_simulator_queue_items_use_lower_case_statuses_and_is_done(sim):
     _run_to_finish(sim, res)
     done = sim.queue(include_done=True)[0]
     assert done.status == "completed" and done.is_done and not done.is_pending
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+def test_eject_miss_stays_running_through_the_push_then_finish_with_the_part(sim):
+    res, item = _queued(sim, AUTO)
+    sim.set_scenario("eject_miss")
+    sim.start(item.id)
+    st = _run_to_finish(sim, res)
+    assert st.state == RUNNING and st.progress == 100.0
+    st = sim.advance(15.1)
+    assert st.state == FINISH and sim.check_plate().is_empty is False  # the push ran but missed
+
+
+def test_stop_during_the_end_gcode_cool_down(sim):
+    res, item = _queued(sim, AUTO)
+    sim.start(item.id)
+    _run_to_finish(sim, res)
+    sim.advance(5)
+    sim.stop()
+    st = sim.status()
+    assert st.state == FAILED and st.bed_temp < 65 and sim.check_plate().is_empty is False
+
+
+def test_require_plate_clear_off_starts_auto_items_on_a_finished_printer(sim):
+    """R2-5: Bambuddy with "Require plate clear" off dispatches an auto-start item on a FINISH printer at once,
+    before any camera check, even with a part still on the plate."""
+    assert sim.settings() == {"require_plate_clear": True}
+    res, a = _queued(sim, STD)
+    sim.start(a.id)
+    _run_to_finish(sim, res)
+    auto = sim.queue_add(sim.slice(2, STD).library_file_id, manual_start=False)
+    assert sim.status().state == FINISH  # require_plate_clear on: the manager waits for the clear plate
+    sim.set_require_plate_clear(False)
+    assert sim.settings() == {"require_plate_clear": False}
+    st = sim.status()
+    assert st.state == PREPARE and {q.id: q.status for q in sim.queue()}[auto.id] == "printing"
+    # the flag lives in the shared state file: another instance (the watcher's) sees it
+    assert SimulatorBackend().settings()["require_plate_clear"] is False
+    assert SimulatorBackend(require_plate_clear=True).settings()["require_plate_clear"] is True
+
+
+def test_auto_start_right_after_an_auto_eject_finish(sim):
+    """The family's auto-start item starts the moment our pushed-off print reports FINISH: the watcher can miss our
+    FINISH entirely (R2-2 reconciles it from the queue)."""
+    res, ours = _queued(sim, AUTO)
+    sim.start(ours.id)
+    fam = sim.queue_add(sim.slice(2, STD).library_file_id, manual_start=False)
+    _run_to_finish(sim, res)
+    assert sim.status().state == RUNNING
+    st = sim.advance(15.1)
+    assert st.state == PREPARE and st.job_name == "Cable clip"
+    every = {q.id: q for q in sim.queue(include_done=True)}
+    assert every[ours.id].status == "completed" and every[fam.id].status == "printing"
+
+
+def test_dispatch_fail_scenario(sim):
+    """Live Bambuddy item #6 shape: the start is accepted, then the item fails without starting."""
+    _, item = _queued(sim, STD)
+    sim.set_scenario("dispatch_fail")
+    assert sim.start(item.id).status == "pending"
+    st = sim.advance(1)
+    assert st.state == IDLE
+    failed = sim.queue(include_done=True)[0]
+    assert failed.status == "failed" and failed.started_at is None and "rejected" in failed.error_message
+    assert sim.queue() == []
+
+
+def test_titles_come_from_the_link_slug_and_sizes_from_keywords(sim):
+    """judge/F4: a real MakerWorld link gets a title that matches it, and a size that fits the word."""
+    card = sim.resolve_model("https://makerworld.com/en/models/1092613-simple-coaster#profileId-1")
+    assert card.title == "Simple coaster" and "95 x 95 x 4 mm" in card.summary
+    assert card.instances[0].title == "Simple coaster - A1 0.4 nozzle"
+    assert sim.import_model(1092613).name == "Simple coaster.3mf"  # import names it like the card
+    assert sim.resolve_model("1092613").title == "Simple coaster"  # remembered for the bare id
+    odd = sim.resolve_model("https://makerworld.com/en/models/77-articulated-octopus")
+    assert odd.title == "Articulated octopus"  # no keyword: the catalogue size of the id
+    assert sim.resolve_model("1440006").title == "Pen holder"  # a bare catalogue id
+    assert dict(sim_mod.CATALOG_IDS)[1440007] == "Coaster"
+    assert sim.resolve_model("https://makerworld.com/en/models/5-plant-pots").summary.endswith("90 x 90 x 80 mm.")

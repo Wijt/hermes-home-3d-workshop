@@ -99,3 +99,28 @@ def test_installed_upgrade_is_not_proposed_again():
         U.log_moment(store, "remove_part")
     assert U.evaluate(store, settings) == []
     assert store.upgrade_for_kind("remove_part")["evidence"] == 6
+
+
+# ---- fix round 2 ----------------------------------------------------------------------------------------
+def test_waiting_for_the_owner_is_logged_but_never_proposed():
+    """cat/F4: approve_start used to propose a "standing approval window", which the plugin forbids."""
+    store = Store()
+    for _ in range(12):
+        U.log_moment(store, "approve_start", "home3d_start 7 waited for the owner's approval", source="hook")
+    assert len(store.human_needed("approve_start")) == 12  # still counted for /home3d moments
+    assert U.evaluate(store, Settings(language="en")) == [] and store.upgrades() == []
+    assert not U.proposes("approve_start") and U.proposes("remove_part")
+    spec = U.KINDS["approve_start"]
+    text = (spec["title"] + spec["proposal"] + spec["proposal_tr"]).lower()
+    assert "window" not in text and "standing" not in text and "pencere" not in text
+
+
+def test_turkish_labels_for_statuses_and_moment_details():
+    assert U.status_label("proposed", "tr") == "önerildi" and U.status_label("installed", "tr") == "takıldı"
+    assert U.status_label("proposed", "en") == "proposed"
+    assert U.detail_text("part still on the plate after 3 checks", "tr") == "3 kontrolden sonra parça hâlâ tablada"
+    assert U.detail_text("home3d_start 7 waited for the owner's approval", "tr") == \
+        "home3d_start 7: sahibin onayını bekledi"
+    assert U.detail_text("home3d_stop  waited for the owner's approval", "tr") == "home3d_stop: sahibin onayını bekledi"
+    assert U.detail_text("something else", "tr") == "something else"
+    assert U.detail_text("part still on the plate after 3 checks", "en") == "part still on the plate after 3 checks"

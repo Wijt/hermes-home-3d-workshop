@@ -341,3 +341,50 @@ def test_start_waits_for_the_printer_managers_plate_clear_flag():
     g = gate(idle(awaiting_plate_clear=True))
     assert not g.ok and "awaiting_plate_clear" in g.codes and "/home3d approve clear" in describe(g, "en")
     assert gate(idle(awaiting_plate_clear=False)).ok and gate(idle(awaiting_plate_clear=None)).ok
+
+
+# ---- fix round 2 (R2-6): the hook defers the plate to the handler -------------------------------------------------
+def test_a_deferred_plate_check_does_not_block_but_says_so():
+    g = gate(plate=None, plate_deferred=True)
+    assert g.ok and [i["code"] for i in g.items] == ["plate_deferred"]
+    assert "the camera checks the plate right before the start" in describe(g, "en")
+    assert "kamera başlatmadan hemen önce tablaya bakacak" in describe(g, "tr")
+    assert not gate(plate=None).ok  # without deferral an unknown plate still blocks
+
+
+def test_a_deferred_check_after_a_finish_leaves_the_plate_to_the_handler():
+    g = gate(idle(state="FINISH"), plate=None, plate_deferred=True)
+    assert g.ok and "after_job" not in g.codes and "camera_only" not in [i["code"] for i in g.items]
+    assert not gate(idle(state="FINISH"), plate=None).ok
+
+
+def test_a_remembered_check_still_decides_when_deferred():
+    """A recent plate check this process made (the handler's) counts in the hook: occupied / unsure block."""
+    for plate, code in ((OCCUPIED, "plate_occupied"), (UNSURE, "plate_uncertain"),
+                        (PlateCheck(is_empty=None, light_ok=False), "plate_dark")):
+        g = gate(plate=plate, plate_deferred=True)
+        assert not g.ok and code in g.codes, code
+    g = gate(idle(state="FINISH"), plate=OCCUPIED, plate_deferred=True)
+    assert {"plate_occupied", "after_job"} <= set(g.codes)
+    assert gate(plate=EMPTY, plate_deferred=True).ok and "plate_deferred" not in [i["code"] for i in gate(
+        plate=EMPTY, plate_deferred=True).items]
+
+
+def test_deferral_never_opens_a_gate_the_printer_or_a_failure_closes():
+    assert "busy" in gate(idle(state="RUNNING"), plate=None, plate_deferred=True, plate_skipped=True).codes
+    g = gate(plate=None, plate_deferred=True, after_failure=True)
+    assert not g.ok and "after_failure" in g.codes
+    assert not gate(idle(state="FAILED"), plate=None, plate_deferred=True).ok
+
+
+def test_clear_gate_with_a_deferred_plate():
+    g = clear_plate_gate(idle(), None, in_cron=False, cool_temp_c=30, auto_start_pending=[], person_confirms=True,
+                         plate_deferred=True)
+    assert g.ok and [i["code"] for i in g.items] == ["plate_deferred_clear"]
+    assert "right before it is marked clear" in describe(g, "en") and "boş işaretlenmeden" in describe(g, "tr")
+    g = clear_plate_gate(idle(), OCCUPIED, in_cron=False, cool_temp_c=30, auto_start_pending=[],
+                         person_confirms=True, plate_deferred=True)
+    assert not g.ok and "plate_occupied" in g.codes
+    g = clear_plate_gate(idle(), None, in_cron=False, cool_temp_c=30, auto_start_pending=[q(3, manual=False)],
+                         plate_deferred=True)
+    assert not g.ok and "auto_start_pending" in g.codes

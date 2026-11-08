@@ -10,6 +10,10 @@ A person can overrule exactly one kind of camera doubt: Bambuddy's known false-p
 read at 18-25 %, ``PlateCheck.uncertain_band``). The owner's ``/home3d approve clear`` accepts it, and a start
 accepts it once that confirmation is recorded for the last job (``plate_confirmed``). "Occupied", a dark
 check, a check that could not run and a missing calibration are never overruled.
+
+``plate_deferred`` (the ``pre_tool_call`` hook, which must stay fast and never runs the camera): no plate check is
+needed now because the handler runs the authoritative one right before the action. A plate check that IS passed in
+(a recent one the process remembers) still decides as usual, so a fresh "occupied" or "unsure" blocks at once.
 """
 
 from __future__ import annotations
@@ -74,6 +78,10 @@ _TEXT: dict[str, tuple[str, str]] = {
                             "kamera emin değil ({detail}): tablanın boş olduğunu sen onaylıyorsun, önce bak"),
     "hms_acknowledged": ("resuming despite printer error {codes} (acknowledged by the owner)",
                          "sahibi onayladı, yazıcı hatasına rağmen devam: {codes}"),
+    "plate_deferred": ("the camera checks the plate right before the start",
+                       "kamera başlatmadan hemen önce tablaya bakacak"),
+    "plate_deferred_clear": ("the camera checks the plate right before it is marked clear",
+                             "kamera tabla boş işaretlenmeden hemen önce bakacak"),
 }
 
 _OK_TEXT = {
@@ -153,15 +161,21 @@ def person_can_overrule(plate: Optional[PlateCheck]) -> bool:
 
 
 def _check_plate(gate: Gate, plate: Optional[PlateCheck], *, skipped: bool = False,
-                 person: str = "") -> bool:
-    """Block unless a lit plate check explicitly says empty. Returns True when the plate is empty.
+                 person: str = "", deferred: str = "") -> Optional[bool]:
+    """Block unless a lit plate check explicitly says empty. Returns True when the plate is empty, False when it
+    is not (or unknown and blocked), None when the check is deferred (``deferred`` = the warning code).
 
     ``skipped``: the caller did not look because the printer already blocks; honoured only when the gate has
     already blocked (so it can never open a gate). ``person``: "confirmed" (the owner confirmed this plate
-    earlier) or "confirming" (the owner is confirming it now) lets a band-only doubt pass with a warning."""
+    earlier) or "confirming" (the owner is confirming it now) lets a band-only doubt pass with a warning.
+    ``deferred``: no check yet because the handler runs it right before the action (the hook): no block, a warning."""
     if plate is None:
-        if not (skipped and not gate.ok):
-            gate.block("plate_unknown")
+        if skipped and not gate.ok:
+            return False
+        if deferred:
+            gate.warn(deferred)
+            return None
+        gate.block("plate_unknown")
         return False
     if plate.needs_calibration:
         gate.warn("needs_calibration")
@@ -227,14 +241,16 @@ def printer_blocks(status: PrinterStatus, action: str = "start") -> bool:
 def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, plate: Optional[PlateCheck],
                in_cron: bool, own_item_ids: set[int], allow_jump: bool = False,
                voice_request: bool = False, plate_confirmed: bool = False, after_failure: bool = False,
-               plate_skipped: bool = False) -> Gate:
+               plate_skipped: bool = False, plate_deferred: bool = False) -> Gate:
     """May queue item ``item_id`` be started now? Approval is still required (``needs_owner``).
 
     ``own_item_ids``: queue ids of the workshop's ACTIVE jobs (queued or printing). ``plate_confirmed``: a
     person (the owner) confirmed the plate of the last job (``status.job_name``) is clear; after a FAILED
     job the camera alone is never enough. ``after_failure``: the store knows of a failed print nobody has
     confirmed since (``Store.unconfirmed_failure``): it blocks even when the printer no longer says FAILED
-    (power cycle, cancel to IDLE). ``plate_skipped``: no plate check was made because the printer blocks."""
+    (power cycle, cancel to IDLE). ``plate_skipped``: no plate check was made because the printer blocks.
+    ``plate_deferred``: the hook's view: without a plate check the gate does not block on the plate (warning
+    ``plate_deferred``); the handler's own check decides right before the start."""
     gate = Gate(ok=True, needs_owner=True, action="start")
     try:
         item_id = int(item_id)
@@ -255,10 +271,11 @@ def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, p
     failed_unconfirmed = (status.state == FAILED and not plate_confirmed) or bool(after_failure)
     if failed_unconfirmed:
         gate.block("after_failure")
-    empty = _check_plate(gate, plate, skipped=plate_skipped, person="confirmed" if plate_confirmed else "")
-    if not empty and status.state in (FINISH, FAILED) and not failed_unconfirmed:
+    empty = _check_plate(gate, plate, skipped=plate_skipped, person="confirmed" if plate_confirmed else "",
+                         deferred="plate_deferred" if plate_deferred else "")
+    if empty is False and status.state in (FINISH, FAILED) and not failed_unconfirmed:
         gate.block("after_job", state=status.state)
-    elif empty and status.state == FINISH and not plate_confirmed:
+    elif empty is True and status.state == FINISH and not plate_confirmed:
         gate.warn("camera_only", pct=plate.difference_pct if plate else None, msg="")
 
     if item is not None:
@@ -284,11 +301,12 @@ def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, p
 
 def clear_plate_gate(status: PrinterStatus, plate: Optional[PlateCheck], *, in_cron: bool,
                      cool_temp_c: float, auto_start_pending: list[QueueItem], person_confirms: bool = False,
-                     plate_skipped: bool = False) -> Gate:
+                     plate_skipped: bool = False, plate_deferred: bool = False) -> Gate:
     """May we tell the printer manager the plate is clear (which lets it start the next job)?
 
     ``person_confirms``: the owner is confirming the plate themselves (``/home3d approve clear`` or an owner
-    session's approved call): a band-only camera doubt then passes with a warning (see the module doc)."""
+    session's approved call): a band-only camera doubt then passes with a warning (see the module doc).
+    ``plate_deferred``: as for ``start_gate`` (warning ``plate_deferred_clear``)."""
     gate = Gate(ok=True, needs_owner=True, action="clear_plate")
     if in_cron:
         gate.block("in_cron")
@@ -300,7 +318,8 @@ def clear_plate_gate(status: PrinterStatus, plate: Optional[PlateCheck], *, in_c
         gate.block("bed_unknown")
     elif status.bed_temp > cool_temp_c:
         gate.block("bed_hot", bed=float(status.bed_temp), limit=float(cool_temp_c))
-    _check_plate(gate, plate, skipped=plate_skipped, person="confirming" if person_confirms else "")
+    _check_plate(gate, plate, skipped=plate_skipped, person="confirming" if person_confirms else "",
+                 deferred="plate_deferred_clear" if plate_deferred else "")
     auto = [q for q in (auto_start_pending or []) if q.is_pending and not q.manual_start]
     if auto:
         gate.block("auto_start_pending", names=", ".join(q.name or f"#{q.id}" for q in auto[:3]))

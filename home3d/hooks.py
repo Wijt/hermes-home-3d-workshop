@@ -2,11 +2,20 @@
 
 ``pre_tool_call``   gates ``home3d_start``, ``home3d_clear_plate`` (confirm) and ``home3d_stop`` (resume), in this
                     order: never from cron, and never from a run nobody is present for (kanban worker, ``chat -q``,
-                    ``-z``, ``--source tool``); never when the safety gate fails; an unknown sender (no household
-                    identity, e.g. a subagent whose parent had none) and a non-owner are blocked with the owner's
-                    ``/home3d approve ...`` command; only an owner session (a local CLI/TUI session counts when
-                    ``local_is_owner``) gets Hermes' human-approval prompt, plus a single-use handler pass bound to
-                    (tool, target, session). Stored approvals never authorise an agent call.
+                    ``-z``, ``--source tool``); an unknown sender (no household identity, e.g. a subagent whose
+                    parent had none) and a non-owner are blocked with the owner's ``/home3d approve ...`` command
+                    (a household member's ask is recorded as an approval request the watcher passes on to the
+                    owner); never when the safety gate fails; only an owner session (a local CLI/TUI session counts
+                    when ``local_is_owner``) gets Hermes' human-approval prompt, plus a single-use handler pass
+                    bound to (tool, target, session). Stored approvals never authorise an agent call.
+                    BOUNDED: Hermes runs hook callbacks with a 30 s timeout and a timed-out ``pre_tool_call`` blocks
+                    EVERY tool call of the process for 60 s (stop included). So the hook never runs the camera or
+                    switches the chamber light: it reads status + queue only (each request capped at
+                    ``HOOK_REQUEST_TIMEOUT_S``) under an overall ``HOOK_DEADLINE_S`` (less when Hermes'
+                    ``plugins.hook_callback_timeout`` is set lower: ``hook_deadline_s``), and blocks when the printer
+                    does not answer in time. The plate is judged by the handler right before the action (the
+                    authoritative check) and by ``/home3d approve``; a recent plate check of this process that said
+                    occupied / unsure still blocks here.
 ``pre_llm_call``    remembers session -> sender (local sessions as ``LOCAL_SENDER``, delegated children inherit the
                     parent's sender) and injects a short context for household / printing turns only. No network.
 ``post_tool_call``  audits every ``home3d_*`` call, drops a pass the handler did not use (denied or vetoed call)
@@ -17,9 +26,11 @@ Every hook is defensive: it never raises. ``pre_tool_call`` fails closed (blocks
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +54,10 @@ SKILL_REF = "home-3d-workshop:household-printing"
 CONTEXT_MAX = 900
 WATCHER_STALE_S = 10 * 60
 MOMENT_DEDUPE_S = 10 * 60
+HOOK_REQUEST_TIMEOUT_S = 5.0  # per printer request inside pre_tool_call (status, queue)
+HOOK_DEADLINE_S = 12.0  # the whole gate inside pre_tool_call (Hermes gives a hook callback 30 s)
+HOOK_TIMEOUT_SHARE = 0.4  # with a lower plugins.hook_callback_timeout the gate gets this share of it
+HOOK_PLATE_MAX_AGE_S = 120.0  # a plate check this recent (same printer state + job) still counts in the hook
 # Hermes v0.22.5 surfaces with a person at this machine: classic CLI ("cli"; "local" when the gateway hosts it, with
 # sender "uid:<n>"), TUI, desktop, ACP editors. Not local: "" (no platform), "subagent", "cron", "batch", messaging.
 LOCAL_PLATFORMS = frozenset({"cli", "tui", "local", "desktop", "acp"})
@@ -60,6 +75,26 @@ _FOLD = str.maketrans({"ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ç": "c", "�
 
 
 # ---- helpers ------------------------------------------------------------------------------------------
+def hook_deadline_s() -> float:
+    """The gate's deadline inside ``pre_tool_call``: ``HOOK_DEADLINE_S``, or ``HOOK_TIMEOUT_SHARE`` of Hermes'
+    hook-callback timeout when that is set lower, so the hook always answers before Hermes gives up on it (a
+    timed-out ``pre_tool_call`` would block every tool call, stop included, for 60 s)."""
+    try:
+        from .config import hook_callback_timeout
+
+        limit = float(hook_callback_timeout(read_config=False)[0])
+    except Exception:
+        limit = 30.0
+    return deadline_for(limit)
+
+
+def deadline_for(hook_timeout_s: float) -> float:
+    """The gate's deadline under a Hermes hook-callback timeout of ``hook_timeout_s`` (0 or less: no limit)."""
+    if hook_timeout_s <= 0:  # Hermes runs hook callbacks without a time limit
+        return HOOK_DEADLINE_S
+    return min(HOOK_DEADLINE_S, HOOK_TIMEOUT_SHARE * hook_timeout_s)
+
+
 def _block(message: str) -> dict:
     return {"action": "block", "message": message}
 
@@ -177,6 +212,27 @@ def _pretty(name: str) -> str:
     return name
 
 
+def watcher_fresh(store) -> bool:
+    """The zero-token watcher ran a pass in the last ``WATCHER_STALE_S``."""
+    try:
+        w = store.kv_get("watcher") or {}
+        updated = w.get("updated") if isinstance(w, dict) else None
+        if not isinstance(updated, (int, float)):
+            updated = store.kv_updated("watcher")
+        return isinstance(updated, (int, float)) and 0 <= time.time() - float(updated) < WATCHER_STALE_S
+    except Exception:
+        return False
+
+
+def _interval_text(interval: Any) -> str:
+    """'2m' -> '2 min', '90s' -> '90 s', '1h' -> '1 h'; anything else as given ('2 min' when empty)."""
+    m = re.fullmatch(r"\s*(?:every\s+)?(\d+)\s*([smhd]?)\w*\s*", str(interval or "2m"))
+    if not m:
+        return str(interval)
+    unit = {"s": "s", "m": "min", "h": "h", "d": "d", "": "min"}[m.group(2)]
+    return f"{m.group(1)} {unit}"
+
+
 # ---- the shared gate (hook and /home3d approve) --------------------------------------------------------
 @dataclass
 class Evaluation:
@@ -199,9 +255,13 @@ class Evaluation:
         return hms_ack_detail(self.hms) if self.action == "resume" and self.ack else ""
 
 
-def evaluate(rt, action: str, args: Any) -> Evaluation:
-    """Cron check + safety gate for one gated action. Used by ``pre_tool_call`` and ``/home3d approve`` so both
-    decide the same way. Raises only on internal errors (callers fail closed); a backend error is a block."""
+def evaluate(rt, action: str, args: Any, *, in_hook: bool = False) -> Evaluation:
+    """Cron check + safety gate for one gated action. Used by ``pre_tool_call`` (``in_hook``) and ``/home3d approve``
+    so both decide the same way. Raises only on internal errors (callers fail closed); a backend error is a block.
+
+    ``in_hook``: bounded, for Hermes' hook budget: printer requests capped at ``HOOK_REQUEST_TIMEOUT_S`` and NO
+    camera / chamber light: the plate check is deferred to the handler (only a recent remembered check counts).
+    Otherwise (``/home3d approve``) the plate is checked here like in the handler (one cached check for both)."""
     a = args if isinstance(args, dict) else {}
     tool = TOOL_FOR_ACTION[action]
     ev = Evaluation(ok=False, action=action, tool=tool)
@@ -219,7 +279,7 @@ def evaluate(rt, action: str, args: Any) -> Evaluation:
         ev.reason = ev.message = f"{tool} never runs from a scheduled (cron) job; a person must be present."
         return ev
     try:
-        _gate(rt, ev)
+        _gate(rt, ev, in_hook=in_hook)
     except BackendError as e:
         ev.ok, ev.summary = False, ""
         ev.reason = ev.message = f"printer not reachable, {tool} was not run: {e}"
@@ -229,8 +289,21 @@ def evaluate(rt, action: str, args: Any) -> Evaluation:
     return ev
 
 
-def _gate(rt, ev: Evaluation) -> None:
+def bounded_backend(be: Any, seconds: float = HOOK_REQUEST_TIMEOUT_S) -> Any:
+    """``be.with_timeout(seconds)`` when the backend has it (network backends), else ``be`` (the simulator)."""
+    fn = getattr(be, "with_timeout", None)
+    if callable(fn):
+        try:
+            return fn(seconds)
+        except Exception:
+            return be
+    return be
+
+
+def _gate(rt, ev: Evaluation, *, in_hook: bool = False) -> None:
     be, store, s = rt.backend, rt.store, rt.settings
+    if in_hook:
+        be = bounded_backend(be)
     status = be.status()
     in_cron = rt.in_cron()
     if ev.action == "resume":
@@ -245,22 +318,32 @@ def _gate(rt, ev: Evaluation) -> None:
     queue = be.queue()
     plate, skipped = None, printer_blocks(status, ev.action)
     if not skipped:  # the printer already blocks: no camera check (it may switch the chamber light, ~12 s)
-        try:
-            plate = rt.plate_check(status=status)
-        except BackendError:
-            plate = None  # the gate blocks on an unknown plate
+        if in_hook:  # never the camera here: only what this process saw a moment ago
+            plate = rt.recent_plate_check(max_age_s=HOOK_PLATE_MAX_AGE_S, status=status)
+        else:
+            try:
+                plate = rt.plate_check(status=status)
+            except BackendError:
+                plate = None  # the gate blocks on an unknown plate
+    deferred = in_hook and plate is None and not skipped
     diff = f" ({plate.difference_pct:g}% difference)" if plate is not None and plate.difference_pct is not None else ""
     light = (" Note: the chamber light could not be switched off again after the plate check."
              if plate is not None and LIGHT_FLAG in str(plate.message or "") else "")
     if ev.action == "clear_plate":
         auto = [q for q in queue if q.is_pending and not q.manual_start]
         gate = clear_plate_gate(status, plate, in_cron=in_cron, cool_temp_c=s.eject_cool_temp_c,
-                                auto_start_pending=auto, person_confirms=True, plate_skipped=skipped)
+                                auto_start_pending=auto, person_confirms=True, plate_skipped=skipped,
+                                plate_deferred=deferred)
         ev.gate, ev.ok = gate, gate.ok
         if gate.ok:
             bed = f"bed {status.bed_temp:.0f} C" if status.bed_temp is not None else "bed temperature unknown"
-            camera = (f"the camera is NOT sure{diff}: you confirm it is clear yourself, look at the plate first"
-                      if person_can_overrule(plate) else f"the camera thinks the plate is empty{diff}")
+            if deferred:
+                camera = ("confirm only after looking at the plate yourself: the camera checks it right before "
+                          "(an unsure reading is accepted on your word, an occupied plate still stops it)")
+            elif person_can_overrule(plate):
+                camera = f"the camera is NOT sure{diff}: you confirm it is clear yourself, look at the plate first"
+            else:
+                camera = f"the camera thinks the plate is empty{diff}"
             ev.summary = (f"Mark the 3D printer plate clear ({bed}; {camera}). "
                           f"The printer manager may then start the next job.{light}")
         return
@@ -268,10 +351,10 @@ def _gate(rt, ev: Evaluation) -> None:
     gate = start_gate(status, queue, ev.qid, plate=plate, in_cron=in_cron, own_item_ids=store.active_job_ids(),
                       allow_jump=ev.jump, voice_request=bool(req and req.get("channel") == "voice"),
                       plate_confirmed=store.plate_confirmed(status.job_name),
-                      after_failure=_after_failure(store), plate_skipped=skipped)
+                      after_failure=_after_failure(store), plate_skipped=skipped, plate_deferred=deferred)
     ev.gate, ev.ok = gate, gate.ok
     if gate.ok:
-        ev.summary = _start_summary(store, ev.qid, queue, gate.warnings, diff, plate) + light
+        ev.summary = _start_summary(store, ev.qid, queue, gate, diff, plate, deferred) + light
 
 
 def _after_failure(store) -> bool:
@@ -282,7 +365,7 @@ def _after_failure(store) -> bool:
         return True
 
 
-def _start_summary(store, qid: int, queue: list, warnings: list[str], diff: str, plate=None) -> str:
+def _start_summary(store, qid: int, queue: list, gate: Gate, diff: str, plate=None, deferred: bool = False) -> str:
     item = next((q for q in queue if q.id == qid), None)
     job = store.get_job(qid) or {}
     meta = (store.kv_get(f"slice:{job['sliced_file_id']}") or {}) if job.get("sliced_file_id") else {}
@@ -291,11 +374,18 @@ def _start_summary(store, qid: int, queue: list, warnings: list[str], diff: str,
                         f"{meta['grams']:.0f} g" if isinstance(meta.get("grams"), (int, float)) else "",
                         "auto-eject" if job.get("eject_planned") else "no auto-eject") if x]
     who = job.get("requester") or "the household"
-    camera = (f"The camera is not sure{diff}; the owner confirmed the plate is clear." if person_can_overrule(plate)
-              else f"The camera thinks the plate is empty{diff}.")
+    if deferred:
+        camera = ("The camera checks the plate right before starting: an occupied or unsure plate still stops "
+                  "the start.")
+    elif person_can_overrule(plate):
+        camera = f"The camera is not sure{diff}; the owner confirmed the plate is clear."
+    else:
+        camera = f"The camera thinks the plate is empty{diff}."
     out = f"Start 3D print #{qid} \"{name}\" for {who} ({', '.join(bits)}). {camera}"
-    if warnings:
-        out += " Note: " + "; ".join(warnings) + "."
+    warns = [i for i in gate.items if i.get("level") == "warn"]  # in the same order as gate.warnings
+    notes = [text for i, text in zip(warns, gate.warnings) if i.get("code") != "plate_deferred"]
+    if notes:
+        out += " Note: " + "; ".join(notes) + "."
     return out
 
 
@@ -334,12 +424,12 @@ class _Hooks:
         sender = rt.sender_id(session_id) if session_id else ""
         person = s.person_for(sender) if sender else None
         if (person is None or not s.is_owner(sender)) and not rt.in_cron():
-            # 2. who asks, before the safety gate: a family member or a stranger is refused without a camera
-            # check or chamber-light switching on their behalf (the owner's command runs the gate itself)
+            # 2. who asks, before the safety gate: a family member or a stranger is refused without any printer
+            # call on their behalf (the owner's command runs the gate itself)
             qid = _qid(args.get("queue_item_id")) if action == "start" else None
             cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
-            return self._refuse(person, sender, cmd, owner)
-        ev = evaluate(rt, action, args)  # 1. cron, 3. safety gate
+            return self._refuse(person, sender, cmd, owner, action=action, qid=qid, session_id=session_id)
+        ev = self._evaluate_bounded(action, args)  # 1. cron, 3. safety gate (bounded, no camera)
         if not ev.ok:
             return _block(f"BLOCKED: {ev.reason}")
         cmd = approve_command(action, ev.qid, ev.jump, ack=bool(ev.hms))
@@ -353,16 +443,73 @@ class _Hooks:
         rule_key = f"home3d:{tool}:{ev.target or '-'}:{int(time.time())}:{uuid.uuid4().hex[:8]}"
         return {"action": "approve", "message": f"{ev.summary} {APPROVE_ONCE_NOTE}", "rule_key": rule_key}
 
-    def _refuse(self, person, sender: str, cmd: str, owner: str) -> dict:
-        s = self.rt.settings
-        if person is None:  # 2a. no household identity: never ask this chat to approve itself
+    def _evaluate_bounded(self, action: str, args: dict) -> Evaluation:
+        """``evaluate(in_hook=True)`` under a hard deadline. The gate runs in a worker thread (with this thread's
+        context, so the cron / session markers stay visible); when it does not finish within ``HOOK_DEADLINE_S``
+        the call is blocked and the late result is dropped: no pass is ever issued after the deadline. A lower
+        ``plugins.hook_callback_timeout`` shortens the deadline (``hook_deadline_s``)."""
+        box: dict[str, Any] = {}
+        deadline = hook_deadline_s()
+        ctx = contextvars.copy_context()
+
+        def work() -> None:
+            try:
+                box["ev"] = ctx.run(evaluate, self.rt, action, args, in_hook=True)
+            except BaseException as e:  # handed to the caller, which fails closed
+                box["exc"] = e
+
+        worker = threading.Thread(target=work, name="home3d-pre-tool-gate", daemon=True)
+        worker.start()
+        worker.join(deadline)
+        if worker.is_alive() or ("ev" not in box and "exc" not in box):
+            tool = TOOL_FOR_ACTION[action]
+            ev = Evaluation(ok=False, action=action, tool=tool)
+            ev.reason = ev.message = (f"the printer did not answer within {deadline:g} s, {tool} was not run "
+                                      "(try again in a minute; stop and pause are not affected)")
+            return ev
+        if "exc" in box:
+            raise box["exc"]
+        return box["ev"]
+
+    def _refuse(self, person, sender: str, cmd: str, owner: str, *, action: str = "", qid: Optional[int] = None,
+                session_id: str = "") -> dict:
+        rt = self.rt
+        s = rt.settings
+        if person is None:  # 2a. no household identity: never ask this chat to approve itself, nothing is passed on
             why = ("this session has no known sender" if not sender else "this sender is not in the household list")
-            return _block(f"BLOCKED: {APPROVAL_MARKER}: unknown sender ({why}). {owner} approves with `{cmd}` "
-                          f"(runs it right away, nothing is stored); tell the person you asked {owner}.")
-        # 2b. a household member who is not the owner
+            return _block(f"BLOCKED: {APPROVAL_MARKER}: unknown sender ({why}). Only {owner} can approve, with "
+                          f"`{cmd}` (runs it right away, nothing is stored). {owner} is not told about this: the "
+                          f"person has to ask {owner} directly.")
+        # 2b. a household member who is not the owner: the ask becomes an approval request the watcher passes on
         hint = "" if s.owner_ids else " (no owner_ids are configured yet)"
+        relay = self._relay(person.name, owner, action, qid, session_id, sender)
         return _block(f"BLOCKED: {APPROVAL_MARKER}: {person.name} is not the owner{hint}. {owner} sends "
-                      f"`{cmd}` (runs it right away, nothing is stored); tell {person.name} you asked {owner}.")
+                      f"`{cmd}` (runs it right away, nothing is stored). {relay} Do not promise a start.")
+
+    def _relay(self, who: str, owner: str, action: str, qid: Optional[int], session_id: str, sender: str) -> str:
+        """Record the approval request (once per action + item + person per day) and say truthfully what happens."""
+        store = self.rt.store
+        announced = False
+        if action:
+            try:
+                if store.add_approval_request(action, qid, who, session_id, sender_id=sender) is None:
+                    prev = store.latest_approval_request(action, qid, who) or {}
+                    announced = prev.get("announced_ts") is not None
+            except Exception as e:  # recording is best effort: the refusal itself must stand
+                logger.debug("home3d approval request not recorded: %s", e)
+                return f"The request could not be recorded: {who} should ask {owner} directly."
+        chat = bool(str(self.rt.settings.owner_target or "").strip())  # where the watcher sends owner notices
+        if announced and chat:
+            return f"{owner} already got this request from the watcher; tell {who} it is up to {owner} now."
+        fresh = watcher_fresh(store)
+        if fresh and chat:
+            return (f"{owner} gets this request on the next watcher pass (about "
+                    f"{_interval_text(self.rt.settings.watch_interval)}); tell {who} you passed it on.")
+        if fresh or announced:  # the watcher runs, but owner notices have no chat to go to (cron output / outbox)
+            return (f"No owner chat is set (owner_target), so {owner} may not be told automatically: {who} should "
+                    f"ask {owner} directly.")
+        return (f"The watcher is off, so {owner} is not told automatically: {who} should ask {owner} directly "
+                "(the watcher is started with `hermes home3d setup` and needs `hermes gateway` running).")
 
     # -- pre_llm_call --
     def pre_llm_call(self, session_id: Any = "", user_message: Any = None, platform: Any = "", sender_id: Any = "",
@@ -542,6 +689,8 @@ def make_hooks(rt) -> dict[str, Callable]:
 
 
 __all__ = ["make_hooks", "gated_action", "approve_command", "approval_target", "evaluate", "Evaluation",
-           "hms_ack_detail", "acked_codes", "HMS_ACK_PREFIX",
+           "hms_ack_detail", "acked_codes", "HMS_ACK_PREFIX", "bounded_backend", "watcher_fresh",
+           "HOOK_DEADLINE_S", "HOOK_REQUEST_TIMEOUT_S", "HOOK_PLATE_MAX_AGE_S", "HOOK_TIMEOUT_SHARE",
+           "hook_deadline_s", "deadline_for",
            "session_sender", "is_local_platform", "APPROVAL_MARKER", "APPROVAL_TTL_S", "PASS_TTL_S", "GATED_TOOLS",
            "LOCAL_PLATFORMS", "SKILL_REF", "TOOL_FOR_ACTION"]
