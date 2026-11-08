@@ -1,0 +1,128 @@
+name: home-3d-workshop
+version: 0.1.0
+description: >-
+  A household 3D-printing workshop with a character. Family members ask in plain language (text or
+  voice note); the agent finds or customises a model, slices it, queues it, watches the print with a
+  zero-token watcher, tells the owner and the family (in different tones), verifies the plate is clear
+  for the next job, and turns every "a human had to step in" moment into an upgrade proposal.
+  Works with a Bambu Lab printer managed by Bambuddy, or with the built-in simulated printer.
+author: Wijt
+kind: standalone
+license: MIT
+homepage: https://github.com/Wijt/hermes-home-3d-workshop
+requires_hermes: ">=0.22.5"
+tags: [3d-printing, bambu, bambuddy, household, family, makerworld, automation]
+provides_tools:
+  - home3d_status
+  - home3d_camera
+  - home3d_find_models
+  - home3d_import
+  - home3d_customize
+  - home3d_slice
+  - home3d_queue
+  - home3d_start
+  - home3d_stop
+  - home3d_clear_plate
+  - home3d_household
+  - home3d_human_needed
+  - home3d_upgrades
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+config_schema:
+  backend:
+    type: str
+    choices: [simulator, bambuddy]
+    default: simulator
+    label: Printer backend
+    description: "'simulator' needs no hardware (try it, CI). 'bambuddy' talks to a Bambuddy server on your LAN."
+  bambuddy_url:
+    type: str
+    default: ""
+    label: Bambuddy URL
+    description: "Base URL of your Bambuddy server, e.g. http://192.168.1.50:8000 (API is under /api/v1)."
+  public_url:
+    type: str
+    default: ""
+    label: Public Bambuddy URL for links
+    description: "Optional URL used in links sent to people (preview / download). Defaults to bambuddy_url."
+  printer_id:
+    type: int
+    default: 1
+    label: Bambuddy printer id
+  bambuddy_api_key:
+    type: secret
+    env: HOME3D_BAMBUDDY_API_KEY
+    description: "Only needed when Bambuddy API auth is enabled (sent as X-API-Key)."
+  persona_name:
+    type: str
+    default: "Mıstık"
+    label: Persona name
+    description: "Name of the household character the family talks to."
+  language:
+    type: str
+    choices: [tr, en]
+    default: tr
+    label: Household language
+    description: "Language of family-facing messages and the persona's replies."
+  owner_name:
+    type: str
+    default: "Owner"
+    label: Owner display name
+  owner_ids:
+    type: list
+    default: []
+    label: Owner sender ids
+    description: "Messaging user ids (e.g. WhatsApp ids) that count as the owner for approvals."
+  household:
+    type: list
+    default: []
+    label: Household members
+    description: 'List of {"id": "<sender id>", "name": "Mum", "address_as": "Anneciğim", "role": "family"}.'
+  owner_target:
+    type: str
+    default: ""
+    label: Owner notification target
+    description: "hermes send target for technical notices, e.g. whatsapp:<group>@g.us or telegram:<chat>."
+  family_target:
+    type: str
+    default: ""
+    label: Family notification target
+    description: "hermes send target for short plain-language family notices. Empty = owner only."
+  send_profile:
+    type: str
+    default: ""
+    label: Profile that owns the messaging adapters
+    description: "Hermes profile used for 'hermes send' (e.g. 'default' on a multi-profile gateway). Empty = current."
+  autoeject_printer_preset:
+    type: str
+    default: ""
+    label: Auto-eject printer preset id
+    description: "Bambuddy local printer preset id whose end G-code pushes the part off (contains the HOME3D/HERMES AUTO-EJECT marker). Empty = no auto-eject."
+  standard_printer_preset:
+    type: str
+    default: ""
+    label: Standard printer preset id
+    description: "Bambuddy local printer preset id without auto-eject (used for parts that must not be pushed)."
+  process_presets:
+    type: dict
+    default: {}
+    label: Process presets by quality
+    description: '{"draft": "0.28mm Extra Draft @BBL A1", "standard": "0.20mm Standard @BBL A1", "fine": "0.16mm High Quality @BBL A1"}'
+  filament_presets:
+    type: dict
+    default: {}
+    label: Filament preset ids by material
+    description: '{"PLA": "12", "PETG": "15"} — Bambuddy local filament preset ids.'
+  bed_type:
+    type: str
+    default: "Textured PEI Plate"
+  eject_cool_temp_c:
+    type: float
+    default: 30.0
+    label: Bed temperature below which the plate may be cleared
+  watch_interval:
+    type: str
+    default: "2m"
+    label: Watcher interval (cron schedule)
