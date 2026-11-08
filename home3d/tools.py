@@ -436,16 +436,26 @@ def _is_a1(models: list) -> bool:
 
 
 def _card(c) -> dict:
-    a1 = [i for i in c.instances if _is_a1(i.printer_models)]
+    native = [i for i in c.instances if _is_a1(i.printer_models)]
+    compat = [i for i in c.instances if i not in native and _is_a1(getattr(i, "compatible_models", []))]
+    a1 = native + compat
+
+    def entry(i, fit: str) -> dict:
+        return {"profile_id": i.profile_id, "title": i.title, "print_time_min": i.print_time_min,
+                "weight_g": i.weight_g, "plates": i.plates, "fit": fit,
+                "made_for": (i.printer_models or [""])[0]}
+
     d = {"model_id": c.model_id, "title": c.title, "url": c.url, "cover_url": c.cover_url,
          "creator": c.creator, "license": c.license, "likes": c.likes, "downloads": c.downloads,
          "prints": c.prints, "summary": (c.summary or "")[:240],
-         "a1_profiles": [{"profile_id": i.profile_id, "title": i.title, "print_time_min": i.print_time_min,
-                          "weight_g": i.weight_g, "plates": i.plates} for i in a1],
+         "a1_profiles": [entry(i, "native") for i in native] + [entry(i, "a1_compatible") for i in compat],
          "other_profiles": len(c.instances) - len(a1),
          "already_imported_library_ids": list(c.already_imported_library_ids)}
     if not a1:
         d["note"] = "no A1 print profile: it can still be imported and sliced with our A1 presets"
+    elif not native:
+        d["note"] = ("MakerWorld lists the A1 as compatible, but the profile was made for another printer: "
+                     "import it, home3d_slice re-slices it with the A1 presets (time and grams change)")
     return d
 
 

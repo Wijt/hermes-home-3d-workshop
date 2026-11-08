@@ -350,11 +350,14 @@ def _parse_instance(i: dict) -> Optional[ModelInstance]:
     pid = _int(i.get("profileId"))
     if pid is None:
         return None
-    compat = i.get("compatibility") or {}
-    model = str(compat.get("devProductName") or compat.get("devModelName") or "") if isinstance(compat, dict) else ""
+    ext = i.get("extention") or i.get("extension") or {}
+    info = (ext.get("modelInfo") if isinstance(ext, dict) else None) or {}
+    compat = i.get("compatibility") or info.get("compatibility") or {}
+    model = _printer_name(compat)
+    others = i.get("otherCompatibility") or info.get("otherCompatibility") or []
+    compatible = [n for n in dict.fromkeys(_printer_name(o) for o in others if isinstance(o, dict)) if n and n != model]
     plates = i.get("plates")
     if not isinstance(plates, list):
-        info = ((i.get("extention") or i.get("extension") or {}).get("modelInfo") or {})
         plates = info.get("plates") if isinstance(info.get("plates"), list) else plates
     secs = _float(i.get("prediction")) or _float(i.get("printTime"))
     grams = _float(i.get("weight"))
@@ -366,7 +369,14 @@ def _parse_instance(i: dict) -> Optional[ModelInstance]:
     n_plates = len(plates) if isinstance(plates, list) else _int(plates)
     return ModelInstance(profile_id=pid, title=str(i.get("title") or ""), printer_models=[model] if model else [],
                          print_time_min=int(round(secs / 60)) if secs else None,
-                         weight_g=round(grams, 2) if grams else None, plates=n_plates or None)
+                         weight_g=round(grams, 2) if grams else None, plates=n_plates or None,
+                         compatible_models=compatible)
+
+
+def _printer_name(compat: Any) -> str:
+    if not isinstance(compat, dict):
+        return ""
+    return str(compat.get("devProductName") or compat.get("devModelName") or "").strip()
 
 
 def parse_model(d: dict, url: str = "") -> ModelCard:
@@ -374,7 +384,12 @@ def parse_model(d: dict, url: str = "") -> ModelCard:
     model_id = _int(d.get("model_id")) or _int(design.get("id"))
     if model_id is None:
         raise BackendError("MakerWorld resolve returned no model id")
-    raw_instances = [i for i in d.get("instances") or design.get("instances") or [] if isinstance(i, dict)]
+    # Bambuddy 1.3.0 returns the full MakerWorld design (``design.instances``: compatibility, other
+    # compatible printers, print time, weight) plus a flattened top-level ``instances`` list whose
+    # details are empty. Prefer the full one.
+    rich = [i for i in design.get("instances") or [] if isinstance(i, dict)]
+    flat = [i for i in d.get("instances") or [] if isinstance(i, dict)]
+    raw_instances = rich or flat
     # "#profileId-NNN" in a pasted link is an *instance* id: put that instance first.
     frag = re.search(r"#profileId-(\d+)", url or "")
     if frag:

@@ -120,6 +120,9 @@ class ModelInstance:
     print_time_min: Optional[int] = None
     weight_g: Optional[float] = None
     plates: Optional[int] = None
+    # MakerWorld's "also compatible" printers for this instance. Their converted profiles cannot be
+    # downloaded: import this instance's own profile and re-slice it with your presets.
+    compatible_models: list[str] = field(default_factory=list)
 
 
 @dataclass

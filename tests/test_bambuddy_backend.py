@@ -791,3 +791,36 @@ def test_make_backend_builds_bambuddy(pkg):
     b = make_backend(s)
     assert isinstance(b, bb.BambuddyBackend) and b.printer_id == 3 and b.name == "bambuddy"
     assert b.api_key == ""  # no Hermes secret scope in tests
+
+
+# Shape of a real Bambuddy 1.3.0 /makerworld/resolve answer (trimmed, values made up): the full design
+# carries compatibility + other compatible printers; the flattened top-level list has empty details.
+RESOLVED_REAL_SHAPE = {
+    "model_id": 4242, "profile_id": None, "already_imported_library_ids": [],
+    "design": {"id": 4242, "title": "Card wallet", "designCreator": {"name": "Maker"},
+               "instances": [
+                   {"id": 11, "profileId": 1001, "title": "0.2mm layer, 3 walls", "prediction": 7727, "weight": 48,
+                    "extention": {"modelInfo": {
+                        "compatibility": {"devModelName": "N1", "devProductName": "A1 mini", "nozzleDiameter": 0.4},
+                        "otherCompatibility": [{"devModelName": "C12", "devProductName": "P1S", "profileId": 5001},
+                                               {"devModelName": "N2S", "devProductName": "A1", "profileId": 5002}],
+                        "plates": [{"index": 1, "prediction": 7727, "weight": 48}]}}},
+                   {"id": 12, "profileId": 1002, "title": "A1 native", "prediction": 3600, "weight": 20,
+                    "extention": {"modelInfo": {"compatibility": {"devModelName": "N2S", "devProductName": "A1"},
+                                                "otherCompatibility": None, "plates": [{"index": 1}]}}},
+                   {"id": 13, "profileId": 1003, "title": "P1S only",
+                    "extention": {"modelInfo": {"compatibility": {"devProductName": "P1S"},
+                                                "otherCompatibility": [{"devProductName": "X1C"}]}}}]},
+    "instances": [{"id": 11, "profileId": 1001, "title": "0.2mm layer, 3 walls",
+                   "detail": {"extention": {"modelInfo": {"compatibility": {"devProductName": ""}}}}}],
+}
+
+
+def test_resolve_model_reads_full_design_instances(http, backend):
+    http.add("POST", "/makerworld/resolve", RESOLVED_REAL_SHAPE)
+    card = backend.resolve_model("4242")
+    got = [(i.profile_id, i.printer_models, i.compatible_models, i.print_time_min, i.weight_g, i.plates)
+           for i in card.instances]
+    assert got == [(1001, ["A1 mini"], ["P1S", "A1"], 129, 48.0, 1),
+                   (1002, ["A1"], [], 60, 20.0, 1),
+                   (1003, ["P1S"], ["X1C"], None, None, None)]

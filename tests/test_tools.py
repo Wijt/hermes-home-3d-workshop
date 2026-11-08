@@ -812,3 +812,20 @@ def test_human_needed_to_upgrade_flow(rt):
         assert call(rt, "home3d_upgrades", {"action": step, "upgrade_id": uid}, session="s-owner")["status"] == step
     assert call(rt, "home3d_upgrades", {"action": "evaluate"})["new_proposals"] == []
     assert call(rt, "home3d_upgrades", {"action": "accept", "upgrade_id": 999}, session="s-owner")["ok"] is False
+
+
+def test_card_marks_native_and_a1_compatible_profiles(pkg):
+    from home3d_ws.home3d.backends.base import ModelCard, ModelInstance
+    from home3d_ws.home3d import tools as T
+    card = ModelCard(model_id=1, title="Card wallet", instances=[
+        ModelInstance(profile_id=1001, printer_models=["A1 mini"], compatible_models=["P1S", "A1"]),
+        ModelInstance(profile_id=1002, printer_models=["A1"]),
+        ModelInstance(profile_id=1003, printer_models=["P1S"], compatible_models=["X1C"])])
+    d = T._card(card)
+    assert [(p["profile_id"], p["fit"]) for p in d["a1_profiles"]] == [(1002, "native"), (1001, "a1_compatible")]
+    assert d["other_profiles"] == 1 and "note" not in d
+    only_compat = T._card(ModelCard(model_id=2, title="x", instances=[
+        ModelInstance(profile_id=7, printer_models=["A1 mini"], compatible_models=["A1"])]))
+    assert only_compat["a1_profiles"][0]["fit"] == "a1_compatible" and "re-slices" in only_compat["note"]
+    none = T._card(ModelCard(model_id=3, title="y", instances=[ModelInstance(profile_id=8, printer_models=["A1 mini"])]))
+    assert none["a1_profiles"] == [] and "no A1 print profile" in none["note"]
