@@ -92,7 +92,7 @@ The plugin is new. This table shows what is verified, and where.
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
 | Watcher on a real print (dry run: outbox only, nothing sent) | Verified on a family print it did not queue: no light or camera during the print, FINISH caught, one light cycle for photo + plate check, one owner notice | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
-| Design a part in OpenSCAD (render, measure, previews, versions), and the name-tag and label-box templates | Upload and slice of a designed part: planned | Verified with OpenSCAD 2021.01 (the real-OpenSCAD tests, also a CI job); upload and slice on the simulator |
+| Design a part in OpenSCAD (render, measure, previews, versions), and the name-tag and label-box templates | Verified: a pen cup with a name designed with `home3d_design` (three versions: the preview showed a flat engraving lost on the round wall, the second wrapped the letters, the third widened their spacing), uploaded to the Bambuddy library and sliced with the auto-eject preset | Verified with OpenSCAD 2021.01 (the real-OpenSCAD tests, also a CI job); upload and slice on the simulator |
 | Auto-eject push on the tilted base | Real in the original setup. The A1 order the watcher expects (RUNNING through the 15 min cool-down and the push, then FINISH) was seen on a family print. A push of the plugin's own job: planned | Simulated |
 
 `hermes plugins validate . --install-deps` passes on Hermes 0.22.5, and

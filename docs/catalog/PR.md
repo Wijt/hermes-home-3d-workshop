@@ -146,11 +146,12 @@ This matches the README's status table at the same commit.
   during the print, FINISH caught, one light cycle for the photo and plate check, one owner notice. The
   A1's auto-eject order (RUNNING through the cool-down and the push, then FINISH) was seen on that print.
 - Designing: the templates, a sample design and the file-access probes are tested with OpenSCAD
-  2021.01 (locally and in the CI `openscad` job); a design upload and slice are tested on the
-  simulator.
+  2021.01 (locally and in the CI `openscad` job). On the real Bambuddy, a pen cup with a name was
+  designed with `home3d_design` in three versions, uploaded to the library and sliced with the
+  auto-eject preset.
 - Planned on the real printer: start, stop, pause, resume and plate-clear confirm, watcher notices
   sent with `hermes send`, the auto-eject push with this plugin (the push itself is real in the
-  original setup), and the upload and slice of a designed part.
+  original setup).
   <!-- update before opening -->
 
 ## Links
