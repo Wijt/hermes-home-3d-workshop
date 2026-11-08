@@ -131,6 +131,9 @@ This matches the README's status table at the same commit.
   plate check in one light cycle (light restored to its earlier state), MakerWorld cards and import,
   slice with the auto-eject preset (G-code check), scale, queue add with manual start and remove, and
   reading `require_plate_clear` and the queue history (GET only).
+- The watcher in dry run (outbox only) on a real family print it did not queue: no light or camera
+  during the print, FINISH caught, one light cycle for the photo and plate check, one owner notice. The
+  A1's auto-eject order (RUNNING through the cool-down and the push, then FINISH) was seen on that print.
 - Planned on the real printer: start, stop, pause, resume and plate-clear confirm, watcher notices
   sent with `hermes send`, and the auto-eject push with this plugin (the push itself is real in the
   original setup).

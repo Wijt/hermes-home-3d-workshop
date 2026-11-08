@@ -89,8 +89,9 @@ The plugin is new. This table shows what is verified, and where.
 | Scale a model (upload + slice the scaled file), add to queue with manual start, remove | Verified | Verified |
 | Read Bambuddy's `require_plate_clear` setting and the queue history (start errors) | Verified (GET only) | Verified |
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
+| Watcher on a real print (dry run: outbox only, nothing sent) | Verified on a family print it did not queue: no light or camera during the print, FINISH caught, one light cycle for photo + plate check, one owner notice | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
-| Auto-eject push on the tilted base | Real in the original setup; with this plugin: planned | Simulated |
+| Auto-eject push on the tilted base | Real in the original setup. The A1 order the watcher expects (RUNNING through the 15 min cool-down and the push, then FINISH) was seen on a family print. A push of the plugin's own job: planned | Simulated |
 
 `hermes plugins validate . --install-deps` passes on Hermes 0.22.5, and
 `hermes plugins install Wijt/hermes-home-3d-workshop --enable` installs it. CI runs validate and the test
@@ -368,6 +369,9 @@ moves to "installed".
   tall-narrow parts. It cannot see shape: the agent must turn eject off for round or fragile parts.
 - Orientation and supports come from the chosen MakerWorld profile or the owner's presets. The tools do
   not rotate models or switch supports on; the skill helps choose a profile.
+- The name-tag and label-box templates need `openscad` on the machine. The tests check the template text
+  and the render command, but the templates have not been rendered by a real OpenSCAD yet. Scaling an
+  existing model needs no OpenSCAD.
 - Voice notes depend on the Hermes gateway's transcription.
 - Messages are in English and Turkish only. Tested on Linux only.
 - The sender id comes from the messaging platform. Check it with `/home3d whoami` before you trust it.
