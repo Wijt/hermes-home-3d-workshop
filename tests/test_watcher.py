@@ -651,3 +651,24 @@ def test_a_light_left_on_by_the_hook_reaches_the_owner(rig):
     rig.store.kv_set("light_left_on:pending", {"ts": T0, "note": "light_left_on: could not switch off (500)"})
     (r,) = rig.run(2)
     assert r["kind"] == "light_left_on" and r["family_text"] == "" and rig.store.kv_get("light_left_on:pending") is None
+
+
+def test_owner_confirmation_settles_a_camera_doubt_and_announces_the_next_job(rig):
+    """After /home3d approve clear (an owner overruling the 18-25 % false-positive band), the watcher moves
+    the plate to clear without another camera check, so 'next job ready' is sent."""
+    rig.store.upsert_job(30, name="Kart.gcode.3mf", requester="Mum", eject_planned=0, state="queued")
+    rig.status(RUNNING, job_name="Kart", progress=50, layer=5, total_layers=10, bed_temp=60)
+    rig.run(5)
+    rig.b.plate = PlateCheck(is_empty=None, difference_pct=20.5, light_ok=True, uncertain_band=True,
+                             message="uncertain: false-positive band")
+    rig.status(FINISH, job_name="Kart", progress=100, layer=10, total_layers=10, bed_temp=25)
+    assert "finished" in kinds(rig.run(30))
+    assert rig.kv["plate_state"]["phase"] == "needs_human"
+    rig.store.upsert_job(31, name="Saksı.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=31, status="pending", name="Saksı.gcode.3mf", manual_start=True)]
+    assert "ready_next" not in kinds(rig.run(2))  # still a doubt: nothing announced
+    rig.store.confirm_plate("Kart", "Sam")
+    checks = rig.b.checks
+    out = rig.run(2)
+    assert rig.kv["plate_state"]["phase"] == "clear" and rig.b.checks == checks
+    assert kinds(out) == ["ready_next"] and "/home3d approve start 31" in out[0]["owner_text"]

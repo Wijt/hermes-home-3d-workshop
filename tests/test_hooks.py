@@ -583,10 +583,24 @@ def test_no_camera_check_when_the_printer_already_blocks(rig):
     rig.be.start(q1)
     rig.be.advance(30)
     assert rig.be.status().state == "RUNNING"
-    for session in ("s-mum", "s-owner", "s-stranger"):
+    d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
+    assert d["action"] == "block" and "busy" in d["message"]
+    for session in ("s-mum", "s-stranger"):  # refused on identity, before any gate
         d = rig.pre("home3d_start", {"queue_item_id": q2}, session)
-        assert d["action"] == "block" and "busy" in d["message"]
+        assert d["action"] == "block" and "owner approval needed" in d["message"]
     assert rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-owner")["action"] == "block"
+    assert rig.be.plate_checks == 0
+
+
+def test_non_owner_is_refused_before_any_camera_check_on_an_idle_printer(rig):
+    """The sender check runs before the safety gate: a family member's or a stranger's start never costs a
+    plate check (camera + chamber light) on an idle printer."""
+    qid = rig.queue_job()
+    assert rig.be.status().state == "IDLE"
+    for session in ("s-mum", "s-stranger", "s-nobody"):
+        d = rig.pre("home3d_start", {"queue_item_id": qid}, session)
+        assert d["action"] == "block" and "owner approval needed" in d["message"]
+        assert f"/home3d approve start {qid}" in d["message"]
     assert rig.be.plate_checks == 0
 
 

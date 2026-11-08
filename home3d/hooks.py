@@ -329,22 +329,22 @@ class _Hooks:
             return _block(f"BLOCKED: {tool} needs a person present, and nobody is in this run (kanban worker, "
                           f"single-query `chat -q`, `-z` or a tool integration). The owner sends `{cmd}` from a chat "
                           "or terminal.")
-        ev = evaluate(rt, action, args)  # 1. cron, 2. safety gate
-        if not ev.ok:
-            return _block(f"BLOCKED: {ev.reason}")
         s = rt.settings
-        cmd = approve_command(action, ev.qid, ev.jump, ack=bool(ev.hms))
         owner = s.owner_name or "the owner"
         sender = rt.sender_id(session_id) if session_id else ""
         person = s.person_for(sender) if sender else None
-        if person is None:  # 3a. no household identity: never ask this chat to approve itself
-            why = ("this session has no known sender" if not sender else "this sender is not in the household list")
-            return _block(f"BLOCKED: {APPROVAL_MARKER}: unknown sender ({why}). {owner} approves with `{cmd}` "
-                          f"(runs it right away, nothing is stored); tell the person you asked {owner}.")
-        if not s.is_owner(sender):  # 3b. a household member who is not the owner
-            hint = "" if s.owner_ids else " (no owner_ids are configured yet)"
-            return _block(f"BLOCKED: {APPROVAL_MARKER}: {person.name} is not the owner{hint}. {owner} sends "
-                          f"`{cmd}` (runs it right away, nothing is stored); tell {person.name} you asked {owner}.")
+        if (person is None or not s.is_owner(sender)) and not rt.in_cron():
+            # 2. who asks, before the safety gate: a family member or a stranger is refused without a camera
+            # check or chamber-light switching on their behalf (the owner's command runs the gate itself)
+            qid = _qid(args.get("queue_item_id")) if action == "start" else None
+            cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
+            return self._refuse(person, sender, cmd, owner)
+        ev = evaluate(rt, action, args)  # 1. cron, 3. safety gate
+        if not ev.ok:
+            return _block(f"BLOCKED: {ev.reason}")
+        cmd = approve_command(action, ev.qid, ev.jump, ack=bool(ev.hms))
+        if person is None or not s.is_owner(sender):  # defensive: reached only if in_cron changed meanwhile
+            return self._refuse(person, sender, cmd, owner)
         # 4. the owner: Hermes asks them (or auto-approves under their own yolo/smart settings) BEFORE the handler
         # runs; the handler then needs this single-use pass, so nothing but this very call can use it.
         rt.store.issue_pass(tool, ev.target, session_id, ttl_s=PASS_TTL_S, detail=ev.pass_detail)
@@ -352,6 +352,17 @@ class _Hooks:
         # only adds an allowlist entry nothing will match again), so the prompt says to approve once
         rule_key = f"home3d:{tool}:{ev.target or '-'}:{int(time.time())}:{uuid.uuid4().hex[:8]}"
         return {"action": "approve", "message": f"{ev.summary} {APPROVE_ONCE_NOTE}", "rule_key": rule_key}
+
+    def _refuse(self, person, sender: str, cmd: str, owner: str) -> dict:
+        s = self.rt.settings
+        if person is None:  # 2a. no household identity: never ask this chat to approve itself
+            why = ("this session has no known sender" if not sender else "this sender is not in the household list")
+            return _block(f"BLOCKED: {APPROVAL_MARKER}: unknown sender ({why}). {owner} approves with `{cmd}` "
+                          f"(runs it right away, nothing is stored); tell the person you asked {owner}.")
+        # 2b. a household member who is not the owner
+        hint = "" if s.owner_ids else " (no owner_ids are configured yet)"
+        return _block(f"BLOCKED: {APPROVAL_MARKER}: {person.name} is not the owner{hint}. {owner} sends "
+                      f"`{cmd}` (runs it right away, nothing is stored); tell {person.name} you asked {owner}.")
 
     # -- pre_llm_call --
     def pre_llm_call(self, session_id: Any = "", user_message: Any = None, platform: Any = "", sender_id: Any = "",

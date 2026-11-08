@@ -403,6 +403,12 @@ class _Pass:
         jobrow = self._job(job)
         planned = bool((jobrow or {}).get("eject_planned"))
         cool = float(self.s.eject_cool_temp_c)
+        if (ps.phase in ("needs_human", "verifying") and not st.is_active and self._plate_confirmed(job)):
+            # the owner confirmed the plate (/home3d approve clear), e.g. over a camera doubt: settle it here,
+            # without a camera check, so the next job can be announced. Nothing to tell anyone: the owner did it.
+            ps.phase, ps.reason, ps.checks = "clear", "confirmed by the owner", 0
+            self.w["plate_state"] = ps.to_dict()
+            return
         check = self._check_plate() if eject.needs_plate_check(ps, st, self.now, cool) else None
         new, events = eject.step(ps, st, self.now, eject_planned=planned, plate=check, cool_temp_c=cool)
         self.w["plate_state"] = new.to_dict()
