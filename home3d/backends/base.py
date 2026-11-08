@@ -222,6 +222,11 @@ class Backend(ABC):
         empty gives ``is_empty`` False or None. Same light rules (and ``light_left_on`` note) as
         ``snapshot``."""
 
+    def snapshot_and_check(self, out_dir: Path) -> tuple[Snapshot, PlateCheck]:
+        """A lit photo and a plate check together. Backends with a chamber light override this to use a
+        single light cycle (and so never check the plate right after switching the light off)."""
+        return self.snapshot(out_dir, lit=True), self.check_plate()
+
     @abstractmethod
     def resolve_model(self, url_or_id: str) -> ModelCard: ...
 

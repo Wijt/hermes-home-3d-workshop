@@ -578,8 +578,19 @@ class BambuddyBackend(Backend):
         self._check_success(self._post(f"{self._printer}/chamber-light", params={"on": "true" if on else "false"}),
                             f"chamber light {'on' if on else 'off'}")
 
+    # The printer status reports the light with a delay. Right after we switch it off, the status (and
+    # Bambuddy's own light_warning) can still say "on", so a plate check then could judge a dark frame
+    # without any warning. We remember when we switched it off ourselves and treat it as off for a while.
+    light_status_lag_s = 30.0
+
+    def _we_switched_off_recently(self) -> bool:
+        ts = getattr(self, "_light_off_mono", None)
+        return ts is not None and time.monotonic() - ts < self.light_status_lag_s
+
     def _light_state(self) -> Optional[bool]:
         """The chamber light right now (``chamber_light`` in the printer status); None when unknown."""
+        if self._we_switched_off_recently():
+            return False  # the status may still show our own earlier "on"
         try:
             d = self._get(f"{self._printer}/status")
         except BackendError:
@@ -592,16 +603,20 @@ class BambuddyBackend(Backend):
         for attempt in range(2):
             try:
                 self._light(False)
+                self._light_off_mono = time.monotonic()
                 return ""
             except BackendError as e:
                 if attempt:
                     return f"light_left_on: the chamber light could not be switched off again ({e})"
         return ""
 
-    def snapshot(self, out_dir: Path, lit: bool = True) -> Snapshot:
+    def _lit_session(self, out_dir: Path, *, lit: bool, with_plate: bool) -> tuple[Snapshot, Optional[PlateCheck]]:
+        """One light cycle: switch on (when off), wait, photo, optional plate check, then restore."""
         notes: list[str] = []
         lit_ok = False
         restore_off = False
+        plate: Optional[PlateCheck] = None
+        data = b""
         try:
             if lit:
                 before = self._light_state()
@@ -618,11 +633,20 @@ class BambuddyBackend(Backend):
                 else:
                     notes.append("chamber light state unknown: photo taken without switching the light")
             data, _ = self._get(f"{self._printer}/camera/snapshot", raw=True, timeout=30.0)
+            if with_plate and lit_ok:
+                try:  # same light cycle: the plate is judged on a lit frame
+                    d = self._get(f"{self._printer}/camera/check-plate", timeout=30.0)
+                    if isinstance(d, dict):
+                        plate = parse_plate_check(d)
+                except BackendError as e:
+                    notes.append(f"plate check during the photo failed ({e})")
         finally:
             if restore_off:
                 off_note = self._light_off_safely()
                 if off_note:
                     notes.append(off_note)
+                    if plate is not None:
+                        plate.message = f"{plate.message} ({off_note})".strip()
         if not data:
             raise BackendError(f"GET {self._printer}/camera/snapshot: empty image")
         jpeg, how = reencode_jpeg(data)
@@ -632,7 +656,16 @@ class BambuddyBackend(Backend):
         stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
         path = out / f"snapshot_p{self.printer_id}_{stamp}.jpg"
         path.write_bytes(jpeg)
-        return Snapshot(path=path, lit=lit_ok, note="; ".join(notes))
+        return Snapshot(path=path, lit=lit_ok, note="; ".join(notes)), plate
+
+    def snapshot(self, out_dir: Path, lit: bool = True) -> Snapshot:
+        return self._lit_session(out_dir, lit=lit, with_plate=False)[0]
+
+    def snapshot_and_check(self, out_dir: Path) -> tuple[Snapshot, PlateCheck]:
+        snap, plate = self._lit_session(out_dir, lit=True, with_plate=True)
+        if plate is None:  # light state unknown / did not come on / check failed: the careful path
+            plate = self.check_plate()
+        return snap, plate
 
     def check_plate(self, lit: bool = True) -> PlateCheck:
         """Bambuddy plate check. Its references are taken lit, so when it warns that the chamber light was
@@ -640,6 +673,10 @@ class BambuddyBackend(Backend):
         result, a failed lit re-check or a light that did not come on gives ``is_empty=None`` and
         ``light_ok=False`` (never "empty")."""
         path = f"{self._printer}/camera/check-plate"
+        if lit and self._we_switched_off_recently():
+            # we put the light off ourselves moments ago and Bambuddy may not know yet: an answer now could
+            # come from a dark frame without a light_warning. Do the lit check directly.
+            return self._lit_check(path, False, None)
         d = self._get(path, timeout=30.0)
         if not isinstance(d, dict):
             raise BackendError(f"GET {path}: unexpected response")
@@ -652,6 +689,9 @@ class BambuddyBackend(Backend):
             pc = parse_plate_check(d)  # light_warning: uncertain, light_ok False
             pc.message = (f"{pc.message} (chamber light state unknown: not switched, no lit re-check)").strip()
             return pc
+        return self._lit_check(path, before, d)
+
+    def _lit_check(self, path: str, before: bool, unlit: Optional[dict]) -> PlateCheck:
         switch = before is False
         notes: list[str] = []
         lit_d: Any = None
@@ -674,7 +714,8 @@ class BambuddyBackend(Backend):
         else:
             if not any(n.startswith("lit re-check failed") for n in notes):
                 notes.insert(0, "lit re-check failed: no usable answer")
-            pc = parse_plate_check(d)  # light_warning: uncertain, light_ok False
+            pc = (parse_plate_check(unlit) if unlit is not None else
+                  PlateCheck(is_empty=None, light_ok=False, message="uncertain: no lit plate check"))
         if notes:
             pc.message = f"{pc.message} ({'; '.join(notes)})".strip()
         return pc

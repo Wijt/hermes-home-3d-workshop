@@ -53,9 +53,9 @@ The plugin is new. This table shows what is verified, and where.
 | Part | Real printer (Bambuddy 1.3.0 + A1) | Simulator and tests |
 |---|---|---|
 | Read printer status, queue and plate check (HTTP GET only) | Verified | Verified |
-| Plate check with the chamber light switched on and back (`chamber-light` POST) | Planned | Verified (fake HTTP) |
+| Lit photo + plate check in one light cycle, light restored to its earlier state | Verified (a part on the plate read as occupied) | Verified (fake HTTP) |
 | MakerWorld cards, import, slice with the auto-eject preset (G-code check: height, footprint, eject block) | Verified | Verified |
-| Scale a model, add to queue | Planned | Verified |
+| Scale a model (upload + slice the scaled file), add to queue with manual start, remove | Verified | Verified |
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
 | Auto-eject push on the tilted base | Real in the original setup; with this plugin: planned | Simulated |

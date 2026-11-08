@@ -415,15 +415,16 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
 
 def _h_camera(rt, a: dict, kw: dict) -> dict:
     be = rt.backend
-    snap = be.snapshot(rt.media_dir, lit=True)
+    plate = None
+    if _bool(a, "check_plate"):  # one light cycle for the photo and the plate check
+        snap, plate = be.snapshot_and_check(rt.media_dir)
+    else:
+        snap = be.snapshot(rt.media_dir, lit=True)
     path = str(Path(snap.path).resolve())
     out = {"ok": True, "path": path, "media_line": f"MEDIA:{path}", "lit": snap.lit, "note": snap.note,
            "hint": "Put media_line on its own line in your reply to attach the photo."}
-    if _bool(a, "check_plate"):
-        try:
-            out["plate"] = _plate_dict(be.check_plate())
-        except BackendError as e:
-            out["plate_error"] = str(e)
+    if plate is not None:
+        out["plate"] = _plate_dict(plate)
     return out
 
 
@@ -906,16 +907,17 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
     st = be.status()
     out: dict = {"ok": True, "action": action, "state": st.state, "bed_temp": st.bed_temp,
                  "cool_temp_c": s.eject_cool_temp_c}
+    plate = None
     if action == "check":
-        try:
-            snap = be.snapshot(rt.media_dir, lit=True)
+        try:  # one light cycle: the photo the owner sees and the plate judgement come from the same light
+            snap, plate = be.snapshot_and_check(rt.media_dir)
             path = str(Path(snap.path).resolve())
             out.update(path=path, media_line=f"MEDIA:{path}")
         except BackendError as e:
             out["photo_error"] = str(e)
-    plate = None
     try:
-        plate = be.check_plate() if action == "check" else _plate_check(rt, st)
+        if plate is None:
+            plate = be.check_plate() if action == "check" else _plate_check(rt, st)
     except BackendError as e:
         out["plate_error"] = str(e)
     queue = be.queue()

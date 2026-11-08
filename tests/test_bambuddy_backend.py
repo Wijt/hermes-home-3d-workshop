@@ -824,3 +824,52 @@ def test_resolve_model_reads_full_design_instances(http, backend):
     assert got == [(1001, ["A1 mini"], ["P1S", "A1"], 129, 48.0, 1),
                    (1002, ["A1"], [], 60, 20.0, 1),
                    (1003, ["P1S"], ["X1C"], None, None, None)]
+
+
+# ---- one light cycle; never trust a stale "light on" right after we switched it off ----------------------
+def test_snapshot_and_check_uses_one_light_cycle(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
+    http.add("GET", "/printers/1/camera/check-plate", plate(False, 27.2))
+    snap, pc = backend.snapshot_and_check(tmp_path)
+    assert http.paths() == ["GET /printers/1/status", "POST /printers/1/chamber-light",
+                            "GET /printers/1/camera/snapshot", "GET /printers/1/camera/check-plate",
+                            "POST /printers/1/chamber-light"]
+    assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false"]
+    assert backend.sleeps == [backend.light_wait_s] and snap.lit and pc.is_empty is False
+
+
+def test_snapshot_and_check_leaves_a_light_that_is_on(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(True))
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.4))
+    snap, pc = backend.snapshot_and_check(tmp_path)
+    assert http.paths("POST") == [] and pc.is_empty is True and snap.lit
+
+
+def test_check_plate_right_after_our_light_off_does_a_lit_check(http, backend, tmp_path):
+    # live finding (8 Nov 2026): after we switch the light off, the status still says "on" for a few
+    # seconds and Bambuddy's check-plate answers from a dark frame without a light_warning.
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
+    backend.snapshot(tmp_path)
+    http.calls.clear()
+    http.routes[("GET", "/printers/1/status")] = [(status_light(True), 200, None, None, None)]  # stale "on"
+    http.add("GET", "/printers/1/camera/check-plate", plate(True, 0.3))
+    pc = backend.check_plate()
+    assert http.paths() == ["POST /printers/1/chamber-light", "GET /printers/1/camera/check-plate",
+                            "POST /printers/1/chamber-light"]
+    assert [c.query["on"] for c in http.calls if c.method == "POST"] == ["true", "false"]
+    assert pc.is_empty is True
+
+
+def test_lit_check_failure_after_our_light_off_is_uncertain(http, backend, tmp_path):
+    http.add("GET", "/printers/1/status", status_light(False))
+    http.add("POST", "/printers/1/chamber-light", {"success": True})
+    http.add("GET", "/printers/1/camera/snapshot", raw=_jpeg_bytes(), headers={"Content-Type": "image/jpeg"})
+    backend.snapshot(tmp_path)
+    http.add("GET", "/printers/1/camera/check-plate", {"detail": "camera busy"}, status=503)
+    pc = backend.check_plate()
+    assert pc.is_empty is None and pc.light_ok is False and "lit re-check failed" in pc.message
