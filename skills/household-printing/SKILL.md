@@ -202,6 +202,7 @@ moment. When someone asks:
   start accepts it. "Not empty" (26 % or more) and a check in the dark are never overruled.
 - The part was already taken off by hand: don't push. Check the photo and say truthfully it was removed by hand.
 - The confirm step refuses while auto-start queue items are pending: marking the plate clear would start them.
+  If they should start, the owner looks at the plate and marks it clear in Bambuddy.
 - After many pushes and hand removals the plate gets greasy and thin parts lift. Ask for a wash with dish
   soap and warm water (alcohol alone does not degrease it).
 

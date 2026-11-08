@@ -53,8 +53,10 @@ _TEXT: dict[str, tuple[str, str]] = {
     "jump": ("{name} (#{other}) is waiting ahead and is not ours", "sırada önde başkasının işi var: {name} (#{other})"),
     "bed_hot": ("the bed is still hot ({bed:.0f} C > {limit:.0f} C)",
                 "tabla hâlâ sıcak ({bed:.0f} °C, sınır {limit:.0f} °C)"),
-    "auto_start_pending": ("auto-start items pending ({names}): marking the plate clear would start them",
-                           "otomatik başlayacak işler var ({names}), tabla boş denirse hemen başlarlar"),
+    "auto_start_pending": ("auto-start items pending ({names}): marking the plate clear would start them. "
+                           "If they should start, look at the plate and mark it clear in Bambuddy yourself",
+                           "otomatik başlayacak işler var ({names}), tabla boş denirse hemen başlarlar. "
+                           "Başlamaları gerekiyorsa tablaya bak ve Bambuddy'de boş olarak kendin işaretle"),
     "bed_unknown": ("the bed temperature is unknown, so it may still be hot",
                     "tabla sıcaklığı bilinmiyor, hâlâ sıcak olabilir"),
     "not_paused": ("the printer is not paused ({state})", "yazıcı duraklatılmış değil ({state})"),
