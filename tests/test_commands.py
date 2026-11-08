@@ -443,6 +443,26 @@ def test_a_started_reply_does_not_promise_reports_without_a_watcher(rig):
     assert reply.startswith("▶️") and "watcher is not running" in reply and "hermes home3d doctor" in reply
     rig.be.stop()
     rig.store.kv_set("watcher", {"state": "IDLE", "updated": __import__("time").time()})
-    rig.store.confirm_plate(rig.be.status().job_name, "Owner")
+    rig.store.confirm_plate(rig.be.status().job_name, "Owner", status=rig.be.status())
     reply = rig(f"approve start {q2}", OWNER)
     assert reply.startswith("▶️") and "watcher is not running" not in reply, reply
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+def test_r3_owner_ids_are_not_matched_across_platforms_with_chosen_ids(pkg):
+    """S5: an IRC user whose nick equals the owner's Slack id is not the owner; an "irc:<nick>" entry is."""
+    from home3d_ws.home3d.backends.simulator import SimulatorBackend
+    from home3d_ws.home3d.config import Settings
+    from home3d_ws.home3d.runtime import Runtime
+    from home3d_ws.home3d.store import Store
+
+    rt = Runtime(None, settings=Settings(backend="simulator", owner_ids=["U02ABCDEF", "irc:OwnerNick"],
+                                         language="en"), store=Store(), backend=SimulatorBackend())
+    ok, _a, sender, refusal = commands.authorize_sender(rt, {"platform": "irc", "user_id": "u02abcdef"})
+    assert not ok and sender == "irc:u02abcdef" and refusal
+    assert commands.authorize_sender(rt, {"platform": "irc", "user_id": "ownernick"})[0]
+    assert commands.authorize_sender(rt, {"platform": "slack", "user_id": "U02ABCDEF"})[0]
+    assert not commands.authorize_sender(rt, {"platform": "slack", "user_id": "irc:OwnerNick"})[0]
+    out = commands.make_command(rt)("approve start 1", source={"platform": "irc", "user_id": "U02ABCDEF"},
+                                    session_id="irc-chan")
+    assert not out.startswith("▶️")

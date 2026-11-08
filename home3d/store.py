@@ -151,6 +151,19 @@ def norm_job_name(name: object) -> str:
     return n
 
 
+def print_signature(status: Any) -> dict:
+    """What tells one failed print from another of the same name on a printer that just says FAILED: the state,
+    job name and where it stopped (layer, total layers, whole percent). Compared exactly (``plate_confirmed``)."""
+    def num(v: Any) -> Optional[int]:
+        try:
+            return None if v is None else int(round(float(v)))
+        except (TypeError, ValueError):
+            return None
+    return {"state": str(getattr(status, "state", "") or ""), "job": norm_job_name(getattr(status, "job_name", "")),
+            "layer": num(getattr(status, "layer", None)), "total_layers": num(getattr(status, "total_layers", None)),
+            "progress": num(getattr(status, "progress", None))}
+
+
 class Store:
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else data_dir() / "workshop.db"
@@ -326,6 +339,15 @@ class Store:
         rows = self._rows(f"SELECT queue_item_id FROM jobs WHERE state IN ({placeholders})", ACTIVE_JOB_STATES)
         return {int(r["queue_item_id"]) for r in rows if r.get("queue_item_id") is not None}
 
+    def active_job_requesters(self) -> dict[int, str]:
+        """Queue item id -> requester name ('' = nobody named, i.e. the owner) of the workshop jobs still queued or
+        printing: whose job each "ours" item is (the start gate's jump check)."""
+        placeholders = ",".join("?" for _ in ACTIVE_JOB_STATES)
+        rows = self._rows(f"SELECT queue_item_id, requester FROM jobs WHERE state IN ({placeholders})",
+                          ACTIVE_JOB_STATES)
+        return {int(r["queue_item_id"]): str(r.get("requester") or "") for r in rows
+                if r.get("queue_item_id") is not None}
+
     def jobs(self, state: Optional[str] = None, limit: int = 20) -> list[dict]:
         if state:
             return self._rows("SELECT * FROM jobs WHERE state=? ORDER BY updated DESC LIMIT ?", (state, limit))
@@ -400,11 +422,15 @@ class Store:
         return rows[0] if rows else None
 
     # ---- plate confirmations (after a failed print a person says the plate is clear) ------------
-    def confirm_plate(self, job_name: str, by: str) -> None:
+    def confirm_plate(self, job_name: str, by: str, status: Any = None) -> None:
         """A person confirmed the plate is clear after ``job_name`` (owner ``/home3d approve clear``). This also
-        settles any unconfirmed failure (``unconfirmed_failure``): a person has looked at the plate now."""
-        self.kv_set(f"plate_confirmed:{norm_job_name(job_name)}",
-                    {"job_name": str(job_name or ""), "by": str(by or ""), "ts": time.time()})
+        settles any unconfirmed failure (``unconfirmed_failure``): a person has looked at the plate now. ``status``
+        (the printer status the confirmation was made on) is remembered as the print's signature (``print_sig``):
+        on a printer that says FAILED, only a confirmation made on that same failed print counts."""
+        rec = {"job_name": str(job_name or ""), "by": str(by or ""), "ts": time.time()}
+        if status is not None:
+            rec["print_sig"] = print_signature(status)
+        self.kv_set(f"plate_confirmed:{norm_job_name(job_name)}", rec)
         self.clear_failure(f"plate confirmed by {by or 'owner'}")
 
     # ---- failed prints nobody has confirmed yet ----------------------------------------------------
@@ -428,10 +454,12 @@ class Store:
             rec.update(settled=str(why or "settled")[:120], settled_ts=time.time())
             self.kv_set("failure:last", rec)
 
-    def plate_confirmed(self, job_name: str) -> bool:
+    def plate_confirmed(self, job_name: str, status: Any = None) -> bool:
         """A confirmation exists for exactly this (normalised) job name, made after its latest start and within the
         last 24 h. A later start of the same name (or of anything, for an unnamed job) voids it: it was about an
-        earlier print."""
+        earlier print. ``status`` (the printer now): when it says FAILED, the confirmation must have been made on
+        this very failed print (same ``print_signature``): a same-name print that failed later (an archive reprint
+        nobody here saw start) is not covered by it. Fails closed (no signature recorded: not confirmed)."""
         want = norm_job_name(job_name)
         rec = self.kv_get(f"plate_confirmed:{want}")
         if not isinstance(rec, dict):
@@ -442,6 +470,9 @@ class Store:
             return False
         if ts < time.time() - PLATE_CONFIRM_TTL_S:
             return False
+        if status is not None and str(getattr(status, "state", "") or "") == "FAILED":
+            if rec.get("print_sig") != print_signature(status):
+                return False
         placeholders = ",".join("?" for _ in _START_EVENTS)
         later = [r["job_name"] for r in self._rows(
             f"SELECT job_name FROM events WHERE kind IN ({placeholders}) AND ts>?", (*_START_EVENTS, ts))]

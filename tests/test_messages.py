@@ -264,3 +264,26 @@ def test_ready_next_says_to_mark_the_plate_clear_first_when_bambuddy_waits_for_i
                     confirm_first=True)
     assert both.count("/home3d approve clear") == 1
     assert "/home3d approve clear" not in M.render("ready_next", "owner", lang, next_job="Kalemlik", next_id=13)
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+@pytest.mark.parametrize("lang", ["en", "tr"])
+def test_r3_new_owner_texts(lang):
+    tr = lang == "tr"
+    stop = M.render("stopped", "owner", lang, job="towel hook", queue_item_id=103, progress=20, layer=5,
+                    total_layers=40, requester="Mum", stopped_by="Sam", stop_reason="wrong colour")
+    assert ("Sam durdurdu: wrong colour" if tr else "Stopped by Sam: wrong colour") in stop
+    assert "/home3d approve clear" in stop and M.render("stopped", "family", lang, job="x") == ""
+    back = M.render("online", "owner", lang, offline_min=43, state="RUNNING", job="vase", progress=55)
+    assert ("43 dakika" if tr else "after 43 min") in back and ("baskıda" if tr else "printing") in back
+    assert M.render("online", "family", lang) == ""
+    fin = M.render("finished", "owner", lang, job="family hook", eject_unknown="foreign", camera_empty=True,
+                   plate_diff=1.8)
+    assert ("Atölye üzerinden eklenmedi" if tr else "Not queued through the workshop") in fin
+    assert "approve clear" not in fin and ("No auto-eject" not in fin)
+    fin = M.render("finished", "owner", lang, job="family hook", eject_unknown="unknown")
+    assert "approve clear" in fin and ("bilinmiyor" if tr else "No eject plan known") in fin
+    ask = M.render("approval_request", "owner", lang, action="resume", who="Mum", not_paused="FINISH")
+    assert "approve resume" not in ask and ("bitti" if tr else "finished") in ask
+    ready = M.render("ready_next", "owner", lang, next_job="Hook", next_id=8, camera_said=True, plate_diff=1.8)
+    assert ("Kameraya" not in ready) if tr else ("camera" not in ready)

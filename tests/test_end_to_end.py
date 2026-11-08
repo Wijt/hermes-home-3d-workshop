@@ -121,6 +121,11 @@ class House:
         return q["queue_item_id"]
 
 
+def owner_message_with(text: str) -> str:
+    """The newest owner message in the outbox that contains ``text`` (what the owner really receives)."""
+    return next(r["text"] for r in reversed(read_outbox(limit=0)) if r["audience"] == "owner" and text in r["text"])
+
+
 @pytest.fixture
 def house():
     return House()
@@ -189,7 +194,9 @@ def test_request_to_plate_clear_full_loop(house):
         h.run_until({"ready_next"})
     ready = h.last("ready_next")
     assert f"/home3d approve start {qid2}" in ready["owner_text"] and "jump" not in ready["owner_text"]
-    assert "Kameraya göre tabla boş" in ready["owner_text"] and not ready["family_text"] and ready["owner_media"]
+    assert not ready["family_text"] and ready["owner_media"]
+    msg = owner_message_with(f"/home3d approve start {qid2}")  # one owner message: the camera line said once
+    assert msg.lower().count("kameraya göre tabla boş") == 1, msg
     assert h.be.status().state == "FINISH"
 
     # outbox: owner (technical, photo) and family (by name) messages, nothing sent for real
@@ -232,7 +239,8 @@ def test_failed_print_needs_the_owners_plate_confirmation_before_the_next_start(
     assert "Kameraya göre tabla boş" in clear["owner_text"] and "/home3d approve clear" in clear["owner_text"]
     if "ready_next" not in h.kinds():
         h.run_until({"ready_next"})
-    assert "/home3d approve clear" in h.last("ready_next")["owner_text"]
+    msg = owner_message_with(f"/home3d approve start {qid2}")
+    assert msg.count("/home3d approve clear") == 1, msg  # asked once, not once per merged note
 
     # the camera alone is not enough after a failure: even the owner's start is blocked by the gate
     out = h.call("home3d_start", {"queue_item_id": qid2}, "owner-local")

@@ -34,6 +34,7 @@ camera *thinks* the plate is empty.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import time
 import traceback
@@ -46,6 +47,7 @@ from .backends import make_backend
 from .backends.base import (ACTIVE_STATES, FAILED, FINISH, IDLE, OFFLINE, PAUSE, RUNNING, Backend, HMSError,
                             PlateCheck, PrinterStatus, QueueItem)
 from .config import Person, Settings, data_dir, load_settings
+from .gates import same_person
 from .store import ACTIVE_JOB_STATES, Store
 
 KV_KEY = "watcher"
@@ -182,6 +184,9 @@ class _Pass:
         self._queue_tried = False
         self.gcode_push = bool(getattr(backend, "eject_in_gcode", False))  # push before FINISH (real A1)
         self._announced: list[int] = []  # approval request ids told to the owner this pass
+        self._owner_ok = True  # the owner text of this pass was delivered (or there was none / a dry run)
+        self._st: Optional[PrinterStatus] = None  # this pass's printer status (None: not read / offline)
+        self._back_online = False  # the printer manager answered again after an outage this pass
 
     # -- backend calls (never raise) --
     def _status(self) -> tuple[Optional[PrinterStatus], str]:
@@ -437,6 +442,8 @@ class _Pass:
             return
         if state == "printing" and jobrow.get("state") not in (None, *ACTIVE_JOB_STATES):
             return  # a job never goes back to printing once it left the active states
+        if state in ("finished", "failed") and jobrow.get("state") == "cancelled":
+            return  # stopped on purpose (home3d_stop): the printer's FAILED / IDLE is the stop, keep its outcome
         try:
             fields: dict[str, Any] = {"state": state}
             if state in ("finished", "failed"):
@@ -468,10 +475,17 @@ class _Pass:
                    "offline_min": (self.now - float(since)) / 60.0, "reason": reason[:120]}
             self._note("offline", self.w.get("job_name", ""), ctx, reason=reason[:200])
 
-    def online(self) -> None:
-        if self.w.get("offline_since") is not None:
-            if self.w.get("offline_notified"):
-                self.store.add_event("online", self.w.get("job_name", ""), {"offline_since": self.w["offline_since"]})
+    def online(self, st: Optional[PrinterStatus] = None) -> None:
+        since = self.w.get("offline_since")
+        if since is not None:
+            self._back_online = True
+            if self.w.get("offline_notified"):  # the owner was told it is unreachable: tell them it is back
+                job = (st.job_name if st is not None else "") or ""
+                ctx = {"persona": self.s.persona_name, "owner": self.s.owner_name,
+                       "offline_min": max(0.0, (self.now - float(since)) / 60.0), "job": pretty_job(job)}
+                if st is not None:
+                    ctx.update(state=st.state, progress=st.progress if st.is_active else None)
+                self._note("online", job, ctx, offline_since=since)
             self.w["offline_since"], self.w["offline_notified"] = None, False
         self.w["online"] = True
 
@@ -483,11 +497,16 @@ class _Pass:
         if first:
             self.w["initialized"] = True
             self.w["hms_codes"] = [_code(h) for h in blocking]  # old errors are not news
-            if st.state in (FINISH, FAILED):  # a job ended before the watcher existed: wait for a clear plate
-                self.w["plate_state"] = eject.PlateState(
+            # A workshop job the start tool already recorded as printing that ended before this very first pass (a
+            # watcher set up right after the start, the simulator's fast clock) is reported like any other end:
+            # the plate state machine sees its FINISH / FAILED below. Anything else that already ended is old.
+            row = self._job(job) if job and st.state in (FINISH, FAILED) else None
+            started_here = bool(row and row.get("state") == "printing")
+            if st.state in (FINISH, FAILED) and not started_here:  # ended before the watcher existed: wait for a
+                self.w["plate_state"] = eject.PlateState(  # clear plate
                     "needs_human", job_name=job, finished_ts=self.now,
                     reason="found finished before the watcher started").to_dict()
-            if st.state == FAILED and not self._plate_confirmed(job):
+            if st.state == FAILED and not started_here and not self._plate_confirmed(job, st):
                 self._record_failure(job, "found failed before the watcher started")
         item_now = self._printing_item() if st.is_active else None
         item_before = self.w.get("print_item")
@@ -497,7 +516,9 @@ class _Pass:
             jobrow = self._attribute(job)
             self.w["print_item"] = item_now
             self._job_state(jobrow, "printing")
-            self.w.update(started_ts=self.now, started_job=job)
+            self.w.update(started_ts=self._start_time(item_now, prev, first), started_job=job,
+                          started_wall=time.time())
+            self.w["ready_notified_for"] = []  # the plate was in use: a job still waiting is announced again
             try:  # the plate is in use by a new print: an earlier failure is settled
                 self.store.clear_failure(f"a new print started: {job}"[:120])
             except Exception as exc:
@@ -532,6 +553,20 @@ class _Pass:
             self._note("hms", job, ctx, hms=[_code(h) for h in new])
         self.w["hms_codes"] = codes
 
+    def _start_time(self, item_id: Optional[int], prev: str, first: bool) -> Optional[float]:
+        """When the print that just showed up really started, on the backend's clock: the printer manager's
+        ``started_at`` of the printing queue item; else now, when the previous pass saw the printer (idle, finished
+        or on another print) so the start fell between two passes; else unknown (None: the first pass ever, an
+        unknown state, right after an outage): the finish text then leaves the duration out."""
+        if item_id is not None:
+            item = next((q for q in self._queue_all() or [] if int(q.id) == int(item_id)), None)
+            ts = _iso_ts(item.started_at) if item is not None else None
+            if ts is not None and ts <= self.now + 300:
+                return ts
+        if first or self._back_online or prev not in (IDLE, FINISH, FAILED, *ACTIVE_STATES):
+            return None
+        return self.now
+
     @staticmethod
     def _near_end(st: PrinterStatus) -> bool:
         if st.total_layers and st.layer and st.layer >= st.total_layers - 1:
@@ -544,13 +579,19 @@ class _Pass:
         jobrow = self._job(job)
         planned = bool((jobrow or {}).get("eject_planned"))
         cool = float(self.s.eject_cool_temp_c)
-        if (ps.phase in ("needs_human", "verifying") and not st.is_active and self._plate_confirmed(job)):
+        if (ps.phase in ("needs_human", "verifying") and not st.is_active and self._plate_confirmed(job, st)):
             # the owner confirmed the plate (/home3d approve clear), e.g. over a camera doubt: settle it here,
             # without a camera check, so the next job can be announced. Nothing to tell anyone: the owner did it.
             ps.phase, ps.reason, ps.checks = "clear", "confirmed by the owner", 0
             self.w["plate_state"] = ps.to_dict()
             return
         want = eject.needs_plate_check(ps, st, self.now, cool, eject_in_gcode=self.gcode_push)
+        if (not want and jobrow is None and ps.phase == "printing" and st.state == FINISH and self.gcode_push
+                and st.connected):
+            # a print the workshop did not queue: its eject plan is unknown (the household may slice with the
+            # auto-eject preset, which pushes the part before FINISH). One look in the light cycle the finish photo
+            # needs anyway, so the owner is not told to take off a part that is already gone.
+            want = True
         if want and ps.phase == "needs_human":  # waiting for a person: re-checks back off (light discipline)
             want = self._recheck_ok("needs_human", st, ps.job_name, want)
             if want:
@@ -575,10 +616,20 @@ class _Pass:
         payload = {"phase": new.phase, "prev_phase": prev.phase, "events": list(events), "plate": last or None}
         ev = set(events)
         if "failed" in ev:
-            self._job_state(jobrow, "failed")
-            self._record_failure(job, new.reason)
-            self._note("failed", job, ctx, family=family, owner_media=self._snapshot(), human="failure_check",
-                       detail=new.reason, **payload)
+            stop = self._stop_info(job, jobrow)
+            if stop is not None:  # stopped on purpose (home3d_stop): not a failure, but the plate still needs a look
+                if jobrow and jobrow.get("state") in ACTIVE_JOB_STATES:  # the stop tool did not find it by name
+                    why = f"stopped by {stop.get('who') or 'someone'}" + (f": {stop['reason']}" if stop.get("reason")
+                                                                          else "")
+                    self._job_state(jobrow, "cancelled", why[:200])
+                self._record_failure(job, f"stopped by {stop.get('who') or 'someone'}")
+                ctx.update(stopped_by=stop.get("who") or "", stop_reason=stop.get("reason") or "")
+                self._note("stopped", job, ctx, owner_media=self._snapshot(), **payload)
+            else:
+                self._job_state(jobrow, "failed")
+                self._record_failure(job, new.reason)
+                self._note("failed", job, ctx, family=family, owner_media=self._snapshot(), human="failure_check",
+                           detail=new.reason, **payload)
         if "finished" in ev:
             self._job_state(jobrow, "finished")
             pushed = self.gcode_push and new.eject_planned  # the plate is already empty when all went well
@@ -592,6 +643,14 @@ class _Pass:
             elif new.eject_planned and "plate_not_clear" not in ev:
                 # family hears the eject outcome; the owner sees what the camera sees now (or the last layers)
                 self._note("finished", job, ctx, owner_media=(self._fresh if pushed else None) or part, **payload)
+            elif jobrow is None:
+                # not a workshop job (or nobody knows whose): its eject plan is unknown, so no "take it off" order
+                # and no remove_part moment without evidence; the camera's look at FINISH decides the wording
+                ctx.update(eject_unknown="foreign" if self._known_foreign(job) else "unknown",
+                           camera_empty="plate_clear" in ev)
+                self._note("finished", job, ctx, family=family, owner_media=part, family_media=part,
+                           human="remove_part" if last.get("is_empty") is False else "",
+                           detail="part left on the plate", **payload)
             else:
                 self._note("finished", job, ctx, family=family, owner_media=part, family_media=part,
                            human="remove_part" if "plate_not_clear" in ev else "",
@@ -613,6 +672,42 @@ class _Pass:
             self._note("eject_unverified", job, ctx, family=family, owner_media=self._snapshot(),
                        human="camera_check", detail=new.reason, **payload)
 
+    def _known_foreign(self, job: str) -> bool:
+        """This print was decided "not ours" when it started (``job_memo`` with no queue id)."""
+        memo = self.w.get("job_memo")
+        return isinstance(memo, dict) and memo.get("name") == job and memo.get("qid") is None
+
+    def _stop_info(self, job: str, jobrow: Optional[dict]) -> Optional[dict]:
+        """``{"who", "reason"}`` when this print ended because someone stopped it (``home3d_stop`` records a
+        ``stop_request`` event and closes a workshop job as cancelled), else None."""
+        cancelled = bool(jobrow and jobrow.get("state") == "cancelled"
+                         and str(jobrow.get("outcome") or "").startswith("stopped by"))
+        since = self.w.get("started_wall")
+        if not isinstance(since, (int, float)):  # the watcher did not see it start: since its last pass, roughly
+            last = self.w.get("updated")
+            since = float(last) - OFFLINE_NOTIFY_S if isinstance(last, (int, float)) else None
+        try:
+            rows = self.store.events(limit=20, kind="stop_request")
+        except Exception:
+            rows = []
+        for r in rows:
+            if since is not None and float(r.get("ts") or 0) < float(since) - 60:
+                continue
+            name = str(r.get("job_name") or "")
+            # a stop sent while the status could not be read carries no name: it counts only for a recent window
+            if not (cancelled or _same_name(name, job) or (not name and since is not None)):
+                continue
+            try:
+                p = json.loads(r.get("payload") or "{}")
+            except ValueError:
+                p = {}
+            return {"who": str(p.get("who") or ""), "reason": str(p.get("reason") or "")}
+        if cancelled:
+            out = str(jobrow.get("outcome") or "")[len("stopped by "):]
+            who, _, reason = out.partition(": ")
+            return {"who": who.strip(), "reason": reason.strip()}
+        return None
+
     def _record_failure(self, job: str, reason: str = "") -> None:
         """Remember a failed print until a person confirms the plate (survives a power cycle / IDLE)."""
         try:
@@ -620,8 +715,10 @@ class _Pass:
         except Exception as exc:
             _log(f"record_failure failed: {exc}")
 
-    def _plate_confirmed(self, job: str) -> bool:
+    def _plate_confirmed(self, job: str, st: Optional[PrinterStatus] = None) -> bool:
         try:
+            if st is not None:
+                return bool(self.store.plate_confirmed(job or "", status=st))
             return bool(self.store.plate_confirmed(job or ""))
         except Exception:
             return False
@@ -635,7 +732,7 @@ class _Pass:
                 return True
         except Exception:
             return True
-        return st.state == FAILED and not self._plate_confirmed(st.job_name or "")
+        return st.state == FAILED and not self._plate_confirmed(st.job_name or "", st)
 
     def _plate_ready(self, st: PrinterStatus) -> bool:
         """The camera thinks the plate is empty (plate phase "clear"; an idle printer with an unknown plate is
@@ -697,9 +794,13 @@ class _Pass:
                 pass
             name = nxt.name or (jobrow or {}).get("name") or ""
             ctx, _ = self._ctx(name, jobrow, None)
+            said = {n.kind for n in self.notes}  # one owner message: the plate note above already says these
+            confirm_said = any(n.kind == "plate_clear" and n.ctx.get("confirm_first") for n in self.notes)
             ctx.update(next_job=pretty_job(name), next_id=nxt.id, plate_diff=diff, photo=photo is not None,
                        ahead=[{"id": q.id, "name": pretty_job(q.name)} for q in ahead],
-                       confirm_first=self._confirm_first(st), awaiting_clear=st.awaiting_plate_clear is True)
+                       confirm_first=self._confirm_first(st) and not confirm_said, confirm_said=confirm_said,
+                       camera_said=bool(said & {"plate_clear", "finished_ejected"}),
+                       awaiting_clear=st.awaiting_plate_clear is True)
             self._note("ready_next", name, ctx, owner_media=photo, queue_item_id=nxt.id,
                        ahead_ids=[q.id for q in ahead])
             self.w["ready_notified_for"] = (notified + [nxt.id])[-50:]
@@ -901,15 +1002,22 @@ class _Pass:
         minutes = (item.print_time_s / 60.0) if item and item.print_time_s else (meta or {}).get("print_time_min")
         ahead: list[dict] = []
         if item is not None and items is not None:
-            try:
-                ours = {int(i) for i in self.store.active_job_ids()}
+            try:  # whose each workshop job is: another person's workshop job ahead needs jump too (start gate)
+                whose = {int(k): str(v or "") for k, v in self.store.active_job_requesters().items()}
             except Exception:
-                ours = set()
+                whose = {}
+            mine = whose.get(int(item.id), "")
             pending = [q for q in items if q.is_pending]
-            ahead = [{"id": q.id, "name": pretty_job(q.name)} for q in pending[: pending.index(item)]
-                     if q.id not in ours] if item in pending else []
+            for q in (pending[: pending.index(item)] if item in pending else []):
+                if q.id in whose and same_person(whose[q.id], mine, self.s.owner_name):
+                    continue
+                other = (whose[q.id].strip() or self.s.owner_name) if q.id in whose else ""
+                ahead.append({"id": q.id, "name": pretty_job(q.name), "who": other})
         ctx.update(action=action, who=who, queue_item_id=qid, duration_min=minutes,
                    grams=(meta or {}).get("grams"), ahead=ahead)
+        st = self._st
+        if action == "resume" and st is not None and st.connected and st.state != PAUSE:
+            ctx["not_paused"] = st.state  # resumed on the printer meanwhile, or it ended: nothing to approve
         self._note("approval_request", name, ctx, approval_request_id=rid, action=action, who=who)
         self._announced.append(rid)
 
@@ -1002,6 +1110,9 @@ class _Pass:
         except Exception as exc:
             _log(f"notify failed: {exc}")
         ok = {d.audience: d.ok for d in deliveries}
+        # approval requests count as told only when the owner text really went out (a dry run counts: it is the
+        # outbox); a failed send leaves them pending, so the next pass tries again
+        self._owner_ok = not owner_parts or ok.get("owner") is True
         for d in deliveries:
             if not d.ok:
                 _log(f"delivery to {d.audience} {d.target} failed: {d.error}")
@@ -1035,7 +1146,8 @@ class _Pass:
         if st is None or st.state == OFFLINE or not st.connected:
             self.offline(err or "printer offline")
         else:
-            self.online()
+            self._st = st
+            self.online(st)
             self.light_pending()
             self.transitions(st)
             self.plate(st)
@@ -1046,7 +1158,8 @@ class _Pass:
         self.approvals()
         self.proposals()
         results = self.deliver_notes()
-        self.mark_announced()
+        if self._owner_ok:
+            self.mark_announced()
         self.w.update(now=self.now, updated=time.time())
         self.store.kv_set(KV_KEY, _jsonable(self.w))
         self.prune_media()
@@ -1071,6 +1184,22 @@ def _stem(name: str) -> str:
         if n.lower().endswith(suf):
             return n[: -len(suf)]
     return n
+
+
+def _iso_ts(text: Any) -> Optional[float]:
+    """'2026-11-07T23:18:28.123Z' (Bambuddy / simulator ``started_at``) -> epoch seconds; naive text is UTC."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        d = datetime.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.timestamp()
 
 
 def _ids(raw: Any) -> list[int]:
@@ -1123,17 +1252,51 @@ def stdout_text(results: list[dict], *, verbose: bool = False) -> str:
     return out
 
 
-def _report_error(settings: Settings, store: Optional[Store], msg: str) -> str:
-    """Tell the owner about a broken watcher once per distinct error; returns text for stdout (or '')."""
-    msg = (msg or "unknown error").strip().splitlines()[-1][:300]
+ERROR_FILE = "watcher-error.json"  # the error dedupe when the store itself is broken
+ERROR_REPEAT_S = 6 * 3600  # the same error is told again at most this often when only the file remembers it
+
+
+def _error_is_new(store: Optional[Store], msg: str) -> bool:
+    """Remember ``msg`` as the watcher's current error; True when it is news (to be told). The store's kv first;
+    when the store cannot be opened or written (corrupt database, full disk), a small file in the data dir that
+    repeats the same error at most every ``ERROR_REPEAT_S``; when neither can be written, False (never a message
+    on every cron tick)."""
     if store is not None:
         try:
             if store.kv_get("watcher_error") == msg:
-                return ""
+                return False
             store.kv_set("watcher_error", msg)
+            return True
         except Exception:
             pass
+    try:
+        path = data_dir() / ERROR_FILE
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}
+        now = time.time()
+        if isinstance(old, dict) and old.get("msg") == msg and isinstance(old.get("ts"), (int, float)) \
+                and 0 <= now - float(old["ts"]) < ERROR_REPEAT_S:
+            return False
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"msg": msg, "ts": now}), encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception as exc:
+        _log(f"watcher error not recorded ({exc}): not told")
+        return False
+
+
+def _report_error(settings: Settings, store: Optional[Store], msg: str, *, dry_run: bool = False) -> str:
+    """Tell the owner about a broken watcher once per distinct error; returns text for stdout (or ''). A dry run
+    never sends and records nothing (the text goes to stdout)."""
+    msg = (msg or "unknown error").strip().splitlines()[-1][:300]
     text = f"⚠️ home3d watcher: {msg}"
+    if dry_run:
+        return text
+    if not _error_is_new(store, msg):
+        return ""
     if not settings.owner_target:
         return text
     try:
@@ -1161,7 +1324,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         results = run_once(settings, backend, store, deliver=not args.dry_run)
     except Exception as exc:
         _log("watcher pass failed:\n" + traceback.format_exc())
-        out = _report_error(settings, store, f"{type(exc).__name__}: {exc}")
+        out = _report_error(settings, store, f"{type(exc).__name__}: {exc}", dry_run=args.dry_run)
         if out or args.verbose:
             print(out or f"watcher pass failed: {exc}")
         return 0
@@ -1171,6 +1334,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 store.kv_set("watcher_error", "")
         except Exception:
             pass
+    try:  # the store works again: the file-based error memory is not needed any more
+        (data_dir() / ERROR_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
     out = stdout_text(results, verbose=args.verbose)
     if out and (args.verbose or not settings.owner_target):
         print(out)

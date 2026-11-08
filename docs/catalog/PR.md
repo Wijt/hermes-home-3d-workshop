@@ -54,12 +54,14 @@ loop in about 10 seconds and sends nothing.
   `HOME3D_BAMBUDDY_API_KEY` is sent as `X-API-Key`, unencrypted over plain HTTP. MakerWorld lookups and
   downloads go through Bambuddy; the plugin makes no other network calls.
 - **Printer and library writes.** Import, scale, slice and queue add write to the Bambuddy library and
-  queue without a prompt. Queue items are always manual start. A tool photo or plate check switches
+  queue without a prompt. Queue items are always manual start. Queue remove only removes the asking
+  person's own waiting items: never a job queued outside the workshop or another household member's job,
+  not even for the owner (who can remove anything by hand in Bambuddy). A tool photo or plate check switches
   the chamber light on for about 12 s, then restores its earlier state.
 - **Chamber light from the cron job.** The watcher switches the light by itself for its plate checks
   and photos: at most once per pass (photo and check share one light cycle; twice when a camera request
-  fails), one photo near the end of each print the workshop queued (other prints: one photo when they
-  end), a check when a print ends, and re-checks that
+  fails), one photo near the end of each print the workshop queued (other prints: one photo and plate
+  check, in one light cycle, when they end), a check when a print ends, and re-checks that
   back off 15, 30, 60 and 120 min, at most 6, while a plate waits for a person or a job waits on an idle
   printer. The count starts again when the printer state, the job or the queue head changes.
 - **Bambuddy settings.** Read with `GET /settings/`, never changed. With Bambuddy's
@@ -76,7 +78,8 @@ loop in about 10 seconds and sends nothing.
   action at once and stores nothing for later. The owner is any id in `owner_ids`, plus, while
   `local_is_owner` is true (the default), any local CLI, TUI or Desktop session and any slash command
   typed in the TUI, Desktop or web dashboard (these reach the plugin without a sender). The README asks
-  users to turn `local_is_owner` off when others can reach the dashboard. `yolo` and approvals off skip
+  users to turn `local_is_owner` off when others can reach the dashboard. On IRC and ntfy, where people
+  choose their own ids, only an entry written with the platform (`irc:<nick>`) matches a sender. `yolo` and approvals off skip
   the prompt in an owner session. Each `rule_key` is unique, so "always" does not carry over; each
   "always" answer still adds one unused `command_allowlist` line. Stop and pause need no approval and
   pass no gate: anyone who can reach the agent can stop or pause a print.

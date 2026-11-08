@@ -1,5 +1,8 @@
 # home-3d-workshop — design contract
 
+The sections below are layered: where a later "Fix round" section disagrees with an earlier one, the later one
+wins (for example light restore, eject order, settings source, `approve_start`, approvals, the jump check).
+
 This file is the single contract between modules. Code against the signatures here. Already written (do
 not change signatures without updating this file): `plugin.yaml`, `__init__.py`, `home3d/__init__.py`,
 `home3d/config.py`, `home3d/backends/base.py`, `home3d/backends/__init__.py`, `home3d/store.py`,
@@ -126,7 +129,8 @@ def describe(gate: Gate, lang: str) -> str
 start_gate blocks (ok=False) when: in_cron; printer OFFLINE / not connected; printer active
 (PREPARE/RUNNING/PAUSE); any blocking HMS; item not found or not pending; plate check not explicitly empty
 (`is_empty is not True`) — state FAILED/FINISH needs a cleared plate first; another *pending* item that is
-not ours (`own_item_ids`) sits ahead of it and `allow_jump` is False ("never jump someone else's job").
+not ours (`own_item_ids`; since fix round 3 only the same person's workshop jobs count, `requesters`) sits
+ahead of it and `allow_jump` is False ("never jump someone else's job").
 `needs_owner` is always True for start (approval is enforced by hooks). `voice_request` adds a warning that
 a written confirmation is required (enforced in hooks).
 clear_plate_gate blocks when: in_cron; printer active; bed hotter than cool_temp_c; plate check says not
@@ -405,7 +409,7 @@ the demo hid too much. These decisions supersede the "approval" paragraphs above
   makes the plate *uncertain* (blocks); the chamber light is restored to its previous state. After a FAILED print
   a start needs the owner's plate confirmation (`/home3d approve clear` → `store.confirm_plate`); after FINISH a
   camera-only "empty" is allowed with a warning. The jump check counts every not-done item that is not one of
-  our active jobs (case-insensitive). Clearing with an unknown bed temperature is blocked. Messages say "the
+  our active jobs (case-insensitive; fix round 3: nor one of the same person's). Clearing with an unknown bed temperature is blocked. Messages say "the
   camera thinks the plate is empty", never "verified".
 - **Store and watcher (D6/D7).** `job_by_name` matches exact normalised names (no `LIKE`), preferring queued or
   printing jobs; the watcher attributes a print to the backend queue item that is printing first. `ready_next`
@@ -585,3 +589,57 @@ and a catalog reviewer. Decisions R2-1 to R2-9. Each item names the finding ids.
   blocks `/home3d approve clear` (`auto_start_pending`): the owner clears it in Bambuddy. A failed queue
   item without `started_at` is taken as "the start did not happen" even when the printer did start (an
   MQTT verification error after a real start): the owner then sees that print as not the workshop's.
+
+## Fix round 3 (review r3: safety, watcher, robustness, judge)
+
+- **S1: the queue tool never removes a family job.** `home3d_queue action=remove` refuses an item without an
+  active workshop row (`code: not_ours`, "remove it in Bambuddy yourself"), for everyone: removing a family job
+  would also let a later start pass the jump check. Another household member's workshop item is refused too, also
+  for the owner (`code: not_theirs`): the person who asked removes it, or the owner removes it in Bambuddy by hand.
+  A person's own item (an empty requester is the owner's) goes as before, also unattended.
+- **S2: "ours" is per person.** `Store.active_job_requesters()` (queue id -> requester of queued/printing jobs);
+  `start_gate(..., requesters=, owner_name=)` counts an item ahead as ours only when the same person asked for it
+  (`gates.same_person`: case-insensitive, '' = the owner). Another person's workshop job ahead blocks with `jump`
+  ("... (#1, for Mum) is waiting ahead and is someone else's"; `allow_jump` warns `jump_allowed`, naming them).
+  Without `requesters` (older callers) every workshop job is ours. The hook, the handler and the watcher's
+  approval-request "ahead" list use it. This replaces the jump rule in "Pure logic" and in Fix round 1 D5.
+- **S5: ids chosen by the sender are scoped.** On `config.USER_CHOSEN_ID_PLATFORMS` (irc, ntfy) the recorded
+  sender is `"<platform>:<id>"` (`config.scoped_sender`, used by `hooks.session_sender` and `commands.identify`),
+  so only an entry written `irc:<nick>` matches; a raw `irc:...` id from another platform is quarantined
+  (`<platform>:irc:...`). Other platforms match exactly as before.
+- **S6: a plate confirmation covers one failed print.** `Store.confirm_plate(job, by, status=)` stores
+  `print_sig` (`store.print_signature`: state, job, layer, total layers, whole percent); on a printer that says
+  FAILED, `plate_confirmed(job, status=)` needs the same signature (none recorded: not confirmed, fail closed).
+  A same-name print that failed later (an archive reprint the watcher never saw start) is not covered by the
+  older confirmation. If the printer changes the progress it reports while still FAILED, the owner confirms
+  once more.
+- **W1: prints the workshop did not queue.** At FINISH with `eject_in_gcode` they get one plate check (the
+  light cycle the finish photo needs anyway). The finish text says "Not queued through the workshop" (or "No
+  eject plan known" when the attribution is unknown) and then either "the camera thinks the plate is empty" or
+  "take the part off if it is still there". `remove_part` is logged only when a check said occupied.
+- **W2: a stop is not a failure.** `_job_state` never turns a `cancelled` job into failed/finished. When a print
+  ends after `home3d_stop` (the job is `cancelled` with "stopped by ...", or a `stop_request` event of that job
+  name since the watcher saw it start), the owner gets `stopped` ("Stopped by Sam: wrong colour. Not a failure
+  ... /home3d approve clear"), the family nothing, no `failure_check`; the failure is still recorded for the
+  plate gate.
+- **W3: real durations.** `started_ts` comes from the printing queue item's `started_at` (backend clock), else
+  the pass time when the previous pass saw the printer, else None (first pass, unknown state, right after an
+  outage): the finish text then has no duration.
+- **W4/W5/W7.** A new print resets `ready_notified_for`. A family resume request while nothing is paused is
+  told as "asked to resume, but nothing is paused now (state)". After an "offline" notice the owner gets
+  `online` ("Printer reachable again after N min: state").
+- **R3-ROB-1: requests are marked told only when told.** `deliver_notes` sets `_owner_ok` (no owner text, or
+  the owner delivery ok; a dry run counts); `run()` marks approval requests announced only then.
+- **R3-ROB-2 / J3-6: freshness follows the interval.** `hooks.watcher_stale_s(settings)` = max(10 min,
+  3 × `watch_interval`) (`interval_seconds`; a cron expression: 10 min). Used by `watcher_fresh`, the context
+  line, `home3d_status` and `doctor`. README: changing `watch_interval` needs teardown + setup.
+- **R3-ROB-3: one error notice.** `_report_error` dedupes in the store, else in `watcher-error.json` (same error
+  again after 6 h at most); when neither can be written it stays silent (log only). `--dry-run` only prints it (no send, no record).
+- **J3-1: the first pass reports a workshop print that already ended.** A FINISH/FAILED on the very first pass
+  is a silent baseline only when the store does not have that job as `printing` (the start tool recorded it).
+- **J3-3:** `home3d_start` returns `watcher_running`; without a fresh watcher it warns and says nobody is told
+  about the finish. **J3-5:** `ready_next` drops the camera line and the "confirm first" line when the same
+  owner message already has them (`camera_said`). **J3-4, J3-7, J3-8, R3-ROB-5:** docs (the watcher never
+  announces a start; orientation/supports come from profiles; this layering note; the `language` default
+  upgrade note).
+

@@ -99,10 +99,11 @@ One short line to the requester per step that matters, not per tool call.
       `home3d_status` before you say anything about readiness.
     - Late in the evening, for a long print: suggest that the owner starts it in the morning, unless the owner
       said otherwise. Nothing starts it by itself in the morning; say so if they ask.
-11. **Let the watcher watch.** It reports start, finish, pause, failure, the eject outcome, "ready for
+11. **Let the watcher watch.** It reports finish, pause, failure, a stop, the eject outcome, "ready for
     the next job" and family approval requests to the owner (technical + photo), and the outcome to the
-    requester (one plain line). Don't poll in a loop and don't promise "I'll check in 10 minutes". When
-    asked, use `home3d_status` / `home3d_camera`. If `home3d_status` says the watcher is not fresh, tell
+    requester (one plain line). It does not announce a start: the requester first hears from it at the
+    finish. Don't poll in a loop and don't promise "I'll check in 10 minutes". When asked (also "did it
+    start?"), use `home3d_status` / `home3d_camera`. If `home3d_status` says the watcher is not fresh, tell
     the owner: nobody is watching prints. `hermes home3d setup` installs it, and it runs only while
     `hermes gateway` runs.
 12. **Close the loop.** When the requester reacts (it fits, it broke, they love it):
@@ -151,9 +152,13 @@ Starting a print, confirming the plate clear (`home3d_clear_plate action=confirm
 The tools and hooks enforce these. Don't look for ways around a block; report it.
 - Never start, clear the plate or resume from a scheduled (cron) job. Report and wait for a person.
 - A start needs: printer connected and idle, no blocking HMS error, the plate checked empty by the camera,
-  nobody else's job ahead. After FINISH the camera must think the plate is empty; after a failed print (also
-  one that was cancelled or lost power) the owner must also confirm it (`/home3d approve clear`), even when
-  the printer has been restarted since.
+  nobody else's job ahead (a job queued outside the workshop, or another household member's workshop job).
+  After FINISH the camera must think the plate is empty; after a failed print (also one that was cancelled
+  or lost power) the owner must also confirm it (`/home3d approve clear`), even when the printer has been
+  restarted since. A confirmation covers only the failed print it was made on.
+- Never remove, postpone or reorder another person's job: `home3d_queue action=remove` refuses a job queued
+  outside the workshop and another household member's job, also for the owner. A person removes only their
+  own waiting items; to drop someone else's, that person asks, or the owner removes it in Bambuddy by hand.
 - The workshop queues every item with manual start. Bambuddy's own auto-start items can start by themselves
   on a finished printer before any camera check when Bambuddy's "Require plate clear" setting is off. If
   you see one start that way, tell the owner to turn the setting on (`hermes home3d doctor` checks it).

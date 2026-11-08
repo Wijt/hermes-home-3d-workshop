@@ -490,9 +490,10 @@ def test_queue_remove_permissions(rt, be):
     ok = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": qid}, session="s-mum")
     assert ok["ok"] and be.called("queue_remove") == [("queue_remove", qid)]
     assert rt.store.get_job(qid)["state"] == "cancelled"
-    _, q2 = queued(rt)
-    assert call(rt, "home3d_queue", {"action": "remove", "queue_item_id": q2["queue_item_id"]},
-                session="s-owner")["ok"]
+    _, q2 = queued(rt)  # Mum's again: not even the owner removes it from here
+    out = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": q2["queue_item_id"]}, session="s-owner")
+    assert out["ok"] is False and out["code"] == "not_theirs" and "Bambuddy" in out["error"]
+    assert be.called("queue_remove") == [("queue_remove", qid)]
     assert call(rt, "home3d_queue", {"action": "remove", "queue_item_id": 999})["ok"] is False
 
 
@@ -889,3 +890,96 @@ def test_running_the_action_settles_the_family_request(rt, be):
     be.state.state = PAUSE
     assert gated(rt, "home3d_stop", {"action": "resume"})["ok"]
     assert [r["queue_item_id"] for r in rt.store.pending_approval_requests()] == [qid + 1]
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+def test_r3_queue_remove_never_removes_a_job_queued_elsewhere(rt, be):
+    """S1: a family print queued in the printer manager has no workshop row: nobody removes it from here (it would
+    also get a later start past the jump check); an old, closed workshop id is not ours either."""
+    family = be.queue_add(1)
+    out = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": family.id}, session="s-owner")
+    assert out["ok"] is False and out["code"] == "not_ours" and "Bambuddy" in out["error"]
+    rt.store.upsert_job(family.id, name="old", state="cancelled")
+    assert call(rt, "home3d_queue", {"action": "remove", "queue_item_id": family.id},
+                session="s-owner")["code"] == "not_ours"
+    assert not be.called("queue_remove") and any(q.id == family.id for q in be.queue())
+    _, q = queued(rt)  # Mum's workshop job, queued behind the family one
+    blocked = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert "jump" in blocked["codes"] and not be.called("start")
+
+
+def test_r3_nobody_removes_someone_elses_job(rt, be, monkeypatch):
+    """S1: a kanban worker (local session = the owner, nobody present) may not remove Mum's job, and neither may the
+    owner in a chat (it would postpone Mum's job and get a later start past the jump check). The owner's own job
+    goes, even unattended."""
+    from home3d_ws.home3d.config import LOCAL_SENDER
+
+    rt.store.remember_sender("s-kanban", LOCAL_SENDER, "cli")
+    _, q = queued(rt)
+    qid = q["queue_item_id"]
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-1")
+    out = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": qid}, session="s-kanban")
+    assert out["ok"] is False and out["code"] == "not_theirs" and not be.called("queue_remove")
+    own = call(rt, "home3d_queue", {"action": "add", "sliced_file_id": sliced(rt)["sliced_file_id"],
+                                    "requester": "Owner"}, session="s-owner")
+    assert call(rt, "home3d_queue", {"action": "remove", "queue_item_id": own["queue_item_id"]},
+                session="s-kanban")["ok"]  # the owner's own job
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    out = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": qid}, session="s-owner")
+    assert out["ok"] is False and out["code"] == "not_theirs"
+    assert rt.store.get_job(qid)["state"] == "queued" and any(q.id == qid for q in be.queue())
+    assert call(rt, "home3d_queue", {"action": "remove", "queue_item_id": qid}, session="s-mum")["ok"]
+    assert rt.store.get_job(qid)["state"] == "cancelled"
+
+
+def test_r3_queue_remove_from_cron_only_for_own_items(be, tmp_path):
+    rt = Runtime(CronCtx(), settings=settings(), store=Store(tmp_path / "c.db"), backend=be)
+    rt.store.remember_sender("s-mum", MUM, "whatsapp")
+    rt.store.remember_sender("s-owner", OWNER, "whatsapp")
+    _, q = queued(rt)
+    out = call(rt, "home3d_queue", {"action": "remove", "queue_item_id": q["queue_item_id"]}, session="s-owner")
+    assert out["ok"] is False and out["code"] == "not_theirs"
+
+
+def test_r3_start_does_not_jump_another_persons_workshop_job(rt, be):
+    """S2: Mum's workshop job waits ahead; Dad's later one is not started without jump."""
+    _, mum = queued(rt)
+    s = sliced(rt)
+    dad = call(rt, "home3d_queue", {"action": "add", "sliced_file_id": s["sliced_file_id"], "requester": "Dad"},
+               session="s-dad")
+    assert dad["requester"] == "Dad"
+    out = gated(rt, "home3d_start", {"queue_item_id": dad["queue_item_id"]})
+    assert out["ok"] is False and out["codes"] == ["jump"] and "for Mum" in out["error"] and not be.called("start")
+    later(rt)
+    out = gated(rt, "home3d_start", {"queue_item_id": dad["queue_item_id"], "allow_jump": True})
+    assert out["ok"] and any("for Mum" in w for w in out["warnings"])
+    assert next(i for i in be.items if i.id == mum["queue_item_id"]).status == "pending"
+
+
+def test_r3_start_says_honestly_whether_a_watcher_reports_the_finish(rt, be):
+    """J3-3: no watcher pass: the start result says nobody is told about the finish (no "no need to poll")."""
+    _, q1 = queued(rt)
+    out = gated(rt, "home3d_start", {"queue_item_id": q1["queue_item_id"]})
+    assert out["ok"] and out["watcher_running"] is False and "no need to poll" not in out["next"]
+    assert any("watcher is not running" in w for w in out["warnings"])
+    be.state.state = IDLE
+    rt.store.kv_set("watcher", {"state": "IDLE", "updated": time.time()})
+    later(rt)
+    _, q2 = queued(rt)
+    out = gated(rt, "home3d_start", {"queue_item_id": q2["queue_item_id"]})
+    assert out["ok"] and out["watcher_running"] is True and "no need to poll" in out["next"]
+    assert "progress" not in out["next"]
+
+
+def test_r3_confirm_records_the_failed_print_it_was_made_on(rt, be):
+    """S6: the approved confirm stores the printer's failed-print signature; a later same-name failure is not
+    covered by it."""
+    be.state.state, be.state.job_name, be.state.layer, be.state.progress = FAILED, "vase", 5, 12.0
+    be.state.total_layers = 40
+    assert gated(rt, "home3d_clear_plate", {"action": "confirm"})["ok"]
+    assert rt.store.plate_confirmed("vase", status=be.state)
+    be.state.layer, be.state.progress = 14, 35.0  # the same name failed again, elsewhere
+    _, q = queued(rt)
+    later(rt)
+    out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
+    assert out["ok"] is False and "after_failure" in out["codes"] and not be.called("start")

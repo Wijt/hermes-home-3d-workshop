@@ -74,7 +74,7 @@ config_schema:
     type: list
     default: []
     label: Owner sender ids
-    description: "Messaging user ids that count as the owner for approvals. Compared exactly (a WhatsApp phone id may be written with or without its @s.whatsapp.net / @c.us suffix; @lid ids are a separate id space). Check with /home3d whoami."
+    description: "Messaging user ids that count as the owner for approvals. Compared exactly (a WhatsApp phone id may be written with or without its @s.whatsapp.net / @c.us suffix; @lid ids are a separate id space). On IRC and ntfy, where people choose their own ids, write the id with its platform (irc:<nick>): a bare id never matches a sender there. Check with /home3d whoami."
   local_is_owner:
     type: bool
     default: true
@@ -137,3 +137,4 @@ config_schema:
     type: str
     default: "2m"
     label: Watcher interval (cron schedule)
+    description: "How often the zero-token watcher runs (hermes home3d setup writes it into the cron job: after a change, run hermes home3d teardown and setup again). The watcher counts as running for three intervals after a pass, at least 10 minutes."

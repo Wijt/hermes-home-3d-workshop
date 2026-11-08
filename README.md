@@ -108,6 +108,9 @@ hermes plugins install Wijt/hermes-home-3d-workshop --enable
 Hermes shows a banner for a Git install, because nobody reviewed it yet. The plugin starts with the
 simulated printer, so it does nothing to real hardware until you configure Bambuddy.
 
+Upgrading: `language` now defaults to `en`; early versions defaulted to `tr`. A household that relied on the
+old default sets `language: tr` under `plugins.entries.home-3d-workshop.settings`.
+
 ## More with the simulator
 
 ```bash
@@ -122,7 +125,9 @@ failure, a filament-runout pause, and an upgrade proposal. Scripted stand-ins (w
 model's chat replies, canned search results and the owner's tap on "approve") are marked `[staged]`.
 
 You can also talk to the agent while the simulator is active. Ask it to print a coaster. Then move the
-simulated time forward and run one watcher pass:
+simulated time forward and run one watcher pass (simulated time runs 60 times faster than real time, so a
+coaster may be done before you type the command; the watcher's first pass still reports a workshop print
+that already ended):
 
 ```bash
 hermes home3d simulate advance 60 --watch
@@ -154,7 +159,8 @@ hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, 
 2. If Bambuddy API auth is on, put `HOME3D_BAMBUDDY_API_KEY=...` in the profile's `.env` file
    (`hermes config env-path` prints its path).
 3. Check the setup: `hermes home3d doctor`. Use `/home3d whoami` in a chat to see the sender id to put
-   in `owner_ids` or `household`.
+   in `owner_ids` or `household`. On IRC (and ntfy) people choose their own id, so write such an id with
+   its platform, for example `irc:<nick>`: a bare id never matches a sender from those platforms.
 4. Start the watcher: `hermes home3d setup`. The cron job runs only while the Hermes scheduler runs, and
    `hermes gateway` runs it (check with `hermes cron status`). If the job exists but no pass ran,
    `hermes home3d doctor` says so. Remove the watcher with `hermes home3d teardown`.
@@ -163,12 +169,15 @@ hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, 
    each print until the plate is marked clear, so the owner sends `/home3d approve clear` before
    `/home3d approve start <id>`; the "next job ready" message says so.
 
-The watcher reads the plugin settings from `config.yaml` on each pass, so a change needs no new setup.
+The watcher reads the plugin settings from `config.yaml` on each pass, so a change needs no new setup,
+except `watch_interval`: setup writes it into the cron schedule, so after a change run
+`hermes home3d teardown` and `hermes home3d setup` again.
 
 Other settings: `public_url` (links sent to people), `send_profile` (the profile that owns the messaging
 adapters), `standard_printer_preset`, `process_presets`, `filament_presets`, `bed_type`,
-`eject_cool_temp_c` (default 30), `watch_interval` (default `2m`), `local_is_owner` (default true) and
-`inject_context` (`auto`, `always` or `never`).
+`eject_cool_temp_c` (default 30), `watch_interval` (default `2m`; the watcher counts as running for three
+intervals after a pass, at least 10 minutes), `local_is_owner` (default true) and `inject_context`
+(`auto`, `always` or `never`).
 
 **Auto-eject** needs a printer that is tilted forward and a Bambuddy printer preset whose end G-code
 pushes the cooled part off. The plugin does not ship this G-code and never sends G-code itself. The push
@@ -187,7 +196,7 @@ explains the concept. Run the first tests with a person present.
 | `home3d_import` | Import a MakerWorld model into the Bambuddy library; records who asked | No |
 | `home3d_customize` | Scale a model, or render a name tag or label box (OpenSCAD) | No |
 | `home3d_slice` | Slice with the right presets; auto-eject only when the part is safe to push | No |
-| `home3d_queue` | Add (always manual start), list, or remove your own waiting items | No |
+| `home3d_queue` | Add (always manual start), list, or remove a waiting workshop item: your own, or (the owner, present) someone else's. Never a job queued outside the workshop | No |
 | `home3d_start` | Start a queued print after the safety gate | **Yes** |
 | `home3d_stop` | Stop or pause: anyone, always. Resume: owner | Resume only |
 | `home3d_clear_plate` | Check the plate, or confirm that it is clear | Confirm only |
@@ -205,12 +214,14 @@ Also: the `/home3d` slash command (`status`, `approve start <id> [jump]`, `appro
 The rules are in code, not only in the prompt.
 
 - **Gates.** Before a start, the code checks: the printer is online and idle, no active HMS error, the
-  camera thinks the plate is empty (with the chamber light on), and no other person's job waits ahead
-  (unless the owner adds `jump`). The tool checks the plate with the camera right before the action, and
-  so does `/home3d approve`. After a failed print, the owner must confirm that the plate is clear
-  (`/home3d approve clear`). The watcher remembers the failure, so this holds even when the printer is
-  restarted or the print was cancelled to idle (if the watcher saw the failure). A plate clear needs a
-  cool bed. If the code is not sure, it blocks.
+  camera thinks the plate is empty (with the chamber light on), and no other person's job waits ahead: a
+  job queued outside the workshop, or another household member's workshop job (unless the owner adds
+  `jump`). The tool checks the plate with the camera right before the action, and so does
+  `/home3d approve`. After a failed print, the owner must confirm that the plate is clear
+  (`/home3d approve clear`). The confirmation counts only for the failed print it was made on (same job,
+  layer and progress), so a later failure of the same file needs a new one. The watcher remembers the
+  failure, so this holds even when the printer is restarted or the print was cancelled to idle (if the
+  watcher saw the failure). A plate clear needs a cool bed. If the code is not sure, it blocks.
 - **Camera doubt.** Bambuddy reads an empty plate at 18-25 %. The code calls that "not sure", never
   "empty". The owner can overrule exactly this doubt with `/home3d approve clear` after looking at the
   plate; the next start then accepts it. A plate the camera sees as occupied, or a check in the dark,
@@ -240,6 +251,9 @@ The rules are in code, not only in the prompt.
   a new error blocks the resume.
 - **Stop always works.** Anyone can stop or pause a print. No approval, no gate.
 - **Queue is safe.** The plugin always adds items with manual start. Nothing it queues starts by itself.
+  It never removes, postpones or reorders another person's job: not one queued outside the workshop, and
+  not another household member's workshop job, even when the owner asks. People remove their own waiting
+  items; the owner can remove any item by hand in Bambuddy.
 - **Bambuddy's own queue.** Bambuddy can start its own auto-start items when a print ends. With its
   "Require plate clear" setting off, it may start one on a finished printer before the camera check,
   for example on top of a part that the push missed. Turn the setting on. `hermes home3d doctor` warns
@@ -259,8 +273,10 @@ Each run is a short Python process. It calls no model and costs no tokens. It re
 queue, and it uses the camera only when it needs to. It speaks only when something happens: finish
 (with the photo taken before the push), failure, pause, a new HMS error, plate not clear, plate clear,
 next job ready, a household member's request for the owner's approval, a start that did not happen
-(with Bambuddy's error), a job queued outside the workshop (once per item), printer offline, a chamber
-light it could not switch off again, or a new upgrade proposal. The owner gets the technical note with
+(with Bambuddy's error), a job queued outside the workshop (once per item), printer offline and back
+again, a print someone stopped (owner only: not a failure), a chamber light it could not switch off
+again, or a new upgrade proposal. If the owner's message cannot be sent, a household member's request
+stays pending and the next pass tries again. The owner gets the technical note with
 a photo. The family gets one plain line that names the person who asked, and the thing they asked for
 in their own words. Empty output sends nothing.
 
@@ -270,7 +286,8 @@ settings from `config.yaml`; the snapshot that setup writes is only a fallback.
 The watcher switches the chamber light itself for its camera checks. One pass switches it at most once
 (the photo and the plate check share one light cycle), or twice when a camera request fails and the plate
 check is tried again. It takes one "done" photo near the end of each print the workshop queued. Other
-prints get no near-end photo, only one photo when they end. While a plate waits for a person, or a job waits
+prints get no near-end photo, only one photo and plate check (one light cycle) when they end: their eject
+plan is unknown, so the camera says whether the part is still there. While a plate waits for a person, or a job waits
 on an idle printer, the re-checks back off: 15, 30, 60, then 120 minutes, at most 6 times. The count
 starts again when the printer state, the job or the first queued item changes.
 
@@ -349,6 +366,8 @@ moves to "installed".
 - The plate check is a camera estimate. Thin parts and first layers can look empty. Look at the photo.
 - Auto-eject needs your own tilted base and end G-code. The code refuses PETG, TPU, thin, small and
   tall-narrow parts. It cannot see shape: the agent must turn eject off for round or fragile parts.
+- Orientation and supports come from the chosen MakerWorld profile or the owner's presets. The tools do
+  not rotate models or switch supports on; the skill helps choose a profile.
 - Voice notes depend on the Hermes gateway's transcription.
 - Messages are in English and Turkish only. Tested on Linux only.
 - The sender id comes from the messaging platform. Check it with `/home3d whoami` before you trust it.

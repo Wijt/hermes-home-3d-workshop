@@ -11,8 +11,9 @@ Two audiences, two tones. Examples use the placeholder names "Mum" (a family mem
 | Photo | only with a finished part | with every finish or problem |
 | Language | household `language`, no foreign words | household `language` (technical terms are fine) |
 
-- The watcher sends the event messages by itself (started, finished, dropped off, stayed on the plate,
-  failed, paused, HMS, offline, ready for the next job, a start that did not happen, upgrade proposals).
+- The watcher sends the event messages by itself (finished, dropped off, stayed on the plate, failed,
+  stopped on request, paused, HMS, offline and back again, ready for the next job, a start that did not
+  happen, upgrade proposals). It never announces a start.
   It also passes a family member's start, resume or plate-clear request to the owner, once, with the
   exact command. Don't repeat these messages; answer questions about them. The family only hears about
   jobs a family member asked for.

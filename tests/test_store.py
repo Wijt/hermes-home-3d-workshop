@@ -291,3 +291,30 @@ def test_a_new_ask_after_the_owner_settled_the_first_is_a_new_request(store):
     assert isinstance(second, int) and second != first
     assert [r["id"] for r in store.pending_approval_requests()] == [second]
     assert store.latest_approval_request("clear_plate", None, "Mum")["announced_ts"] is None
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+def test_r3_a_plate_confirmation_covers_only_the_failed_print_it_was_made_on():
+    """S6: confirmed after "Box" failed at layer 5; a later same-name print (an archive reprint nobody here saw
+    start) fails at layer 12: the old confirmation does not count for it."""
+    from home3d_ws.home3d.backends.base import FAILED, IDLE, PrinterStatus
+
+    store = Store()
+    first = PrinterStatus(state=FAILED, job_name="Box", progress=12.4, layer=5, total_layers=40)
+    store.confirm_plate("Box", "Owner", status=first)
+    assert store.plate_confirmed("Box", status=first)
+    assert store.plate_confirmed("Box", status=PrinterStatus(state=FAILED, job_name="Box", progress=12.0, layer=5,
+                                                             total_layers=40))
+    later = PrinterStatus(state=FAILED, job_name="Box", progress=31.0, layer=12, total_layers=40)
+    assert not store.plate_confirmed("Box", status=later)
+    assert store.plate_confirmed("Box", status=PrinterStatus(state=IDLE))  # not FAILED: the name rule as before
+    store.confirm_plate("Box", "Owner")  # no status recorded: on a FAILED printer it fails closed
+    assert not store.plate_confirmed("Box", status=first) and store.plate_confirmed("Box")
+
+
+def test_r3_active_job_requesters():
+    store = Store()
+    store.upsert_job(1, requester="Mum", state="queued")
+    store.upsert_job(2, requester="", state="printing")
+    store.upsert_job(3, requester="Dad", state="finished")
+    assert store.active_job_requesters() == {1: "Mum", 2: ""}

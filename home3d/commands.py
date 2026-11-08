@@ -29,7 +29,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from .config import LOCAL_SENDER, norm_id
+from .config import LOCAL_SENDER, norm_id, scoped_sender
 from .hooks import TOOL_FOR_ACTION, approve_command, evaluate, is_local_platform, watcher_fresh
 
 _LOCAL_UID = re.compile(r"^uid:\d+$")
@@ -116,7 +116,7 @@ def identify(source: Any, platform: str = "") -> tuple[str, str]:
         return LOCAL_SENDER, f"local session ({uid})"
     if uid and norm_id(uid) == LOCAL_SENDER:  # a messaging user literally named "local" is not the local owner
         return "", uid
-    return uid, uid
+    return scoped_sender(uid, plat), uid  # "irc:<nick>": a freely chosen id never matches a bare household id
 
 
 def authorize_sender(rt, source: Any, platform: str = "") -> tuple[bool, str, str, str]:
@@ -310,7 +310,7 @@ class _Command:
         if action == "start":
             who = f" ({res['requester']})" if res.get("requester") else ""
             out = _t("started", lang, qid=qid, name=_pretty(str(res.get("name") or f"#{qid}")), who=who)
-            return out if watcher_fresh(store) else out + "\n" + _t("no_watcher", lang)
+            return out if watcher_fresh(store, self.rt.settings) else out + "\n" + _t("no_watcher", lang)
         if action == "clear_plate":
             plate = res.get("plate") or {}
             diff = plate.get("difference_pct")

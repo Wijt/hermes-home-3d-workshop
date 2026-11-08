@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -129,6 +130,11 @@ class Rig:
     @property
     def kv(self) -> dict:
         return self.store.kv_get(watcher.KV_KEY)
+
+
+def owner_message(results) -> str:
+    """The one owner message a pass sends (its owner texts merged, as ``deliver_notes`` does)."""
+    return "\n\n".join(r["owner_text"] for r in results if r["owner_text"])
 
 
 def kinds(results):
@@ -279,6 +285,9 @@ def test_offline_notifies_owner_once_after_ten_minutes(rig):
     assert o["kind"] == "offline" and o["family_text"] == "" and "ulaşılamıyor" in o["owner_text"]
     assert rig.run(30) == []
     rig.b.error = None
+    (back,) = rig.run(2)  # the owner was told it is unreachable, so they are told it is back (once)
+    assert back["kind"] == "online" and back["family_text"] == "" and "yeniden ulaşılıyor" in back["owner_text"]
+    assert "43 dakika" in back["owner_text"] and "boşta" in back["owner_text"]
     assert rig.run(2) == []
     assert rig.kv["offline_since"] is None and rig.kv["online"] is True
     rig.status(OFFLINE, connected=False)  # backend reports offline without raising
@@ -499,9 +508,11 @@ def test_ready_next_after_a_failed_print_asks_for_the_plate_confirmation(rig):
     rig.b.plate = EMPTY
     out = rig.run(16)
     assert kinds(out) == ["plate_clear", "ready_next"]
-    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+    assert owner_message(out).count("/home3d approve clear") == 1  # asked once in the one owner message
+    assert owner_message(out).count("Kameraya göre tabla boş") == 1
     assert "/home3d approve start 10" in out[1]["owner_text"]
-    rig.store.confirm_plate("Vazo", "Sam")  # the owner looked and confirmed: the next notice does not ask again
+    rig.store.confirm_plate("Vazo", "Sam", status=rig.b.st)  # the owner looked and confirmed (on this failed
+    # print): the next notice does not ask again
     rig.store.upsert_job(11, name="Saksı.gcode.3mf", requester="Mum", state="queued")
     rig.b.items = [QueueItem(id=11, status="pending", name="Saksı.gcode.3mf", manual_start=True)]
     (again,) = rig.run(2)
@@ -584,7 +595,7 @@ def test_a_print_that_ends_in_idle_needs_the_owners_confirmation(rig):
     rig.b.plate = EMPTY
     out = rig.run(16)
     assert kinds(out) == ["plate_clear", "ready_next"]
-    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+    assert owner_message(out).count("/home3d approve clear") == 1
 
 
 def test_a_power_cycle_after_a_failure_does_not_forget_it(rig):
@@ -603,7 +614,7 @@ def test_a_power_cycle_after_a_failure_does_not_forget_it(rig):
     rig.status(IDLE, job_name="", bed_temp=24)
     out = rig.run(16)
     assert "ready_next" in kinds(out)
-    assert all("/home3d approve clear" in r["owner_text"] for r in out)
+    assert "/home3d approve clear" in owner_message(out)
     assert rig.store.unconfirmed_failure() is not None
     rig.store.confirm_plate("", "Sam")
     assert rig.store.unconfirmed_failure() is None
@@ -913,9 +924,11 @@ def test_an_approval_request_reaches_the_owner_once():
     assert not [r for r in rig.run(2) if r["kind"] == "approval_request"]
     assert rig.store.pending_approval_requests() == []
     # resume and clear requests carry their own command
+    rig.status(PAUSE, job_name="dads_job", progress=10, layer=1, total_layers=10, bed_temp=60)
     rig.store.add_approval_request("resume", None, "Dad", "s-dad")
     (r,) = [x for x in rig.run(2) if x["kind"] == "approval_request"]
     assert r["owner_text"].startswith("🙋 Dad asks to resume") and "/home3d approve resume" in r["owner_text"]
+    rig.status(RUNNING, job_name="dads_job", progress=12, layer=2, total_layers=10, bed_temp=60)
     rig.store.add_approval_request("clear_plate", None, "Mum", "s-mum")
     (c,) = [x for x in rig.run(2) if x["kind"] == "approval_request"]
     assert "/home3d approve clear" in c["owner_text"] and "Look at the plate" in c["owner_text"]
@@ -1107,3 +1120,258 @@ def test_ready_next_says_to_mark_the_plate_clear_first_when_bambuddy_waits_for_i
     text = ready["owner_text"]
     first = "Bambuddy waits for the plate to be marked clear: first /home3d approve clear"
     assert first in text and text.index(first) < text.index("/home3d approve start 12")
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+def _foreign_print(rig: Rig, n: int, plate: PlateCheck) -> list[dict]:
+    """A family print queued in the printer manager (no workshop row), sliced with auto-eject: the A1 pushes the part
+    at RUNNING 100 % and reports FINISH after it. Returns the results of the FINISH pass."""
+    qid = 300 + n
+    rig.b.items = [QueueItem(id=qid, status="printing", name="family_hook.gcode.3mf", manual_start=False)]
+    rig.status(RUNNING, job_name="family_hook", progress=50, layer=10, total_layers=20, bed_temp=65)
+    rig.run(2)
+    rig.status(RUNNING, job_name="family_hook", progress=100, layer=20, total_layers=20, bed_temp=35)
+    rig.run(20)
+    rig.b.items[0].status = "completed"
+    rig.b.plate = plate
+    rig.status(FINISH, job_name="family_hook", progress=100, layer=20, total_layers=20, bed_temp=28)
+    out = rig.run(2)
+    rig.b.items = []
+    rig.status(IDLE, job_name="", bed_temp=25)
+    rig.run(30)
+    return out
+
+
+def test_r3_a_pushed_foreign_print_is_not_told_as_take_it_off_and_logs_no_moment():
+    """W1: a print the workshop did not queue gets one look at FINISH (one light cycle with the photo). An empty plate
+    is said as such; no "No auto-eject: take the part off", no remove_part moment, no false upgrade proposal."""
+    rig = Rig(language="en")
+    rig.b.eject_in_gcode = True
+    rig.run()
+    for n in range(3):
+        cycles = rig.b.cycles
+        out = _foreign_print(rig, n, EMPTY)
+        (fin,) = [r for r in out if r["kind"] == "finished"]
+        assert "Not queued through the workshop; the camera thinks the plate is empty" in fin["owner_text"]
+        assert "No auto-eject" not in fin["owner_text"] and fin["family_text"] == ""
+        assert "upgrade_proposed" not in kinds(out)
+        assert rig.b.cycles - cycles <= 2  # the FINISH look and its photo share one light cycle
+    assert rig.store.human_needed(kind="remove_part") == [] and rig.store.upgrades() == []
+
+
+def test_r3_a_foreign_print_left_on_the_plate_is_a_real_moment():
+    rig = Rig(language="en")
+    rig.b.eject_in_gcode = True
+    rig.run()
+    (fin,) = [r for r in _foreign_print(rig, 0, OCCUPIED) if r["kind"] == "finished"]
+    assert "take the part off if it is still there" in fin["owner_text"]
+    assert len(rig.store.human_needed(kind="remove_part")) == 1
+    band = PlateCheck(is_empty=None, difference_pct=21.0, message="unsure", light_ok=True, uncertain_band=True)
+    _foreign_print(rig, 1, band)  # a camera doubt is not evidence that a person had to step in
+    assert len(rig.store.human_needed(kind="remove_part")) == 1
+
+
+def test_r3_an_owner_stop_is_not_reported_as_a_failure():
+    """W2: home3d_stop closes the job as cancelled and logs a stop_request; the printer then says FAILED (or IDLE).
+    The owner gets a "stopped by" note (no family "I've told the owner"), the stop outcome stays, the failure is still
+    recorded for the plate gate, and no failure_check moment / upgrade proposal is counted."""
+    for end in (FAILED, IDLE):
+        rig = Rig(language="en")
+        rig.run()
+        rig.store.upsert_job(103, name="towel_hook.gcode.3mf", requester="Mum", state="queued", request_id=None)
+        rig.b.items = [QueueItem(id=103, status="printing", name="towel_hook.gcode.3mf")]
+        rig.status(RUNNING, job_name="towel_hook", progress=20, layer=5, total_layers=40, bed_temp=60)
+        rig.run(2)
+        # what tools._h_stop does
+        rig.store.add_event("stop_request", "towel_hook", {"who": "Sam", "reason": "wrong colour"})
+        rig.store.upsert_job(103, state="cancelled", outcome="stopped by Sam: wrong colour")
+        rig.b.items[0].status = "failed"
+        rig.status(end, job_name="towel_hook" if end == FAILED else "", progress=20, layer=5, total_layers=40,
+                   bed_temp=50)
+        out = rig.run(2)
+        assert kinds(out) == ["stopped"], out
+        assert "Stopped by Sam: wrong colour" in out[0]["owner_text"] and out[0]["family_text"] == ""
+        assert "failed" not in out[0]["owner_text"].lower()
+        job = rig.store.get_job(103)
+        assert job["state"] == "cancelled" and job["outcome"] == "stopped by Sam: wrong colour"
+        assert rig.store.unconfirmed_failure() is not None  # a half print may be on the plate: confirm first
+        assert rig.store.human_needed(kind="failure_check") == []
+
+
+def test_r3_a_real_failure_still_tells_the_family():
+    rig = Rig(language="en")
+    rig.run()
+    rig.store.upsert_job(5, name="vase.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=5, status="printing", name="vase.gcode.3mf")]
+    rig.status(RUNNING, job_name="vase", progress=20, layer=5, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.store.add_event("stop_request", "other_job", {"who": "Sam"})  # a stop of something else
+    rig.status(FAILED, job_name="vase", progress=21, layer=5, total_layers=40, bed_temp=50)
+    out = rig.run(2)
+    assert kinds(out) == ["failed"] and "the printer stopped" in out[0]["family_text"]
+    assert rig.store.get_job(5)["state"] == "failed" and rig.store.human_needed(kind="failure_check")
+
+
+def test_r3_the_finish_duration_is_the_real_print_time_or_left_out():
+    """W3: a print first seen mid-way (watcher set up late) gets no duration; a queue item's started_at is used."""
+    rig = Rig(language="en")
+    rig.status(RUNNING, job_name="octopus", progress=80, layer=190, total_layers=238, bed_temp=60)
+    rig.run()  # the watcher's very first pass: the print started long before
+    rig.status(FINISH, job_name="octopus", progress=100, layer=238, total_layers=238, bed_temp=30)
+    fin = [r for r in rig.run(140) if r["kind"] == "finished"][0]
+    assert " h " not in fin["owner_text"] and "min" not in fin["owner_text"].split("\n")[0]
+    # a queue item that started 9 h 18 min before the watcher's first look at it
+    rig2 = Rig(language="en")
+    rig2.run()
+    started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(T0 + 2 * MIN - 558 * MIN)) + ".5Z"
+    rig2.store.upsert_job(102, name="octopus.gcode.3mf", requester="Mum", state="queued")
+    rig2.b.items = [QueueItem(id=102, status="printing", name="octopus.gcode.3mf", started_at=started)]
+    rig2.status(RUNNING, job_name="octopus", progress=80, layer=190, total_layers=238, bed_temp=60)
+    rig2.run(2)
+    rig2.status(FINISH, job_name="octopus", progress=100, layer=238, total_layers=238, bed_temp=30)
+    fin = [r for r in rig2.run(60) if r["kind"] == "finished"][0]
+    assert "10 h 18 min" in fin["owner_text"], fin["owner_text"]
+
+
+def test_r3_a_print_seen_starting_gets_its_duration_from_the_watcher():
+    rig = Rig(language="en")
+    rig.run()  # idle
+    rig.status(RUNNING, job_name="cup", progress=1, layer=1, total_layers=20, bed_temp=60)
+    rig.run(2)
+    rig.status(FINISH, job_name="cup", progress=100, layer=20, total_layers=20, bed_temp=30)
+    fin = [r for r in rig.run(45) if r["kind"] == "finished"][0]
+    assert "45 min" in fin["owner_text"]
+
+
+def test_r3_next_job_ready_is_told_again_after_another_print_used_the_plate():
+    """W4: #104 was announced; a family auto-start print then ran and the plate is empty again: told once more."""
+    rig = Rig(language="en")
+    rig.run()
+    rig.store.upsert_job(104, name="hook.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=104, status="pending", name="hook.gcode.3mf", manual_start=True)]
+    assert "ready_next" in kinds(rig.run(16))
+    assert "ready_next" not in kinds(rig.run(16))
+    fam = QueueItem(id=105, status="printing", name="family.gcode.3mf", manual_start=False)
+    rig.b.items = [fam] + rig.b.items
+    rig.status(RUNNING, job_name="family", progress=10, layer=1, total_layers=10, bed_temp=60)
+    rig.run(2)
+    fam.status = "completed"
+    rig.status(FINISH, job_name="family", progress=100, layer=10, total_layers=10, bed_temp=28)
+    seen = kinds(rig.run(30)) + kinds(rig.run(30))
+    assert seen.count("ready_next") == 1, seen
+
+
+def test_r3_a_resume_request_when_nothing_is_paused_says_so():
+    rig = Rig(language="en")
+    rig.run()
+    rig.status(FINISH, job_name="vase", progress=100, layer=10, total_layers=10, bed_temp=28)
+    rig.store.add_approval_request("resume", None, "Mum", "s-mum")
+    (a,) = [r for r in rig.run(2) if r["kind"] == "approval_request"]
+    assert "nothing is paused now (finished)" in a["owner_text"] and "approve resume" not in a["owner_text"]
+    assert rig.store.pending_approval_requests() == []
+
+
+def test_r3_an_approval_request_stays_pending_when_the_owner_text_fails(monkeypatch):
+    """R3-ROB-1: a failed owner send leaves the request unannounced (the next pass tries again), so the hook never
+    tells the family "the owner already got this"."""
+    rig = Rig(language="en", owner_target="whatsapp:<owner-chat>")
+    rig.run()
+    rig.store.upsert_job(7, name="towel_hook.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=7, status="pending", name="towel_hook.gcode.3mf", manual_start=True)]
+    rig.status(RUNNING, job_name="dads_job", progress=10, layer=1, total_layers=10, bed_temp=60)
+    rig.store.add_approval_request("start", 7, "Mum", "s-mum")
+    sent: list[str] = []
+
+    def fail(settings, target, text, media=None, *, audience="", dry_run=False):
+        sent.append(text)
+        return notify.Delivery(target=target, ok=False, error="adapter not connected", audience=audience)
+
+    monkeypatch.setattr(notify, "send", fail)
+    assert "approval_request" in kinds(rig.run(2))
+    (row,) = rig.store.approval_requests()
+    assert row["announced_ts"] is None and len(rig.store.pending_approval_requests()) == 1
+    monkeypatch.setattr(notify, "send", lambda s, t, x, m=None, *, audience="", dry_run=False:
+                        notify.Delivery(target=t, ok=True, audience=audience))
+    assert "approval_request" in kinds(rig.run(2))  # retried
+    assert rig.store.pending_approval_requests() == []
+    assert len(sent) == 1
+
+
+def test_r3_a_broken_store_reports_the_error_once_not_every_tick(tmp_path, monkeypatch, capsys):
+    """R3-ROB-3: workshop.db is not a database: the owner gets one error notice, not one per cron tick; a dry run
+    never sends it."""
+    _fake_hermes(tmp_path, monkeypatch)
+    calls = tmp_path / "calls.log"
+    exe = tmp_path / "bin" / "hermes"
+    exe.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) "
+                   "+ '\\n')\nprint(json.dumps({'success': True}))\n", encoding="utf-8")
+    write_snapshot(settings(owner_target="whatsapp:<owner-chat>"))
+    (Path(os.environ["HOME3D_DATA_DIR"]) / "workshop.db").write_bytes(os.urandom(4096))
+    assert watcher.main(["--dry-run"]) == 0
+    assert "DatabaseError" in capsys.readouterr().out and not calls.exists()  # dry run: printed, never sent
+    for _ in range(3):
+        assert watcher.main([]) == 0
+    assert len(calls.read_text().splitlines()) == 1
+
+
+def test_r3_a_workshop_print_that_ended_before_the_first_pass_is_reported():
+    """J3-1: the start tool recorded the job as printing; the watcher's very first pass finds FINISH: it is reported
+    (not swallowed as an old baseline) and the job does not stay "printing" for good."""
+    rig = Rig(language="en")
+    rig.b.eject_in_gcode = True
+    rig.store.upsert_job(1, name="coaster.gcode.3mf", requester="Mum", eject_planned=1, state="printing",
+                         started_ts=T0)
+    rig.b.items = [QueueItem(id=1, status="completed", name="coaster.gcode.3mf")]
+    rig.status(FINISH, job_name="coaster", progress=100, layer=12, total_layers=12, bed_temp=28)
+    seen = kinds(rig.run())
+    assert "finished" in seen, seen
+    seen += kinds(rig.run(5))
+    assert "finished_ejected" in seen and rig.store.get_job(1)["state"] == "cleared"
+
+
+def test_r3_an_old_finish_found_on_the_first_pass_stays_quiet():
+    rig = Rig(language="en")
+    rig.store.upsert_job(1, name="old.gcode.3mf", requester="Mum", state="finished")
+    rig.status(FINISH, job_name="old", progress=100, layer=12, total_layers=12, bed_temp=28)
+    assert rig.run() == []
+
+
+def test_r3_one_owner_message_says_the_camera_reading_once():
+    """J3-5: finished_ejected and ready_next in the same pass are one owner message: the camera line once."""
+    rig = Rig(language="en")
+    rig.b.eject_in_gcode = True
+    rig.run()
+    rig.store.upsert_job(7, name="Gift box.gcode.3mf", requester="Mum", eject_planned=1, state="queued")
+    rig.store.upsert_job(8, name="Hook.gcode.3mf", requester="Dad", state="queued")
+    rig.b.items = [QueueItem(id=7, status="printing", name="Gift box.gcode.3mf"),
+                   QueueItem(id=8, status="pending", name="Hook.gcode.3mf", manual_start=True)]
+    rig.status(RUNNING, job_name="Gift box", progress=50, layer=50, total_layers=100, bed_temp=65)
+    rig.run(2)
+    rig.b.items[0].status = "completed"
+    rig.status(FINISH, job_name="Gift box", progress=100, layer=100, total_layers=100, bed_temp=28)
+    out = rig.run(5)
+    assert kinds(out) == ["finished", "finished_ejected", "ready_next"], kinds(out)
+    msg = owner_message(out)
+    assert msg.count("camera thinks the plate is empty") == 1 and "/home3d approve start 8" in msg
+    (box,) = [r for r in notify.read_outbox() if r["audience"] == "owner" and "approve start 8" in r["text"]]
+    assert box["text"].lower().count("the camera thinks the plate is empty") == 1
+
+
+def test_r3_a_stop_the_stop_tool_could_not_match_still_closes_the_job():
+    """W2: only the stop_request event names the print (the stop tool did not find the job by name): the watcher
+    closes the job as stopped, so the queue reconcile never reports it as failed later."""
+    rig = Rig(language="en")
+    rig.run()
+    rig.store.upsert_job(103, name="towel_hook.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=103, status="printing", name="towel_hook.gcode.3mf")]
+    rig.status(RUNNING, job_name="towel_hook", progress=20, layer=5, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.store.add_event("stop_request", "towel_hook", {"who": "Dad", "reason": "spaghetti"})
+    rig.b.items[0].status = "failed"
+    rig.b.items[0].started_at = "2023-11-14T22:15:00Z"
+    rig.status(IDLE, job_name="", bed_temp=40)
+    assert kinds(rig.run(2)) == ["stopped"]
+    job = rig.store.get_job(103)
+    assert job["state"] == "cancelled" and job["outcome"] == "stopped by Dad: spaghetti"
+    later = kinds(rig.run(2)) + kinds(rig.run(20))
+    assert "failed" not in later, later

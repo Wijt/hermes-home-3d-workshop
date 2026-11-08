@@ -24,9 +24,9 @@ from typing import Any, Callable, Optional
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
 from .config import watch_script_path
-from .gates import clear_plate_gate, describe, printer_blocks, resume_gate, start_gate
+from .gates import clear_plate_gate, describe, printer_blocks, resume_gate, same_person, start_gate
 from .gcode import assess_eject, inspect_gcode, material_family
-from .hooks import LIGHT_FLAG, acked_codes, approval_target
+from .hooks import LIGHT_FLAG, acked_codes, approval_target, watcher_fresh, watcher_stale_s
 
 Tool = tuple[str, dict, Callable[..., str]]
 
@@ -183,8 +183,10 @@ def _plate_check(rt, status):
         return rt.plate_check()
 
 
-def _plate_confirmed(store, job_name: str) -> bool:
+def _plate_confirmed(store, job_name: str, status=None) -> bool:
     try:
+        if status is not None:
+            return bool(store.plate_confirmed(job_name or "", status=status))
         return bool(store.plate_confirmed(job_name or ""))
     except Exception:
         return False  # fail closed: after a failed print the start gate then wants a confirmation
@@ -328,10 +330,11 @@ def _kv_age_s(store, key: str) -> Optional[float]:
     return (time.time() - float(updated)) if updated is not None else None
 
 
-def _watcher_info(age: Optional[float]) -> dict:
-    """Watcher freshness for status: ``state`` is ``ok`` | ``stale`` (it ran, but not lately) | ``never_ran`` (the
-    cron script is installed but no pass ran: the Hermes scheduler is not running) | ``not_installed``."""
-    fresh = age is not None and age < WATCHER_STALE_S
+def _watcher_info(age: Optional[float], stale_s: float = WATCHER_STALE_S) -> dict:
+    """Watcher freshness for status: ``state`` is ``ok`` | ``stale`` (it ran, but not lately: older than ``stale_s``,
+    ``hooks.watcher_stale_s``) | ``never_ran`` (the cron script is installed but no pass ran: the Hermes scheduler is
+    not running) | ``not_installed``."""
+    fresh = age is not None and age < stale_s
     out: dict = {"last_run_age_s": round(age) if age is not None else None, "fresh": fresh}
     if fresh:
         out["state"] = "ok"
@@ -438,7 +441,7 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
         out["plate"] = {k: plate.get(k) for k in ("phase", "job_name", "eject_planned", "reason", "last_check")}
     updated = w.get("updated") if isinstance(w, dict) else None
     age = (time.time() - float(updated)) if isinstance(updated, (int, float)) else _kv_age_s(store, "watcher")
-    out["watcher"] = _watcher_info(age)
+    out["watcher"] = _watcher_info(age, watcher_stale_s(rt.settings))
     err = store.kv_get("watcher_error")
     if err:
         out["watcher"]["error"] = str(err)[:200]
@@ -768,17 +771,30 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
             return {"ok": False, "error": f"queue item {qid} is {item.status}: only waiting items can be removed "
                                           "(use home3d_stop for the running print)"}
         job = store.get_job(qid)
-        mine = job is not None and bool(who) and (job.get("requester") or "").lower() == who.lower()
-        if not (_is_owner(rt, sender) or mine):
-            return {"ok": False, "error": "only the owner or the person who asked can remove this item"}
+        if job is None or qid not in _own_item_ids(rt):
+            # a family job queued in the printer manager (or an old, closed workshop id): never removed from here, by
+            # anyone (removing it would also get a later start past the jump check)
+            return {"ok": False, "code": "not_ours",
+                    "error": f"queue item {qid} was not queued through the workshop; remove it in Bambuddy yourself "
+                             "(the workshop never removes, postpones or reorders other people's jobs)"}
+        requester = str(job.get("requester") or "")
+        mine = bool(who) and same_person(requester, who, rt.settings.owner_name)
+        if not mine:
+            # another person's job: never from here, not even for the owner (it would postpone their job and let a
+            # later start pass the jump check). The person who asked removes it, or the owner does it in Bambuddy.
+            return {"ok": False, "code": "not_theirs",
+                    "error": f"queue item {qid} is {requester or 'the owner'}'s: the workshop never removes another "
+                             f"person's job. {requester or 'The owner'} can ask to remove it, or the owner removes "
+                             "it in Bambuddy by hand"}
         be.queue_remove(qid)
         by = who or "owner"
         store.upsert_job(qid, state="cancelled", outcome=f"removed by {by}")
         req = store.request_for_queue_item(qid)
         if req:
             store.update_request(req["id"], status="cancelled", outcome=f"removed from the queue by {by}")
-        store.add_event("queue_removed", item.name, {"queue_item_id": qid, "who": by, "sender": sender})
-        return {"ok": True, "removed": qid, "name": item.name}
+        store.add_event("queue_removed", item.name, {"queue_item_id": qid, "who": by, "sender": sender,
+                                                     "requester": requester})
+        return {"ok": True, "removed": qid, "name": item.name, "requester": requester}
 
     sid = _int(a, "sliced_file_id", required=True)
     meta = store.kv_get(f"slice:{sid}") or {}
@@ -866,8 +882,9 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
     warnings += _light_warning(plate)
     req = store.request_for_queue_item(qid)
     gate = start_gate(status, queue, qid, plate=plate, in_cron=rt.in_cron(), own_item_ids=_own_item_ids(rt),
+                      requesters=store.active_job_requesters(), owner_name=s.owner_name,
                       allow_jump=jump, voice_request=bool(req and req.get("channel") == "voice"),
-                      plate_confirmed=_plate_confirmed(store, status.job_name),
+                      plate_confirmed=_plate_confirmed(store, status.job_name, status),
                       after_failure=_after_failure(store), plate_skipped=skipped)
     if not gate.ok:
         return {"ok": False, "blocked": True, "error": describe(gate, "en"), "message": describe(gate, s.language),
@@ -884,10 +901,15 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
     job = store.get_job(qid) or {}
     store.add_event("start_requested", item.name or job.get("name", ""),
                     {"queue_item_id": qid, "who": who or "owner", "sender": sender})
+    watching = watcher_fresh(store, s)
+    if not watching:
+        warnings.append("the watcher is not running: nobody is told about the finish or the plate")
     return {"ok": True, "queue_item_id": qid, "status": item.status, "name": item.name or job.get("name", ""),
             "requester": job.get("requester", ""), "eject_planned": bool(job.get("eject_planned")),
-            "started_by": who or "owner", "warnings": warnings + gate.warnings,
-            "next": "The watcher reports progress, the finish and the plate state; no need to poll."}
+            "started_by": who or "owner", "warnings": warnings + gate.warnings, "watcher_running": watching,
+            "next": ("The watcher reports the finish and the plate state; no need to poll." if watching else
+                     "The watcher is not running: nobody is told about the finish or the plate. Tell the owner: "
+                     "hermes home3d setup, and `hermes gateway` must run. Check back with home3d_status.")}
 
 
 def _h_stop(rt, a: dict, kw: dict) -> dict:
@@ -991,7 +1013,7 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
     be.mark_plate_cleared()
     by = who or "owner"
     _resolve_requests(store, "clear_plate", None, f"plate marked clear by {by}")
-    store.confirm_plate(st.job_name or "", by)  # a person looked: after a failed print the next start may go
+    store.confirm_plate(st.job_name or "", by, status=st)  # a person looked: after a failed print the start may go
     for j in store.jobs(state="finished", limit=20):
         store.upsert_job(j["queue_item_id"], state="cleared")
     store.add_event("plate_clear_confirmed", st.job_name,
@@ -1196,7 +1218,7 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
       "sliced_file_id": {"type": "integer", "description": "For add: sliced_file_id from home3d_slice."},
       "ams_slot": {"type": "integer", "description": "Zero-based AMS tray (defaults to the suggested slot)."},
       "request_id": _INT, "requester": {"type": "string"},
-      "queue_item_id": {"type": "integer", "description": "For remove."},
+      "queue_item_id": {"type": "integer", "description": "For remove: only the asking person's own waiting item."},
       "include_done": {"type": "boolean", "description": "For list: include finished items."}},
      ["action"], _h_queue),
     ("home3d_start",

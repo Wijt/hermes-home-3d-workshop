@@ -446,7 +446,9 @@ def _doctor_watcher(rt, binary: Optional[str], add) -> None:
     upd = w.get("updated") if isinstance(w, dict) else None
     if isinstance(upd, (int, float)):
         age = time.time() - upd
-        if age < 10 * 60:
+        from .hooks import watcher_stale_s
+
+        if age < watcher_stale_s(rt.settings):
             add("ok", "watcher", f"last pass {round(age / 60)} min ago")
         else:
             add("warn", "watcher", f"last pass {round(age / 60)} min ago: "

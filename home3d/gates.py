@@ -19,7 +19,7 @@ needed now because the handler runs the authoritative one right before the actio
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from .backends.base import (ACTIVE_STATES, FAILED, FINISH, IDLE, OFFLINE, PAUSE, PlateCheck, PrinterStatus,
                             QueueItem)
@@ -50,7 +50,8 @@ _TEXT: dict[str, tuple[str, str]] = {
                       "(/home3d approve clear)",
                       "son iş yarıda kaldı: önce sahibinin tablanın boş olduğunu onaylaması gerek "
                       "(/home3d approve clear)"),
-    "jump": ("{name} (#{other}) is waiting ahead and is not ours", "sırada önde başkasının işi var: {name} (#{other})"),
+    "jump": ("{name} (#{other}{for_who}) is waiting ahead and is {whose}",
+             "sırada önde başkasının işi var: {name} (#{other}{for_who_tr})"),
     "bed_hot": ("the bed is still hot ({bed:.0f} C > {limit:.0f} C)",
                 "tabla hâlâ sıcak ({bed:.0f} °C, sınır {limit:.0f} °C)"),
     "auto_start_pending": ("auto-start items pending ({names}): marking the plate clear would start them. "
@@ -67,7 +68,8 @@ _TEXT: dict[str, tuple[str, str]] = {
     # warnings
     "voice": ("voice request: a written confirmation is required", "sesli istek: yazılı onay gerekiyor"),
     "hms_ignored": ("ignored harmless HMS {codes}", "zararsız uyarı yok sayıldı: {codes}"),
-    "jump_allowed": ("jumping ahead of {name} (#{other}) as allowed", "izinle {name} (#{other}) işinin önüne geçiliyor"),
+    "jump_allowed": ("jumping ahead of {name} (#{other}{for_who}) as allowed",
+                     "izinle {name} (#{other}{for_who_tr}) işinin önüne geçiliyor"),
     "not_ours": ("queue item {item} was not queued through the workshop",
                  "{item} numaralı iş atölye üzerinden eklenmedi"),
     "needs_calibration": ("plate detection needs calibration", "tabla algılamanın kalibrasyonu gerekiyor"),
@@ -139,6 +141,11 @@ def _render(code: str, params: dict, lang: str) -> str:
         p["state"] = _STATE_WORDS.get(p["state"], (p["state"], p["state"]))[i]
     if "job" in p:
         p["job_sfx"] = f": {p['job']}" if p["job"] else ""
+    if code in ("jump", "jump_allowed"):  # another person's workshop job ("who") or a job queued elsewhere
+        who = str(p.get("who") or "").strip()
+        p["for_who"] = f", for {who}" if who else ""
+        p["for_who_tr"] = f", isteyen: {who}" if who else ""
+        p["whose"] = "someone else's" if who else "not ours"
     if "pct" in p or "msg" in p:
         pct = p.get("pct")
         if pct is not None:
@@ -240,13 +247,25 @@ def printer_blocks(status: PrinterStatus, action: str = "start") -> bool:
     return action == "start" and bool(status.blocking_hms)
 
 
+def same_person(a: object, b: object, owner_name: str = "") -> bool:
+    """Two requester names mean the same person (case-insensitive); an empty name is the owner's (``owner_name``)."""
+    def key(x: object) -> str:
+        return (str(x or "").strip() or str(owner_name or "").strip()).casefold()
+    return key(a) == key(b)
+
+
 def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, plate: Optional[PlateCheck],
                in_cron: bool, own_item_ids: set[int], allow_jump: bool = False,
                voice_request: bool = False, plate_confirmed: bool = False, after_failure: bool = False,
-               plate_skipped: bool = False, plate_deferred: bool = False) -> Gate:
+               plate_skipped: bool = False, plate_deferred: bool = False,
+               requesters: Optional[Mapping[int, str]] = None, owner_name: str = "") -> Gate:
     """May queue item ``item_id`` be started now? Approval is still required (``needs_owner``).
 
-    ``own_item_ids``: queue ids of the workshop's ACTIVE jobs (queued or printing). ``plate_confirmed``: a
+    ``own_item_ids``: queue ids of the workshop's ACTIVE jobs (queued or printing). ``requesters``: who asked for
+    each of those jobs (queue id -> name; an empty name is the owner, ``owner_name``). With it, a workshop job waits
+    ahead "as ours" only when the SAME person asked for it: another household member's workshop job ahead blocks
+    (``jump``, naming them) like a job queued elsewhere, unless ``allow_jump``. Without it (None) every workshop
+    job counts as ours (older callers). ``plate_confirmed``: a
     person (the owner) confirmed the plate of the last job (``status.job_name``) is clear; after a FAILED
     job the camera alone is never enough. ``after_failure``: the store knows of a failed print nobody has
     confirmed since (``Store.unconfirmed_failure``): it blocks even when the printer no longer says FAILED
@@ -287,15 +306,22 @@ def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, p
         if not item.manual_start:
             gate.warn("not_manual", item=item.id)
         order = _order(queue)
+        who_map = {int(k): str(v or "") for k, v in (requesters or {}).items() if str(k).strip().isdigit()}
+        mine = who_map.get(item.id, "")
         for other in queue:  # anything ahead that may still print and is not ours blocks (any status case)
-            if other.id == item.id or other.is_done or other.id in own:
+            if other.id == item.id or other.is_done:
                 continue
+            who = ""
+            if other.id in own:
+                if requesters is None or same_person(who_map.get(other.id, ""), mine, owner_name):
+                    continue  # the same person's own earlier job (or no requester info: the workshop's)
+                who = who_map.get(other.id, "").strip() or str(owner_name or "").strip() or "the owner"
             if _ahead(order[other.id], order[item.id]):
                 name = other.name or f"#{other.id}"
                 if allow_jump:
-                    gate.warn("jump_allowed", name=name, other=other.id)
+                    gate.warn("jump_allowed", name=name, other=other.id, who=who)
                 else:
-                    gate.block("jump", name=name, other=other.id)
+                    gate.block("jump", name=name, other=other.id, who=who)
     if voice_request:
         gate.warn("voice")
     return gate

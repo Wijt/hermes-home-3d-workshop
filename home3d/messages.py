@@ -23,7 +23,12 @@ eject_result_follows (bool: the same message carries the camera result), missed_
 the watcher did not see the print end; the printer went on to another job / is idle again), error (the
 printer manager's error_message), action ("start" | "resume" | "clear") and who (the household member asking)
 for approval requests, asked_by (ready_next: a household member asked to start this job), awaiting_clear
-(ready_next: Bambuddy waits for the plate to be marked clear before any start).
+(ready_next: Bambuddy waits for the plate to be marked clear before any start), camera_said (ready_next: the same
+message already gives the camera's reading; confirm_said: and the "confirm the plate" line), eject_unknown ("foreign" | "unknown": a finish the workshop did not
+queue, so its eject plan is unknown) with camera_empty (bool: the camera thinks the plate is empty), stopped_by /
+stop_reason (stopped: who stopped the print and why), not_paused (approval_request resume: the printer state now,
+nothing is paused), state (online: the printer state now). ``ahead`` / ``foreign`` items may carry ``who`` (another
+household member's workshop job).
 """
 
 from __future__ import annotations
@@ -33,9 +38,12 @@ from typing import Any, Callable, Optional
 
 KINDS = ("started", "finished", "finished_ejected", "plate_not_clear", "eject_unverified", "plate_clear",
          "failed", "paused", "hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "eject_skipped",
-         "light_left_on", "approval_request", "start_failed")
+         "light_left_on", "approval_request", "start_failed", "stopped", "online")
 OWNER_ONLY = frozenset({"hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "plate_clear",
-                        "light_left_on", "approval_request", "start_failed"})
+                        "light_left_on", "approval_request", "start_failed", "stopped", "online"})
+_STATE_WORDS = {"PREPARE": ("preparing", "hazırlanıyor"), "RUNNING": ("printing", "baskıda"),
+                "PAUSE": ("paused", "duraklatıldı"), "FINISH": ("finished", "bitti"),
+                "FAILED": ("failed", "yarıda kaldı"), "IDLE": ("idle", "boşta"), "UNKNOWN": ("unknown", "bilinmiyor")}
 ERROR_MAX = 300  # owner texts quote at most this much of a printer manager's error message
 FAMILY_JOB_MAX = 40  # family texts quote at most this many characters of the request text
 AUDIENCES = ("owner", "family")
@@ -234,6 +242,11 @@ def reason_text(reason: Any, lang: str) -> str:
     return r
 
 
+def _state_word(state: Any, tr: bool) -> str:
+    st = _s(state).upper()
+    return _STATE_WORDS.get(st, (st.lower(), st.lower()))[1 if tr else 0] if st else ""
+
+
 def _link(ctx: dict) -> str:
     return _s(ctx.get("preview_url"))
 
@@ -348,6 +361,19 @@ def _o_finished(c: dict, tr: bool) -> str:
                    _temps(c, lang), _for(c, lang)])
     if c.get("missed_end"):
         return _lines(first, _missed(c, tr))
+    unknown = _s(c.get("eject_unknown"))
+    if unknown:  # not queued through the workshop: nobody here knows whether it was sliced with auto-eject
+        camera = _camera_empty(c, tr)
+        camera = camera[:1].lower() + camera[1:]
+        if tr:
+            why = "Atölye üzerinden eklenmedi" if unknown == "foreign" else "Bu baskının düşürme planı bilinmiyor"
+            second = (f"{why}; {camera}." if c.get("camera_empty")
+                      else f"{why}: parça hâlâ tablada ise alınmalı, sonra /home3d approve clear.")
+        else:
+            why = "Not queued through the workshop" if unknown == "foreign" else "No eject plan known for this print"
+            second = (f"{why}; {camera}." if c.get("camera_empty")
+                      else f"{why}: take the part off if it is still there, then /home3d approve clear.")
+        return _lines(first, second)
     if c.get("eject_planned") and c.get("eject_result_follows"):
         return first  # the camera result is the next paragraph of the same message
     if c.get("eject_planned") and c.get("eject_in_gcode"):
@@ -430,6 +456,34 @@ def _o_failed(c: dict, tr: bool) -> str:
     return _lines(first, _hms_line(c, lang), _missed(c, tr) if _s(c.get("missed_end")) == "busy" else "", tail)
 
 
+def _o_stopped(c: dict, tr: bool) -> str:
+    """A person stopped the print (home3d_stop): not a failure, but the plate still needs a look."""
+    lang = "tr" if tr else "en"
+    head = ("⏹️ Durduruldu: " if tr else "⏹️ Stopped: ") + _job_ref(c)
+    first = _join([head, pct(c.get("progress"), lang), _layer(c, lang), _for(c, lang)])
+    who, why = _s(c.get("stopped_by")), _s(c.get("stop_reason"))
+    if tr:
+        by = (f"{who} durdurdu" if who else "Biri durdurdu") + (f": {why}" if why else "") + "."
+        tail = "Arıza değil. Tablada yarım parça kalmış olabilir: temizleyip /home3d approve clear."
+    else:
+        by = (f"Stopped by {who}" if who else "Stopped on request") + (f": {why}" if why else "") + "."
+        tail = "Not a failure. A half-printed part may be on the plate: clear it, then /home3d approve clear."
+    return _lines(first, f"{by} {tail}")
+
+
+def _o_online(c: dict, tr: bool) -> str:
+    """The printer manager answers again after the owner was told it is unreachable."""
+    lang = "tr" if tr else "en"
+    mins = _int(c.get("offline_min"))
+    state = _state_word(c.get("state"), tr)
+    job = _quote(c.get("job")) if _s(c.get("state")).upper() not in ("", "IDLE") else ""
+    now = _join([state, job, pct(c.get("progress"), lang)], " ")
+    if tr:
+        return ("📶 Yazıcıya yeniden ulaşılıyor" + (f" ({mins} dakika sonra)" if mins else "")
+                + (f": {now}." if now else "."))
+    return "📶 Printer reachable again" + (f" after {mins} min" if mins else "") + (f": {now}." if now else ".")
+
+
 def _o_paused(c: dict, tr: bool) -> str:
     lang = "tr" if tr else "en"
     head = ("⏸️ Duraklatıldı: " if tr else "⏸️ Paused: ") + _job_ref(c)
@@ -473,7 +527,9 @@ def _refs(items: Any, lang: str, with_since: bool = False) -> str:
                 out.append(_s(it))
             continue
         name, qid, since = _quote(it.get("name")), _s(it.get("id")), _s(it.get("since"))
+        who = _s(it.get("who"))  # another household member's workshop job
         extra = ", ".join(x for x in (f"#{qid}" if qid else "",
+                                      (f"isteyen: {who}" if lang == "tr" else f"for {who}") if who else "",
                                       (f"eklenme {since}" if lang == "tr" else f"added {since}")
                                       if with_since and since else "") if x)
         out.append(_join([name, f"({extra})" if extra else ""], " ") or f"#{qid}")
@@ -487,22 +543,23 @@ def _o_ready_next(c: dict, tr: bool) -> str:
     ahead = _refs(c.get("ahead"), lang)
     cmd = f"/home3d approve start {nid}" + (" jump" if ahead else "") if nid else ""
     asked = _s(c.get("asked_by"))
+    camera = "" if c.get("camera_said") else f"{_camera_empty(c, tr)}. "  # said earlier in the same message
     if tr:
-        first = _join([f"▶️ {_camera_empty(c, tr)}. Sıradaki atölye işi hazır: {ref}", _for(c, lang)])
+        first = _join([f"▶️ {camera}Sıradaki atölye işi hazır: {ref}", _for(c, lang)])
         foreign = (f"Önünde atölyeden eklenmemiş iş var: {ahead}. Onları ben başlatmam; bizimkini öne almak için "
                    "komutun sonunda jump var." if ahead else "")
         asked_line = f"🙋 {asked} başlatılmasını istedi." if asked else ""
         start = (("Fotoğrafa bakıp başlatmak için: " if c.get("photo") else "Başlatmak için: ") + cmd) if cmd else ""
         clear_first = ("Bambuddy tablanın boş işaretlenmesini bekliyor: önce /home3d approve clear"
-                       if c.get("awaiting_clear") and not c.get("confirm_first") else "")
+                       if c.get("awaiting_clear") and not (c.get("confirm_first") or c.get("confirm_said")) else "")
     else:
-        first = _join([f"▶️ {_camera_empty(c, tr)}. Next workshop job ready: {ref}", _for(c, lang)])
+        first = _join([f"▶️ {camera}Next workshop job ready: {ref}", _for(c, lang)])
         foreign = (f"Ahead of it, not queued through the workshop: {ahead}. I never start those; the command below "
                    "jumps ahead of them." if ahead else "")
         asked_line = f"🙋 {asked} asked to start it." if asked else ""
         start = (("Check the photo, then start it: " if c.get("photo") else "To start it: ") + cmd) if cmd else ""
         clear_first = ("Bambuddy waits for the plate to be marked clear: first /home3d approve clear"
-                       if c.get("awaiting_clear") and not c.get("confirm_first") else "")
+                       if c.get("awaiting_clear") and not (c.get("confirm_first") or c.get("confirm_said")) else "")
     return _lines(first, foreign, _confirm_first(c, tr), asked_line, clear_first, start)
 
 
@@ -560,6 +617,12 @@ def _o_approval_request(c: dict, tr: bool) -> str:
     who = _s(c.get("who")) or _s(c.get("requester")) or ("Biri" if tr else "Someone")
     action = _s(c.get("action")) or "start"
     qid, job = _s(c.get("queue_item_id")), _quote(c.get("job"))
+    if action == "resume" and _s(c.get("not_paused")):
+        state = _state_word(c.get("not_paused"), tr)
+        if tr:
+            return (f"🙋 {who} baskının devam etmesini istedi, ama şu an duraklatılmış bir baskı yok ({state}). "
+                    "Yapılacak bir şey yok.")
+        return (f"🙋 {who} asked to resume the print, but nothing is paused now ({state}). Nothing to do.")
     if action == "resume":
         if tr:
             return (f"🙋 {who} duraklatılan baskının" + (f" ({job})" if job else "") + " devam etmesini istiyor. "
@@ -579,12 +642,11 @@ def _o_approval_request(c: dict, tr: bool) -> str:
     if tr:
         first = (f"🙋 {who} {ref} işinin başlatılmasını istiyor" if ref else f"🙋 {who} bir baskının başlatılmasını "
                  "istiyor") + (f" ({extra})" if extra else "") + "."
-        ahead_line = (f"Önünde atölyeden eklenmemiş iş var: {ahead}; komutun sonundaki jump onları atlar." if ahead
-                      else "")
+        ahead_line = (f"Önünde başkasının işi var: {ahead}; komutun sonundaki jump onları atlar." if ahead else "")
         return _lines(first, ahead_line, f"Başlatmak için: {cmd}" if cmd else "")
     first = (f"🙋 {who} asks to start {ref}" if ref else f"🙋 {who} asks to start a print") + \
         (f" ({extra})" if extra else "") + "."
-    ahead_line = f"Ahead of it, not queued through the workshop: {ahead}; jump goes ahead of them." if ahead else ""
+    ahead_line = f"Ahead of it, someone else's: {ahead}; jump goes ahead of them." if ahead else ""
     return _lines(first, ahead_line, f"To start it: {cmd}" if cmd else "")
 
 
@@ -610,6 +672,7 @@ _OWNER: dict[str, Callable[[dict, bool], str]] = {
     "failed": _o_failed, "paused": _o_paused, "hms": _o_hms, "offline": _o_offline, "ready_next": _o_ready_next,
     "queue_foreign": _o_queue_foreign, "upgrade_proposed": _o_upgrade_proposed, "eject_skipped": _o_eject_skipped,
     "light_left_on": _o_light_left_on, "approval_request": _o_approval_request, "start_failed": _o_start_failed,
+    "stopped": _o_stopped, "online": _o_online,
 }
 
 

@@ -388,3 +388,21 @@ def test_clear_gate_with_a_deferred_plate():
     g = clear_plate_gate(idle(), None, in_cron=False, cool_temp_c=30, auto_start_pending=[q(3, manual=False)],
                          plate_deferred=True)
     assert not g.ok and "auto_start_pending" in g.codes
+
+
+# ---- review round 3: another person's workshop job ahead ------------------------------------------------
+def test_r3_another_persons_workshop_job_ahead_blocks_like_a_foreign_one():
+    """S2: Mum's workshop job #1 waits ahead of Sam's #2. Starting #2 is a jump over Mum: block, naming her."""
+    queue = [q(1, position=1, name="Mum's hook"), q(2, position=2)]
+    who = {1: "Mum", 2: "Sam"}
+    g = gate(queue=queue, item=2, own={1, 2}, requesters=who, owner_name="Owner")
+    assert not g.ok and g.codes == ["jump"] and "Mum's hook (#1, for Mum)" in g.reasons[0]
+    assert "isteyen: Mum" in describe(g, "tr")
+    g = gate(queue=queue, item=2, own={1, 2}, requesters=who, owner_name="Owner", allow_jump=True)
+    assert g.ok and any("for Mum" in w for w in g.warnings)
+    # the same person's earlier job is theirs to overtake; an empty requester is the owner
+    assert gate(queue=queue, item=2, own={1, 2}, requesters={1: "sam", 2: "Sam"}).ok
+    assert gate(queue=queue, item=2, own={1, 2}, requesters={1: "", 2: "Owner"}, owner_name="Owner").ok
+    assert "jump" in gate(queue=queue, item=2, own={1, 2}, requesters={1: "", 2: "Mum"}, owner_name="Owner").codes
+    # without requester info (older callers) every workshop job is still "ours"
+    assert gate(queue=queue, item=2, own={1, 2}).ok

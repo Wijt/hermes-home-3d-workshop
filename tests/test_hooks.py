@@ -209,7 +209,7 @@ def test_after_a_failed_print_only_a_confirmed_plate_allows_a_start(rig):
     rig.be.human_clears_plate()  # the camera now says empty ...
     d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
     assert d["action"] == "block" and "approve clear" in d["message"]  # ... but that is not enough after a failure
-    rig.store.confirm_plate(st.job_name, "Owner")  # what `/home3d approve clear` records
+    rig.store.confirm_plate(st.job_name, "Owner", status=st)  # what `/home3d approve clear` records
     d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
     assert d["action"] == "approve" and "camera checks the plate right before starting" in d["message"].lower()
     assert "verified" not in d["message"].lower()
@@ -666,7 +666,7 @@ def test_the_owner_can_get_out_of_the_false_positive_band(rig, monkeypatch):
     assert d["action"] == "approve" and "NOT sure" in d["message"] and "19.9" in d["message"]
     d = rig.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")
     assert d["action"] == "block" and "Mum is not the owner" in d["message"]
-    rig.store.confirm_plate(st.job_name, "Owner")
+    rig.store.confirm_plate(st.job_name, "Owner", status=st)  # what the approved confirm records
     d = rig.pre("home3d_start", {"queue_item_id": q2}, "s-owner")
     assert d["action"] == "approve" and "owner confirmed the plate is clear" in d["message"]
     occupied = PlateCheck(is_empty=False, difference_pct=40.0, light_ok=True)
@@ -944,3 +944,45 @@ def test_the_hook_deadline_follows_a_lower_hermes_hook_timeout(monkeypatch):
     assert d["action"] == "block" and "did not answer within 0.4 s" in d["message"] and took < 1.0, (took, d)
     time.sleep(0.2)
     assert not store.peek_pass("home3d_start", "7", "s-owner")
+
+
+# ---- review round 3 ---------------------------------------------------------------------------------------
+def test_r3_the_hook_names_another_persons_workshop_job_ahead():
+    """S2: Mum's workshop job waits ahead of Sam's; the owner's start of Sam's job is blocked (jump), naming Mum."""
+    rig = Rig(language="en", household=[{"id": MUM, "name": "Mum"}, {"id": "sam-id", "name": "Sam"}])
+    mum, sam = rig.queue_job("Mum"), rig.queue_job("Sam")
+    d = rig.pre("home3d_start", {"queue_item_id": sam}, "s-owner")
+    assert d["action"] == "block" and "for Mum" in d["message"] and "/home3d approve" not in d["message"]
+    d = rig.pre("home3d_start", {"queue_item_id": sam, "allow_jump": True}, "s-owner")
+    assert d["action"] == "approve" and "for Mum" in d["message"] and "jumping ahead" in d["message"]
+    assert rig.pre("home3d_start", {"queue_item_id": mum}, "s-owner")["action"] == "approve"
+
+
+def test_r3_an_irc_nick_equal_to_the_owners_id_is_not_the_owner():
+    """S5: IRC nicks are chosen freely: a nick equal to the owner's (Slack) id never counts; only an "irc:<nick>"
+    entry names an IRC sender. Other platforms match as before."""
+    assert hooks_mod.session_sender("U02ABCDEF", "irc") == "irc:U02ABCDEF"
+    assert hooks_mod.session_sender("irc:U02ABCDEF", "slack") == "slack:irc:U02ABCDEF"  # no lookalike
+    assert hooks_mod.session_sender("U02ABCDEF", "slack") == "U02ABCDEF"
+    rig = Rig(owner_ids=["U02ABCDEF"])
+    qid = rig.queue_job()
+    rig.turn("s-irc", sender="u02abcdef", platform="irc")
+    d = rig.pre("home3d_start", {"queue_item_id": qid}, "s-irc")
+    assert d["action"] == "block" and "not in the household list" in d["message"]
+    rig.turn("s-slack", sender="U02ABCDEF", platform="slack")
+    assert rig.pre("home3d_start", {"queue_item_id": qid}, "s-slack")["action"] == "approve"
+    rig2 = Rig(owner_ids=["irc:SamNick"])
+    rig2.turn("s-irc", sender="samnick", platform="irc")
+    assert rig2.pre("home3d_start", {"queue_item_id": rig2.queue_job()}, "s-irc")["action"] == "approve"
+
+
+def test_r3_a_longer_watch_interval_does_not_make_the_watcher_look_off():
+    """R3-ROB-2 / J3-6: with watch_interval 15m, a pass 11 minutes ago is a running watcher (3 intervals)."""
+    rig = Rig(watch_interval="15m", language="en")
+    rig.store.kv_set("watcher", {"state": "IDLE", "updated": time.time() - 11 * 60})
+    assert hooks_mod.watcher_fresh(rig.store, rig.rt.settings)
+    assert not hooks_mod.watcher_fresh(rig.store, settings())  # 2m: stale after 10 min
+    assert hooks_mod.watcher_stale_s(settings(watch_interval="every 20m")) == 3600
+    assert hooks_mod.watcher_stale_s(settings(watch_interval="*/5 * * * *")) == hooks_mod.WATCHER_STALE_S
+    d = rig.pre("home3d_start", {"queue_item_id": rig.queue_job()}, "s-mum")
+    assert "watcher is off" not in d["message"] and "next watcher pass (about 15 min)" in d["message"]

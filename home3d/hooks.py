@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .backends.base import BackendError
-from .config import LOCAL_SENDER, norm_id
+from .config import LOCAL_SENDER, norm_id, scoped_sender
 from .gates import Gate, clear_plate_gate, describe, person_can_overrule, printer_blocks, resume_gate, start_gate
 
 logger = logging.getLogger(__name__)
@@ -171,8 +171,9 @@ def is_local_platform(platform: Any) -> bool:
 
 def session_sender(sender_id: Any, platform: Any) -> str:
     """The sender to record for a turn: ``LOCAL_SENDER`` for a local surface without a messaging identity (or the
-    gateway-hosted CLI's ``uid:<n>``), '' when unknown, else the raw id. A messaging id that is literally "local"
-    is quarantined (``<platform>:local``) so it can never pass as the local owner."""
+    gateway-hosted CLI's ``uid:<n>``), '' when unknown, else the raw id (``"irc:<nick>"`` on a platform whose ids the
+    sender chooses, ``config.scoped_sender``). A messaging id that is literally "local" is quarantined
+    (``<platform>:local``) so it can never pass as the local owner."""
     raw = str(sender_id or "").strip()
     plat = str(getattr(platform, "value", platform) or "").strip().lower()
     local = plat in LOCAL_PLATFORMS
@@ -182,7 +183,7 @@ def session_sender(sender_id: Any, platform: Any) -> str:
         return LOCAL_SENDER
     if norm_id(raw) == LOCAL_SENDER:
         return f"{plat or 'unknown'}:{raw}"
-    return raw
+    return scoped_sender(raw, plat)  # "irc:<nick>": a freely chosen id only matches an entry scoped the same way
 
 
 def _minutes(seconds: Any) -> str:
@@ -212,14 +213,36 @@ def _pretty(name: str) -> str:
     return name
 
 
-def watcher_fresh(store) -> bool:
-    """The zero-token watcher ran a pass in the last ``WATCHER_STALE_S``."""
+_INTERVAL = re.compile(r"\s*(?:every\s+)?(\d+)\s*([smhd]?)\w*\s*", re.IGNORECASE)
+
+
+def interval_seconds(interval: Any) -> Optional[float]:
+    """'2m' -> 120, '90s' -> 90, '1h' -> 3600, 'every 15m' -> 900, '15' -> 900 (minutes); None when it is not a
+    plain interval (e.g. a cron expression)."""
+    m = _INTERVAL.fullmatch(str(interval or "2m"))
+    if not m:
+        return None
+    return float(int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[(m.group(2) or "m").lower()])
+
+
+def watcher_stale_s(settings: Any = None) -> float:
+    """After how long without a pass the watcher counts as not running: ``WATCHER_STALE_S`` (10 min), or three
+    watch intervals when ``watch_interval`` is longer (a 15-minute watcher is not "off" 11 minutes after a pass)."""
+    try:
+        sec = interval_seconds(getattr(settings, "watch_interval", None)) if settings is not None else None
+    except Exception:
+        sec = None
+    return max(float(WATCHER_STALE_S), 3.0 * sec) if sec else float(WATCHER_STALE_S)
+
+
+def watcher_fresh(store, settings: Any = None) -> bool:
+    """The zero-token watcher ran a pass in the last ``watcher_stale_s(settings)``."""
     try:
         w = store.kv_get("watcher") or {}
         updated = w.get("updated") if isinstance(w, dict) else None
         if not isinstance(updated, (int, float)):
             updated = store.kv_updated("watcher")
-        return isinstance(updated, (int, float)) and 0 <= time.time() - float(updated) < WATCHER_STALE_S
+        return isinstance(updated, (int, float)) and 0 <= time.time() - float(updated) < watcher_stale_s(settings)
     except Exception:
         return False
 
@@ -349,8 +372,9 @@ def _gate(rt, ev: Evaluation, *, in_hook: bool = False) -> None:
         return
     req = store.request_for_queue_item(ev.qid)
     gate = start_gate(status, queue, ev.qid, plate=plate, in_cron=in_cron, own_item_ids=store.active_job_ids(),
+                      requesters=store.active_job_requesters(), owner_name=s.owner_name,
                       allow_jump=ev.jump, voice_request=bool(req and req.get("channel") == "voice"),
-                      plate_confirmed=store.plate_confirmed(status.job_name),
+                      plate_confirmed=store.plate_confirmed(status.job_name, status=status),
                       after_failure=_after_failure(store), plate_skipped=skipped, plate_deferred=deferred)
     ev.gate, ev.ok = gate, gate.ok
     if gate.ok:
@@ -501,7 +525,7 @@ class _Hooks:
         chat = bool(str(self.rt.settings.owner_target or "").strip())  # where the watcher sends owner notices
         if announced and chat:
             return f"{owner} already got this request from the watcher; tell {who} it is up to {owner} now."
-        fresh = watcher_fresh(store)
+        fresh = watcher_fresh(store, self.rt.settings)
         if fresh and chat:
             return (f"{owner} gets this request on the next watcher pass (about "
                     f"{_interval_text(self.rt.settings.watch_interval)}); tell {who} you passed it on.")
@@ -553,7 +577,7 @@ class _Hooks:
             speaker = "Speaking: someone not in the household list (no approvals; ask who they are if needed)."
         else:
             speaker = "Speaking: unknown sender (no approvals)."
-        printer, state_key = self._printer_state(store)
+        printer, state_key = self._printer_state(store, watcher_stale_s(s))
         key = session_id or "-"
         changed = self._printer_line.get(key) != state_key
         self._printer_line[key] = state_key
@@ -581,7 +605,7 @@ class _Hooks:
         return text if len(text) <= CONTEXT_MAX else text[: CONTEXT_MAX - 1].rstrip() + "…"
 
     @staticmethod
-    def _printer_state(store) -> tuple[str, str]:
+    def _printer_state(store, stale_s: float = WATCHER_STALE_S) -> tuple[str, str]:
         """(one line for the model, a key that changes only when the state/job/plate phase changes)."""
         w = store.kv_get("watcher") or {}
         if not isinstance(w, dict) or not w.get("state"):
@@ -599,7 +623,7 @@ class _Hooks:
         phase = plate.get("phase") if plate else ""
         when = f"{round(age / 60)} min ago" if age is not None else "time unknown"
         line = f"Printer ({when}): " + " ".join(bits) + (f"; plate: {phase}" if phase and phase != "idle" else "")
-        if age is None or age > WATCHER_STALE_S:
+        if age is None or age > stale_s:
             line += " (stale: check home3d_status)"
         return line + ".", f"{w.get('state')}|{w.get('job_name')}|{phase}"
 
@@ -690,6 +714,7 @@ def make_hooks(rt) -> dict[str, Callable]:
 
 __all__ = ["make_hooks", "gated_action", "approve_command", "approval_target", "evaluate", "Evaluation",
            "hms_ack_detail", "acked_codes", "HMS_ACK_PREFIX", "bounded_backend", "watcher_fresh",
+           "watcher_stale_s", "interval_seconds",
            "HOOK_DEADLINE_S", "HOOK_REQUEST_TIMEOUT_S", "HOOK_PLATE_MAX_AGE_S", "HOOK_TIMEOUT_SHARE",
            "hook_deadline_s", "deadline_for",
            "session_sender", "is_local_platform", "APPROVAL_MARKER", "APPROVAL_TTL_S", "PASS_TTL_S", "GATED_TOOLS",

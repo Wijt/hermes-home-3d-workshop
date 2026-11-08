@@ -35,6 +35,10 @@ SOURCE_CONFIG, SOURCE_SNAPSHOT, SOURCE_DEFAULTS = "config.yaml", "snapshot", "de
 # is ``local_is_owner``. A messaging user whose id happens to be "local" is never recorded as this value (hooks.py).
 LOCAL_SENDER = "local"
 INJECT_MODES = ("auto", "always", "never")
+# Hermes platforms whose user id the sender chooses freely (an IRC nick, an ntfy topic). A sender from there is
+# recorded as "<platform>:<id>" (``scoped_sender``), so only a household entry written the same way ("irc:<nick>")
+# matches it: a bare id (e.g. the owner's Slack or WhatsApp id) never makes an IRC user the owner.
+USER_CHOSEN_ID_PLATFORMS = frozenset({"irc", "ntfy"})
 HERMES_HOOK_TIMEOUT_S = 30.0  # Hermes 0.22.5's default plugins.hook_callback_timeout
 
 _WA_ID = re.compile(r"^\+?(\d+)(?::\d+)?@(?:s\.whatsapp\.net|c\.us)$")
@@ -61,6 +65,22 @@ def norm_id(sender_id: object) -> str:
 
 
 _norm = norm_id
+
+
+def scoped_sender(sender_id: object, platform: object) -> str:
+    """The sender id to record for a MESSAGING platform: ``"<platform>:<id>"`` on a platform whose ids the sender
+    chooses (``USER_CHOSEN_ID_PLATFORMS``), else the raw id. A raw id from any other platform that already looks like
+    such a scoped id (``"irc:..."``) is quarantined as ``"<platform>:<id>"`` so it can never pass for one."""
+    raw = str(sender_id if sender_id is not None else "").strip()
+    plat = str(getattr(platform, "value", platform) or "").strip().lower()
+    if not raw:
+        return ""
+    if plat in USER_CHOSEN_ID_PLATFORMS:
+        return f"{plat}:{raw}"
+    low = raw.lower()
+    if any(low.startswith(p + ":") for p in USER_CHOSEN_ID_PLATFORMS):
+        return f"{plat or 'unknown'}:{raw}"
+    return raw
 
 
 @dataclass
