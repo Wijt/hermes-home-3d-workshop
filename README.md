@@ -54,12 +54,14 @@ The plugin is new. This table shows what is verified, and where.
 |---|---|---|
 | Read printer status, queue and plate check (HTTP GET only) | Verified | Verified |
 | Plate check with the chamber light switched on and back (`chamber-light` POST) | Planned | Verified (fake HTTP) |
-| MakerWorld import, scale, slice, add to queue | Planned | Verified |
+| MakerWorld cards, import, slice with the auto-eject preset (G-code check: height, footprint, eject block) | Verified | Verified |
+| Scale a model, add to queue | Planned | Verified |
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
 | Auto-eject push on the tilted base | Real in the original setup; with this plugin: planned | Simulated |
 
-`hermes plugins validate . --install-deps` passes on Hermes 0.22.5. The real-hardware loop with this
+`hermes plugins validate . --install-deps` passes on Hermes 0.22.5 (also in CI), and
+`hermes plugins install Wijt/hermes-home-3d-workshop` installs it. The real-hardware loop with this
 plugin is **planned, not done**. The family uses the printer every
 day, so we test on it only when no family job waits.
 
