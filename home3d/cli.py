@@ -408,9 +408,11 @@ def _cmd_doctor(rt, args) -> int:
                 add("warn", "plate check", str(e))
 
     _doctor_watcher(rt, binary, add)
-    from .plugin import SKILL_PATH as skill
+    _doctor_openscad(add)
+    from .plugin import SKILLS
 
-    add("ok" if skill.is_file() else "FAIL", "skill", str(skill))
+    for i, (name, path, _desc) in enumerate(SKILLS):
+        add("ok" if path.is_file() else "FAIL", "skill" if i == 0 else f"skill {name}", str(path))
 
     width = max(len(r[1]) for r in rows)
     for level, label, detail in rows:
@@ -418,6 +420,30 @@ def _cmd_doctor(rt, args) -> int:
     fails = sum(1 for r in rows if r[0] == "FAIL")
     print("ready." if not fails else f"{fails} problem(s) to fix.")
     return 1 if fails else 0
+
+
+OPENSCAD_MISSING = "not found: the agent cannot design new parts (install openscad, and xvfb for previews)"
+
+
+def _doctor_openscad(add) -> None:
+    """OpenSCAD for home3d_design (and the two templates); previews need a display or xvfb-run."""
+    from . import design
+
+    try:
+        st = design.openscad_status()
+    except Exception as e:  # doctor never dies on a probe
+        add("warn", "openscad", f"cannot check: {e}")
+        return
+    if not st["openscad"]:
+        add("warn", "openscad", OPENSCAD_MISSING)
+        return
+    version = st["version"] or "unknown version"
+    if st["previews"]:
+        how = " (xvfb-run)" if design._needs_xvfb() else ""
+        add("ok", "openscad", f"{version} · {st['openscad']} · previews on{how}")
+    else:
+        add("warn", "openscad", f"{version} · previews off: install xvfb (xvfb-run) so the agent can look at its "
+                                "designs")
 
 
 SCHEDULER_DOWN = ("installed, but the Hermes scheduler is not running: start `hermes gateway` "

@@ -518,3 +518,46 @@ def test_doctor_warns_about_a_low_hermes_hook_timeout(tmp_path, monkeypatch, cap
     fake._resolve_hook_callback_timeout = lambda: 0.0  # inside Hermes its own resolver wins
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake)
     assert re.search(r"\[  ok\] hook timeout\s+plugins.hook_callback_timeout is off", _doctor(_rt(), capsys))
+
+
+# ---- round 4: AI modelling (OpenSCAD) ---------------------------------------------------------------------------
+def test_doctor_reports_openscad_and_previews(tmp_path, monkeypatch, capsys):
+    from home3d_ws.home3d import design
+
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    status = {"openscad": None, "version": "", "xvfb": None, "previews": False}
+    monkeypatch.setattr(design, "openscad_status", lambda: dict(status))
+    out = _doctor(_rt(), capsys)
+    assert re.search(r"\[warn\] openscad\s+not found: the agent cannot design new parts \(install openscad, and xvfb "
+                     r"for previews\)", out), out
+    status.update(openscad="/usr/bin/openscad", version="2021.01", xvfb="/usr/bin/xvfb-run", previews=True)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(design.sys, "platform", "linux")
+    assert re.search(r"\[  ok\] openscad\s+2021.01 · /usr/bin/openscad · previews on \(xvfb-run\)", _doctor(_rt(), capsys))
+    status.update(xvfb=None, previews=False)
+    assert re.search(r"\[warn\] openscad\s+2021.01 · previews off: install xvfb", _doctor(_rt(), capsys))
+
+    def boom():
+        raise OSError("probe failed")
+
+    monkeypatch.setattr(design, "openscad_status", boom)
+    assert re.search(r"\[warn\] openscad\s+cannot check: probe failed", _doctor(_rt(), capsys))
+
+
+def test_doctor_checks_both_bundled_skills(tmp_path, monkeypatch, capsys):
+    from home3d_ws.home3d import plugin
+
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    out = _doctor(_rt(), capsys)
+    assert re.search(r"\[  ok\] skill\s+.*household-printing/SKILL.md", out)
+    assert re.search(r"\[  ok\] skill parametric-design\s+.*parametric-design/SKILL.md", out)
+    monkeypatch.setattr(plugin, "SKILLS", plugin.SKILLS[:1] + (("parametric-design", tmp_path / "SKILL.md", ""),))
+    assert re.search(r"\[FAIL\] skill parametric-design", _doctor(_rt(), capsys))
+
+
+def test_ci_renders_with_the_real_openscad():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci.split("\n  openscad:\n", 1)[1].split("\n  hermes-validate:\n", 1)[0]
+    assert "runs-on: ubuntu-24.04" in job and "sudo apt-get install -y openscad xvfb" in job  # pinned image
+    assert 'grep -q "version 2021.01"' in job  # the docs say "OpenSCAD 2021.01": the job proves it
+    assert 'HOME3D_REQUIRE_OPENSCAD: "1"' in job and "tests/test_design.py -k real_openscad" in job

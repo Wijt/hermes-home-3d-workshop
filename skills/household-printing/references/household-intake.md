@@ -58,12 +58,30 @@ unanswered voice note usually comes back as another voice note.
   12 x 10 x 5?" Scale only after a yes. `target_size_mm` sets the largest side.
 - "Width" is the dimension along the front face (the side with the opening or thumb notch), not
   necessarily the longest side.
-- Scaling a box also thickens its walls. If only the inside must grow, say so; that may need design work.
+- Scaling a box also thickens its walls. If only the inside must grow, say so: that is a design change
+  (skill `home-3d-workshop:parametric-design`).
 - Lids, snap fits, hinges and threads stop fitting when scaled, even on one axis. The tool asks for
-  `confirm_mechanism`; ask the requester, and offer a different profile or the owner's help instead.
+  `confirm_mechanism`; ask the requester, and offer a different profile, a designed version, or the
+  owner's help instead.
 - Below about half size, thin parts get weak; the tool warns. Above the 256 mm bed: a profile that fits,
-  or a split into parts (design work).
+  or a design split into parts that each fit.
 - "The big one", "same as last time": find the earlier job (`home3d_household action=history`) and match it.
+
+## When to design instead of search
+Search MakerWorld first: a ready model has been printed and tested by many people. Design a part
+(skill `home-3d-workshop:parametric-design`) when:
+- nothing fits after a real search (wrong size, wrong mechanism, fit or breakage complaints), or the
+  import fails and the shape is simple (box, holder, stand, hook, tray, spacer);
+- it must fit something the household owns: this phone with its case, this tube, this shelf edge, the
+  rail of a toy track;
+- it replaces or repairs a broken piece (a photo with a coin, plus one caliper reading);
+- the change is more than a scale: a longer slot, a thicker wall, a cable hole, a name on a round box.
+
+Ask before you design ("nothing ready fits; shall I draw one? I need the width of your phone with its
+case"). Ask for everything that blocks in one message. A person who measured for you is a
+human-needed moment: `home3d_human_needed action=log kind=measure`. The family decides from the
+design's picture and its size in cm, never from code. For a part that must fit, offer a short test
+print of just the fitting feature first.
 
 ## Personalised names
 - Get the name in writing, in capitals, and spell it back. Watch special letters (Turkish I/İ, Ş, Ğ, Ç, Ö,
@@ -72,6 +90,8 @@ unanswered voice note usually comes back as another voice note.
 - Simple items: `home3d_customize template=name_tag params={"text": "SAM"}` (key-ring tag) or
   `template=label_box params={"text": "TOYS", "width": 80}` (box with a raised label). Long names shrink
   the font to fit.
+- A name on a round box, on a part you design, or as a glue-on strip for something already printed:
+  `parametric-design`, `references/curved-text.md`.
 - Show a picture first (the render or the slice preview) and wait for approval. Re-render whenever the
   text or colours change.
 

@@ -13,8 +13,9 @@ metadata:
 # Household 3D printing
 
 The household talks to one character, not to a slicer or a printer. A family member asks in plain words,
-often as a voice note. You find or adapt a model, slice it and queue it. The owner decides when it starts,
-and the zero-token watcher reports the rest. Nobody in the house needs to know CAD, slicers or printer menus.
+often as a voice note. You find, adapt or design a model, slice it and queue it. The owner decides when
+it starts, and the zero-token watcher reports the rest. Nobody in the house needs to know CAD, slicers or
+printer menus.
 Safety lives in the `home3d_*` tools and hooks; this skill is how to behave around them.
 
 Deeper notes live in `references/` (load with `skill_view` and `file_path='references/<file>.md'`).
@@ -60,7 +61,11 @@ One short line to the requester per step that matters, not per tool call.
    size, colour, who it is for.
 3. **Ready models first.** Web search `site:makerworld.com <English keywords>`, including purpose words
    ("makeup brush holder", not just "holder"). Pass up to 6 links or ids to `home3d_find_models`.
-   Designing from scratch is the last resort, and you ask before doing it.
+   **Design it instead** (skill `home-3d-workshop:parametric-design`) when nothing fits after a real
+   search, when the import fails and the shape is simple, when the part is personal or measured (fits
+   this phone, this shelf edge, replaces a broken piece), or when it must fit something the household
+   owns. Ask first ("nothing ready fits; shall I draw one?"). A designed part comes back at step 7
+   through `home3d_design action=upload version=<the version they approved>`.
 4. **Offer 2-4 options.** Cover picture, title, print time, size when known, licence in plain words. Skip
    models with fit or breakage complaints. Let them choose. Only when they say "just pick one", choose the
    best fit (A1 profile, many prints, matches the goal) and say why (`references/makerworld.md`).
@@ -72,6 +77,8 @@ One short line to the requester per step that matters, not per tool call.
    12 x 10 x 5?"), wait for yes, then `home3d_customize` with `scale` or `target_size_mm`. Lids, threads,
    snaps and hinges stop fitting when scaled: the tool asks for `confirm_mechanism`, so ask the requester
    first. Names: `template=name_tag` or `label_box`, `params={"text": ...}`, the name confirmed in writing.
+   Anything a scale or these two templates cannot do (a longer slot, a thicker wall, a cable hole, a
+   name on a round box): design it (`parametric-design`).
 7. **Slice.** `home3d_slice library_file_id=<id> quality=<draft|standard|fine> material=PLA colour=<colour>
    eject=auto request_id=<id>`. Draft for functional parts, fine for display pieces
    (`references/printing-rules.md`). `eject=auto` pushes the part off only when that is safe
@@ -245,5 +252,7 @@ loop: notice the human step, research, fabricate the fix, change the procedure.
 - `references/auto-eject.md`: eligibility, the push procedure, tilt base, verification, failure modes.
 - `references/makerworld.md`: finding models, licences, instance vs profile ids, import failures.
 - `references/household-intake.md`: voice notes, photos with a coin for scale, reels and links,
-  measuring, personalised names.
+  measuring, when to design instead of search, personalised names.
 - `references/notifications.md`: owner vs family tone with tr + en examples, what the watcher already sends.
+- Skill `home-3d-workshop:parametric-design`: design a part in OpenSCAD with `home3d_design` (write,
+  render, look at the previews, iterate in versions, upload for slicing).

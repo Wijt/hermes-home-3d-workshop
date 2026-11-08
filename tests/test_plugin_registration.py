@@ -109,11 +109,32 @@ def test_cli_command(ctx):
     assert args.func(args) == 2  # no subcommand: usage
 
 
-def test_skill_registered_with_existing_file(ctx):
-    (skill,) = ctx.skills
-    assert skill["name"] == "household-printing" and skill["description"]
-    assert skill["path"] == ROOT / "skills" / "household-printing" / "SKILL.md"
-    assert skill["path"].is_file(), "bundled SKILL.md is missing"
+def test_skills_registered_with_existing_files(ctx):
+    household, designer = ctx.skills
+    assert household["name"] == "household-printing" and household["description"]
+    assert household["path"] == ROOT / "skills" / "household-printing" / "SKILL.md"
+    assert designer["name"] == "parametric-design"
+    assert designer["description"] == "Design printable parts in OpenSCAD: parametric code, render, look, iterate."
+    assert designer["path"] == ROOT / "skills" / "parametric-design" / "SKILL.md"
+    for skill in ctx.skills:  # folder name = skill name (Hermes skill lint)
+        assert skill["path"].parent.name == skill["name"]
+        assert skill["path"].is_file(), f"bundled {skill['name']}/SKILL.md is missing"
+
+
+def test_a_missing_skill_does_not_take_the_tools_down(monkeypatch, tmp_path):
+    """Hermes' register_skill raises FileNotFoundError for a missing SKILL.md: the plugin logs it and goes on."""
+    class StrictCtx(RecordingCtx):
+        def register_skill(self, name, path, description="", frontmatter=None):
+            if not Path(path).exists():
+                raise FileNotFoundError(f"SKILL.md not found at {path}")
+            super().register_skill(name, path, description, frontmatter)
+
+    monkeypatch.setattr(plugin_mod, "SKILLS", ((plugin_mod.SKILL_NAME, tmp_path / "nope" / "SKILL.md", "x"),
+                                               (plugin_mod.DESIGN_SKILL_NAME, plugin_mod.SKILL_PATH, "y")))
+    c = StrictCtx()
+    plugin_mod.register_all(c)
+    assert [s["name"] for s in c.skills] == ["parametric-design"]
+    assert "home3d_design" in [t["name"] for t in c.tools] and len(c.tools) == len(manifest_list("provides_tools"))
 
 
 def test_descriptions_first_sentence_is_short(ctx):

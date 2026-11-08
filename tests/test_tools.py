@@ -983,3 +983,23 @@ def test_r3_confirm_records_the_failed_print_it_was_made_on(rt, be):
     later(rt)
     out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["ok"] is False and "after_failure" in out["codes"] and not be.called("start")
+
+
+# ---- round 4: home3d_design ---------------------------------------------------------------------------------
+def test_design_is_not_gated_and_its_audit_never_stores_the_code(rt, monkeypatch, tmp_path):
+    """Designing runs on local CPU and files (like scale/import): no approval pass. The post_tool_call audit keeps
+    the action and the design name, never the source."""
+    from home3d_ws.home3d import hooks
+
+    assert "home3d_design" not in hooks.GATED_TOOLS
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))  # no OpenSCAD on this machine
+    secret = "cube(1); // " + "x" * 50
+    out = call(rt, "home3d_design", {"action": "render", "name": "Pen Cup", "scad": secret})
+    assert out["ok"] is False and out["code"] == "no_openscad"
+    listed = call(rt, "home3d_design", {"action": "list"})
+    assert listed["ok"] is True and listed["designs"] == [] and listed["openscad"] is None
+    h = hooks.make_hooks(rt)
+    h["post_tool_call"](tool_name="home3d_design", args={"action": "render", "name": "Pen Cup", "scad": secret},
+                        result=json.dumps({"ok": True, "name": "pen-cup", "version": 1}), session_id="s-mum")
+    events = [e for e in rt.store.events(limit=20) if e.get("kind") == "tool"]
+    assert events and "x" * 50 not in json.dumps(events)

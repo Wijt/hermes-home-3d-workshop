@@ -643,3 +643,118 @@ and a catalog reviewer. Decisions R2-1 to R2-9. Each item names the finding ids.
   announces a start; orientation/supports come from profiles; this layering note; the `language` default
   upgrade note).
 
+## Round 4: AI modelling (OpenSCAD)
+
+The owner's goal: the agent must be able to model, not only scale a model or fill two templates. It writes
+parametric OpenSCAD, renders it, looks at the preview, iterates in versions, and sends the result into the
+existing upload -> slice -> queue flow. OpenSCAD 2021.01 and `xvfb-run` are optional system tools; the
+plugin stays stdlib only.
+
+### `home3d/design.py`
+- `designs_dir()` = `data_dir() / "designs"`, one folder per design slug: `<slug>_vN.scad`, `<slug>_vN.stl`,
+  `<slug>_vN_<view>.png`, `<slug>_vN.json` (facts). Versions are never overwritten (N = highest + 1), so
+  "the first one was right" is a `get` away.
+- `slugify(name)`: Turkish letters transliterated (ç ğ ı İ ö ş ü -> c g i i o s u), lower case,
+  `[a-z0-9-]`, at most 40 characters, never empty (`design`).
+- `check_source(text) -> list[str]`: refuse to render when not empty. At most 200 000 bytes; every
+  `include <...>`, `use <...>`, `import("...")` and `surface("...")` path relative, without `..`, not
+  starting with `/` or `~`, and inside the design folder (`fonts/X.ttf` is fine). OpenSCAD has no shell or
+  network; files are its only way out. `params` go only through `-D name=value` (names
+  `^[A-Za-z_][A-Za-z0-9_]*$`; numbers, bools or strings of at most 200 characters, quoted like
+  `customize._scad_literal`).
+- `render(name, scad=None, *, from_version=None, params=None, views=("iso", "top"), part=None,
+  timeout_s=180)`: writes the new version's source (from `scad`, or copied from `from_version` for a
+  params-only tweak) and runs `openscad -o vN.stl [-D ...] vN.scad` in a new session, with a timeout
+  (default 180 s, at most 600) that kills the whole process group, a memory cap (`RLIMIT_AS` about 4 GiB)
+  on POSIX, and one render at a time per process. It parses `ERROR` (ok false, first error and line),
+  `WARNING`, the first 20 `ECHO:` lines, failed `assert`s, `Simple: yes|no` and `Volumes: N`; then the STL
+  facts: bounding box, triangles, volume (signed tetrahedra; ASCII and binary STL), a solid-weight upper
+  bound at PLA 1.24 g/cm3 (the slicer gives the real grams), `fits_build_volume` (the customise build
+  volume) and `bodies` = Volumes - 1. Previews render a small `color("SteelBlue") import("vN.stl")` wrapper
+  (no second CGAL pass), with `xvfb-run -a` when there is no display: iso `--camera=0,0,0,55,0,25,0`, top,
+  front and side orthographic, all `--autocenter --viewall --imgsize=900,700`. A failed preview is a
+  warning, never an error.
+- `list_designs(limit=20)`, `load_version(slug, version=None)` (source + facts), `openscad_status()`
+  (`openscad` path, version, `xvfb` path, previews on or off).
+
+### Tool `home3d_design`
+"Design a 3D-printable part in OpenSCAD: write parametric .scad code, render it to STL with preview
+images, iterate in versions, then upload it for slicing." Actions: `render` (name, scad or from_version,
+params, views, part, request_id), `get` (name, version), `list`, `upload` (name, version ->
+`backend.upload_file` -> library_file_id; kv `design_lib:<id>` = {slug, version}; attached to request_id
+when given; `next`: `home3d_slice library_file_id=...`). A render returns ok, name, version, size_mm,
+volume_cm3, est_grams_max, triangles, simple, bodies, fits_build_volume, warnings, echo, previews, media
+(`MEDIA:` lines), scad_path, stl_path, render_s and a `next` hint (look at the previews yourself; send the
+person one picture and the size in cm; upload on their OK). Without OpenSCAD: ok false, code
+`no_openscad`. Not gated: local CPU and files, and an upload writes the library like import and scale do.
+`home3d_customize` keeps the two ready templates. `hermes home3d doctor` has an `openscad` row (version,
+previews on or off; WARN "the agent cannot design new parts" when it is missing).
+
+### Skill `skills/parametric-design/`
+Registered as `home-3d-workshop:parametric-design`. Built from the original household's OpenSCAD skill,
+rewritten for `home3d_design`, anonymised and trimmed to household FDM parts (furniture, outdoor
+structures, mesh remixing and image stencils dropped). It keeps the lessons that cost real prints:
+parameters first with units, section order, asserts and echo, `text()` lying in XY, overlapping cutters,
+`layout_gap`, press-fit pockets instead of pause-and-insert, fits, hull over minkowski, teardrop and
+45-degree tops, "width" = the front face, cable exits on all four sides of a dock, a closed underside for
+tall parts, print orientation decided before the first picture, flat cut at the widest section vs tilt
+and tree supports, versions for roll-back, two readings for vague feedback, mirror = flip the offset
+only, looking at the preview before sending it, and the two audiences (family: one picture, the size in
+cm, at most three questions; owner: numbers, code on request). References: `openscad-syntax.md`,
+`fdm-design-rules.md`, `photo-measurement.md`, `curved-text.md`, `response-format.md`; worked example
+`templates/phone-dock.scad` (a dock with a fit-test part). Every snippet and the example render with
+OpenSCAD 2021.01. `household-printing` (SKILL.md step 3 and 6, `references/household-intake.md`) says when
+to design instead of search and hands off to this skill.
+
+### Tests and CI
+`tests/test_design.py` runs against a fake `openscad` on `PATH` (versions, parsing, refusals, timeout kill,
+params, upload on the simulator, a handler that never raises), plus real-OpenSCAD tests that are skipped
+when `openscad` is missing (both templates and one sample design: bounding box, `Simple: yes`, a PNG when
+`xvfb-run` exists). A CI job on ubuntu-24.04 installs `openscad` and `xvfb` and runs them.
+
+### Round 4 review fixes (security, honest facts, the designer's five parts)
+A security review, a skill review and a designer who built five household parts with the real OpenSCAD
+2021.01 found these; each code fix has a regression test (fake and real OpenSCAD).
+- **Files outside the design folder (H1-H3, L5).** OpenSCAD reads a DXF given as a positional string to
+  `linear_extrude`/`rotate_extrude`/`dxf_*_extrude`, evaluates the whole expression after a first string
+  literal (`import("a.stl" == "" ? "a.stl" : "/x.stl")`), still accepts the old `filename=`, reads
+  `include <...>` paths as raw text (a `"` or `/*` in one hid the code after it from the old masking), and
+  searches its library path. Two guards now: `check_source` lexes like OpenSCAD (include/use paths first,
+  then strings, then comments), checks positional extrude strings and `filename=`, demands exactly one
+  string literal before `,` or `)`, and allows only `[\w./ +-]` in file names; and every render passes
+  `-d .<slug>_vN.deps`, whose list of files OpenSCAD really read must stay inside the design folder or
+  OpenSCAD's own library folders (`OPENSCADPATH` is not passed on). Anything else, or a missing list after a
+  successful run, fails the version closed (`code: refused`; no STL, previews, echo, warnings or error
+  text). This also catches a path that arrives only in a `-D` param, which no static check can see.
+- **Limits (M1, M2, L1).** `RLIMIT_CPU` = time limit + 5 s (hard + 5 more) stops an OpenSCAD whose parent
+  died (SIGXCPU reads as a timeout); a Ctrl-C or other exception in the caller stops the process group too.
+  The STL is binary (`--export-format binstl`, about 4x smaller), `RLIMIT_FSIZE` is 120 MB (SIGXFSZ ->
+  `code: too_big`), more than 2 M triangles is refused before parsing, bodies are counted only up to 600 k
+  triangles and a `MemoryError` never leaves an STL without facts. A timeout sends SIGTERM to the group,
+  then SIGKILL after 2 s, so Xvfb removes its lock and socket; `xvfb-run -f` keeps the X cookie in the
+  design folder (deleted afterwards) instead of a `/tmp/xvfb-run.*` folder. Previews get at least 15 s.
+- **Which version is uploaded (M3, T4).** Design names are shared between chats, so `upload` without
+  `version` works only when exactly one whole-design version rendered; otherwise it is `bad_args` with the
+  list of versions (part and size). The render's `next` names the exact `version=N`.
+- **Honest facts (T1, T2, T6, L3, L7).** Warnings that mean OpenSCAD skipped code (`Ignoring unknown
+  variable/module/function`, `Unable to convert`, `Mixing 2D and 3D`, `Ignoring 2D/3D child`, `undefined
+  operation`) go to `suspect`, and `next` says to fix them before showing or uploading (upload repeats
+  them as a warning). An inside-out mesh (negative signed volume) sets `inverted` and a warning. An echo of
+  one string loses its quotes; `min_z_mm` is never `-0.0`. A failed preview reads xvfb-run's stdout (where
+  OpenSCAD's stderr goes). A dead `DISPLAY` falls back to `xvfb-run` once and for the rest of the process;
+  without pictures `next` says to describe the size from the numbers.
+- **Views (T3).** `top`, `front` and `side` are flat outlines: they hide relief, text, pockets and
+  compartments. New: `plan` (`--projection=o --camera=0,0,0,25,0,0,0`, the top tilted 25 degrees) and
+  `bottom` (`--camera=0,0,0,235,0,-30,0`, the bed face). The defaults stay `iso` and `top`.
+- **Slicing a multi-part design (T5).** `home3d_slice` reads `design_lib:<id>`; with more than one body and
+  `eject=auto` it does not plan the push ("several separate parts"). `eject=on` still forces it.
+- **Smaller (L2, L4).** Meta writes use a temp name per process and thread, and `record_upload` holds a
+  lock plus `flock`, so two uploads never lose an id or break the JSON. A huge integer param is `bad_args`.
+- **CI (L6).** The `openscad` job runs on ubuntu-24.04, asserts `openscad --version` is 2021.01, and the
+  real-OpenSCAD tests include the hostile probes (sentinel STL 31 x 41 x 59, DXF, PNG and .scad outside the
+  folder: each refused, the `-D` path too).
+- **Skill.** Echo before the asserts, asserts with a small slack, triangle faces for sweeps (a quad sweep
+  can break CGAL in a union), baseline-aligned letters on curved strips (DejaVu Sans Bold capitals are about
+  `size` tall), size in use vs as printed, a never-uploaded `display` part, fit tests with their own
+  request, `from_version` keeps `part`, the dock template's plug pocket closed below the grooves with a
+  `plug_len` check for straight plugs, and the views above.

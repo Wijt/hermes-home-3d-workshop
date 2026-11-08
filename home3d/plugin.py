@@ -18,6 +18,11 @@ SKILL_NAME = "household-printing"
 SKILL_PATH = PLUGIN_ROOT / "skills" / SKILL_NAME / "SKILL.md"  # folder name = skill name (Hermes skill lint)
 SKILL_DESCRIPTION = ("Household 3D printing with a persona: family requests, MakerWorld options, slicing, "
                      "owner-approved starts, auto-eject, failure handling and upgrade proposals.")
+DESIGN_SKILL_NAME = "parametric-design"
+DESIGN_SKILL_PATH = PLUGIN_ROOT / "skills" / DESIGN_SKILL_NAME / "SKILL.md"
+DESIGN_SKILL_DESCRIPTION = "Design printable parts in OpenSCAD: parametric code, render, look, iterate."
+SKILLS = ((SKILL_NAME, SKILL_PATH, SKILL_DESCRIPTION),
+          (DESIGN_SKILL_NAME, DESIGN_SKILL_PATH, DESIGN_SKILL_DESCRIPTION))
 TOOL_EMOJI = "🧰"
 COMMAND_NAME = "home3d"
 COMMAND_DESCRIPTION = "3D workshop: printer status, owner approvals, human-needed moments, upgrades"
@@ -49,10 +54,11 @@ def register_all(ctx) -> None:
         ctx.register_cli_command(name=COMMAND_NAME, help=CLI_HELP, setup_fn=cli.setup_parser, handler_fn=_handle,
                                  description=CLI_DESCRIPTION)
     if hasattr(ctx, "register_skill"):
-        try:
-            ctx.register_skill(SKILL_NAME, SKILL_PATH, description=SKILL_DESCRIPTION)
-        except (FileNotFoundError, ValueError) as e:  # a missing skill must not take the tools down
-            logger.warning("home-3d-workshop: skill not registered: %s", e)
+        for name, path, description in SKILLS:
+            try:
+                ctx.register_skill(name, path, description=description)
+            except (FileNotFoundError, ValueError) as e:  # a missing skill must not take the tools down
+                logger.warning("home-3d-workshop: skill %s not registered: %s", name, e)
 
 
-__all__ = ["register_all", "SKILL_NAME", "SKILL_PATH"]
+__all__ = ["register_all", "SKILL_NAME", "SKILL_PATH", "DESIGN_SKILL_NAME", "DESIGN_SKILL_PATH", "SKILLS"]

@@ -4,8 +4,8 @@
 
 A Hermes Agent plugin that gives a household a 3D-printing service with a character.
 
-Family members ask in plain words, often by voice note. The agent finds or adapts a model, slices it and
-queues it. The owner approves the start. A zero-token watcher follows the print, tells the owner and the
+Family members ask in plain words, often by voice note. The agent finds, adapts or designs a model,
+slices it and queues it. The owner approves the start. A zero-token watcher follows the print, tells the owner and the
 family what happened, and checks that the build plate is clear for the next job. Each time a person must
 step in, the plugin records it. When the same need repeats, it proposes an upgrade to the workshop.
 
@@ -34,9 +34,10 @@ A skill can only ask the model to behave. This plugin puts the parts that must n
 | Household memory | Chat history. | SQLite: who asked for what, in their own words; jobs, failures, approval requests and moments. | [`store.py`](home3d/store.py) |
 | Getting better | Notes, if somebody writes them. | Each time a person has to step in, the plugin logs it. Repeats become an upgrade proposal, for example a tilted base for auto-eject. | [`upgrades.py`](home3d/upgrades.py) |
 | Two audiences | One voice for everyone. | The owner gets a technical note with a photo. The family gets one plain line, by name. | [`notify.py`](home3d/notify.py), [`messages.py`](home3d/messages.py) |
+| Designing a part | The model runs OpenSCAD in a terminal. Nothing limits the time or the files it reads, and a new try overwrites the old one. | `home3d_design` renders one design at a time with time, CPU, memory and file-size limits. It refuses a version when OpenSCAD's own list of the files it read names one outside the design's folder. It keeps every version, measures the STL, flags code that OpenSCAD ignored and draws the previews. | [`design.py`](home3d/design.py) |
 
-The skill (`skills/household-printing`) still does what a skill does well: the persona, the tone and the
-workflow.
+The skills still do what a skill does well. `skills/household-printing` holds the persona, the tone and
+the workflow; `skills/parametric-design` holds the design know-how.
 
 The character is called **Mıstık** by default. You can change the name (`persona_name`) and the language
 of the messages (`language`: `en` or `tr`). The default language is English. The home it comes from sets
@@ -91,16 +92,20 @@ The plugin is new. This table shows what is verified, and where.
 | Start, stop, pause, resume, mark plate clear | Planned | Verified |
 | Watcher on a real print (dry run: outbox only, nothing sent) | Verified on a family print it did not queue: no light or camera during the print, FINISH caught, one light cycle for photo + plate check, one owner notice | Verified |
 | Watcher notices sent with `hermes send` | Planned | Verified (dry run, outbox only) |
+| Design a part in OpenSCAD (render, measure, previews, versions), and the name-tag and label-box templates | Upload and slice of a designed part: planned | Verified with OpenSCAD 2021.01 (the real-OpenSCAD tests, also a CI job); upload and slice on the simulator |
 | Auto-eject push on the tilted base | Real in the original setup. The A1 order the watcher expects (RUNNING through the 15 min cool-down and the push, then FINISH) was seen on a family print. A push of the plugin's own job: planned | Simulated |
 
 `hermes plugins validate . --install-deps` passes on Hermes 0.22.5, and
 `hermes plugins install Wijt/hermes-home-3d-workshop --enable` installs it. CI runs validate and the test
-suite (more than 600 tests, no Hermes needed). The real-hardware loop with this plugin is **planned, not
+suite (more than 600 tests, no Hermes needed), plus a job that renders the templates and a sample
+design with a real OpenSCAD. The real-hardware loop with this plugin is **planned, not
 done**. The family uses the printer every day, so we test on it only when no family job waits.
 
 ## Install
 
-Requires Hermes **0.22.5 or newer**. The plugin uses only the Python standard library.
+Requires Hermes **0.22.5 or newer**. The plugin uses only the Python standard library. Designing new
+parts also needs `openscad` (and `xvfb-run` for the preview pictures); see "The agent can design
+parts".
 
 ```bash
 hermes plugins install Wijt/hermes-home-3d-workshop --enable
@@ -134,6 +139,37 @@ that already ended):
 hermes home3d simulate advance 60 --watch
 hermes home3d simulate scenario eject_miss   # also: ok, fail, pause_hms, busy, offline, dispatch_fail
 ```
+
+## The agent can design parts
+
+Ready models come first. When nothing fits, or the part must fit something the household owns (a
+phone with its case, a tube, a shelf edge, a broken piece), the agent designs it. It writes
+parametric OpenSCAD code. `home3d_design` renders the code to an STL, measures it (size, volume, an
+upper bound for the weight, separate bodies, fits the bed) and draws preview pictures. The agent
+looks at the pictures itself, then sends the person one picture, the size in cm and a short
+question. Every change is a new version, so "the first one was right" is one call away. After an
+OK, the design is uploaded and goes through the normal slice, queue and owner-approved start.
+
+The skill `home-3d-workshop:parametric-design` holds what a real household's prints taught:
+parameters with units, asserts, text that lies flat until you rotate it, press-fit pockets instead of
+print pauses, a closed underside so that tall parts do not warp, cable exits on all four sides of a
+phone dock, and how to ask when feedback is vague. Its worked example is a phone dock with a
+short fit-test ring ([`phone-dock.scad`](skills/parametric-design/templates/phone-dock.scad)).
+
+Designing needs OpenSCAD on the machine that runs Hermes, and `xvfb-run` for the pictures on a
+machine without a display:
+
+```bash
+sudo apt install openscad xvfb      # Debian and Ubuntu
+hermes home3d doctor                # the "openscad" row: version, and whether pictures work
+```
+
+Renders run one at a time, with a time limit (180 seconds by default), a memory cap and a cap on the
+STL size. The code may read files only from its own design folder (and OpenSCAD's own libraries):
+the source is checked before the render, and OpenSCAD's list of the files it really read is checked
+after it, so a file name hidden in a parameter is caught too. A render that OpenSCAD finished but
+with part of the code ignored (a typo, an unknown name) is flagged, and the agent fixes it before it
+shows anything. Without OpenSCAD, the agent says so and keeps to ready models.
 
 ## Set up with Bambuddy
 
@@ -196,6 +232,7 @@ explains the concept. Run the first tests with a person present.
 | `home3d_find_models` | MakerWorld cards (licence, print time, grams) from links or ids | No |
 | `home3d_import` | Import a MakerWorld model into the Bambuddy library; records who asked | No |
 | `home3d_customize` | Scale a model, or render a name tag or label box (OpenSCAD) | No |
+| `home3d_design` | Design a part in OpenSCAD: render the agent's code to an STL with preview pictures, keep versions, upload for slicing | No |
 | `home3d_slice` | Slice with the right presets; auto-eject only when the part is safe to push | No |
 | `home3d_queue` | Add (always manual start), list, or remove a waiting workshop item: your own, or (the owner, present) someone else's. Never a job queued outside the workshop | No |
 | `home3d_start` | Start a queued print after the safety gate | **Yes** |
@@ -208,7 +245,8 @@ explains the concept. Run the first tests with a person present.
 Also: the `/home3d` slash command (`status`, `approve start <id> [jump]`, `approve clear`,
 `approve resume [ack]`, `whoami`, `upgrades`, `moments`, `help`), the `hermes home3d` terminal command
 (`setup`, `teardown`, `watch`, `status`, `doctor`, `simulate`, `demo`), the hooks `pre_tool_call`,
-`post_tool_call` and `pre_llm_call`, and the skill `home-3d-workshop:household-printing`.
+`post_tool_call` and `pre_llm_call`, and the skills `home-3d-workshop:household-printing` and
+`home-3d-workshop:parametric-design`.
 
 ## Safety model
 
@@ -308,8 +346,8 @@ moves to "installed".
 - **Network.** The plugin talks only to the Bambuddy URL you set, over HTTP on your LAN. If you set
   `HOME3D_BAMBUDDY_API_KEY`, it goes in the `X-API-Key` header, unencrypted over plain HTTP. MakerWorld
   lookups and downloads go through Bambuddy; Bambuddy contacts makerworld.com, the plugin does not.
-- **Printer writes.** Import, scale, slice and queue add write to the Bambuddy library and queue
-  without an approval prompt. A photo or a plate check switches the chamber light on for about 12
+- **Printer writes.** Import, scale, design upload, slice and queue add write to the Bambuddy library
+  and queue without an approval prompt. A photo or a plate check switches the chamber light on for about 12
   seconds and then sets it back to its earlier state.
 - **Chamber light from the background job.** The cron watcher switches the light by itself for its plate
   checks and photos: at most once per pass (twice when a camera request fails), one photo near the end of
@@ -338,25 +376,30 @@ moves to "installed".
   deadline it also reads `hermes_cli.plugins._resolve_hook_callback_timeout` the same way (missing or
   failing: Hermes' default of 30 seconds is assumed).
 - **Subprocesses.** `hermes send` (owner and family notices, with `-p <send_profile>` when set),
-  `hermes cron create`, `hermes cron list` and `hermes cron remove` (setup and teardown), and `openscad`
-  (templates only, when installed).
+  `hermes cron create`, `hermes cron list` and `hermes cron remove` (setup and teardown), `openscad`
+  (the templates and the agent's designs, when installed: one render at a time, with a wall-clock and a
+  CPU-time limit, a memory cap and a file-size cap, without `OPENSCADPATH`) and `xvfb-run` (the design
+  preview pictures on a machine without a display; its X cookie file lives in the design folder and is
+  deleted afterwards).
 - **Background job.** One cron job, every 2 minutes by default (720 runs a day). `hermes home3d setup`
   creates it, and `hermes home3d teardown` removes it with its script. Run teardown before you remove
   the plugin; after removal, use `hermes cron remove` and delete the script yourself. While the plugin
   is disabled or removed, the script reads `config.yaml`, prints nothing and exits.
 - **Files written.** `$HERMES_HOME/plugin-data/home-3d-workshop/` (database, `outbox.jsonl` with every
   message, camera photos, model files, watcher log, and a settings snapshot without secrets that the
-  watcher uses only when it cannot read `config.yaml`) and
+  watcher uses only when it cannot read `config.yaml`), its `designs/` folder (each design's OpenSCAD
+  source, STL, preview pictures and facts, one set per version, kept until you delete them) and
   `$HERMES_HOME/scripts/home3d_watch.py`. The demo uses a temporary folder and deletes it.
 - **Personal data, kept locally.** Household sender ids and names, who asked for what, who asked the
-  owner to approve what, the messages sent, and camera photos of the plate. Nothing is sent anywhere except Bambuddy and your own chats.
+  owner to approve what, the messages sent, camera photos of the plate, and names written into
+  designs. Nothing is sent anywhere except Bambuddy and your own chats.
 - **Context.** The `pre_llm_call` hook adds a short context (persona, speaker, printer state; at most
   900 characters, no network). For household members and the local owner it comes on the first turn,
   on printing turns and when the printer state changes; other turns get one "Speaking: ..." line. Other
   senders get it only on printing turns. `inject_context: never` turns it off.
 - **Always on.** The tools are on for every surface, including messaging gateways (turn a surface off
-  with `hermes tools`). While the plugin is enabled, its skill adds one line to the skills index of
-  every session.
+  with `hermes tools`). While the plugin is enabled, its two skills add one line each to the skills
+  index of every session.
 
 ## Limitations
 
@@ -369,9 +412,13 @@ moves to "installed".
   tall-narrow parts. It cannot see shape: the agent must turn eject off for round or fragile parts.
 - Orientation and supports come from the chosen MakerWorld profile or the owner's presets. The tools do
   not rotate models or switch supports on; the skill helps choose a profile.
-- The name-tag and label-box templates need `openscad` on the machine. The tests check the template text
-  and the render command, but the templates have not been rendered by a real OpenSCAD yet. Scaling an
-  existing model needs no OpenSCAD.
+- Designing, and the name-tag and label-box templates, need `openscad` (and `xvfb-run` for pictures) on
+  the machine that runs Hermes. The templates, a sample design and the file-access probes are tested
+  with OpenSCAD 2021.01 (locally and in the CI `openscad` job). The agent's own designs are checked by the render, the numbers and the pictures, not by an
+  engineer: print a small fit test before a part that must fit, and do not design parts whose failure
+  can hurt someone. Scaling an existing model needs no OpenSCAD.
+- A design is one STL in one colour. A two-colour part is rendered as two parts, and the owner
+  combines them in a slicer.
 - Voice notes depend on the Hermes gateway's transcription.
 - Messages are in English and Turkish only. Tested on Linux only.
 - The sender id comes from the messaging platform. Check it with `/home3d whoami` before you trust it.

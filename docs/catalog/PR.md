@@ -2,8 +2,9 @@
 DRAFT pull request for NousResearch/hermes-agent. Do NOT open it before the owner approves.
 Title: plugin-catalog: add home-3d-workshop
 Files: plugin-catalog/home-3d-workshop.yaml (copy docs/catalog/home-3d-workshop.yaml, drop its comment lines)
-Before opening: replace <SHA40> everywhere, re-run validate at that commit, update "Status" with the
-real-printer result, and attach the demo video link and screenshots. Remove this comment.
+Before opening: replace <SHA40> everywhere, re-run validate at that commit, check that every CI job
+(including the `openscad` job) is green on that commit, update "Status" with the real-printer result,
+and attach the demo video link and screenshots. Remove this comment.
 -->
 
 # plugin-catalog: add home-3d-workshop
@@ -15,8 +16,9 @@ Adds one community entry: `plugin-catalog/home-3d-workshop.yaml`, pinned to
 
 A household 3D-printing workshop with a character. The persona is called Mıstık by default; the name
 and the message language (`en` by default, or `tr`) are settings. Family members ask in plain words,
-often by voice note. The agent finds MakerWorld models through Bambuddy or scales one, slices it and
-queues it with manual start. The owner approves the start; when a family member asks, the watcher
+often by voice note. The agent finds MakerWorld models through Bambuddy, scales one, or designs a
+part in OpenSCAD (it writes the code, renders it, looks at the preview pictures and keeps every
+version), slices it and queues it with manual start. The owner approves the start; when a family member asks, the watcher
 passes the request to the owner with the exact command. A zero-token cron watcher follows the print and tells
 the owner (technical, with a photo) and the family (one plain line, by name) about finish, failure,
 pause, HMS errors and the build plate. Each moment a person had to step in is logged. When one kind
@@ -33,8 +35,8 @@ loop in about 10 seconds and sends nothing.
 
 ## Hermes surfaces used
 
-- **Tools (13):** `home3d_status`, `home3d_camera`, `home3d_find_models`, `home3d_import`,
-  `home3d_customize`, `home3d_slice`, `home3d_queue`, `home3d_start`, `home3d_stop`,
+- **Tools (14):** `home3d_status`, `home3d_camera`, `home3d_find_models`, `home3d_import`,
+  `home3d_customize`, `home3d_design`, `home3d_slice`, `home3d_queue`, `home3d_start`, `home3d_stop`,
   `home3d_clear_plate`, `home3d_household`, `home3d_human_needed`, `home3d_upgrades`.
 - **Hooks:** `pre_tool_call` (safety gates and owner approval for start, resume and plate-clear
   confirm; bounded: status and queue only, 5 s per request, 12 s in all), `post_tool_call` (audit
@@ -42,7 +44,7 @@ loop in about 10 seconds and sends nothing.
 - **Slash command:** `/home3d` (`status`, `approve start <id> [jump]`, `approve clear`,
   `approve resume [ack]`, `whoami`, `upgrades`, `moments`, `help`).
 - **CLI command:** `hermes home3d` (`setup`, `teardown`, `watch`, `status`, `doctor`, `simulate`, `demo`).
-- **Skill:** `home-3d-workshop:household-printing`.
+- **Skills:** `home-3d-workshop:household-printing` and `home-3d-workshop:parametric-design`.
 - **Config:** `config_schema` only; one optional secret `HOME3D_BAMBUDDY_API_KEY`, read with
   `agent.secret_scope.get_secret`. No `requires_env`. Python standard library only.
 - **Storage:** `plugin_data_dir` (SQLite and files under `HERMES_HOME/plugin-data/home-3d-workshop`).
@@ -53,8 +55,8 @@ loop in about 10 seconds and sends nothing.
 - **Network.** Only the Bambuddy URL the user sets, over HTTP on the LAN. When set,
   `HOME3D_BAMBUDDY_API_KEY` is sent as `X-API-Key`, unencrypted over plain HTTP. MakerWorld lookups and
   downloads go through Bambuddy; the plugin makes no other network calls.
-- **Printer and library writes.** Import, scale, slice and queue add write to the Bambuddy library and
-  queue without a prompt. Queue items are always manual start. Queue remove only removes the asking
+- **Printer and library writes.** Import, scale, design upload, slice and queue add write to the
+  Bambuddy library and queue without a prompt. Queue items are always manual start. Queue remove only removes the asking
   person's own waiting items: never a job queued outside the workshop or another household member's job,
   not even for the owner (who can remove anything by hand in Bambuddy). A tool photo or plate check switches
   the chamber light on for about 12 s, then restores its earlier state.
@@ -100,7 +102,13 @@ loop in about 10 seconds and sends nothing.
   own approval gate stay. A public "unattended run" seam in Hermes would let the plugin drop these
   reads.
 - **Subprocesses.** `hermes send` (notices; `-p <send_profile>` when set), `hermes cron create`, `list`
-  and `remove` (setup and teardown), `openscad` (templates, only when installed).
+  and `remove` (setup and teardown), `openscad` (the templates and the agent's designs) and `xvfb-run`
+  (design preview pictures without a display), only when installed. Renders run one at a time, with a
+  180 s default time limit (at most 600 s) that stops the process group, a CPU-time limit (an orphaned
+  OpenSCAD still stops), a memory cap and an STL size cap, without `OPENSCADPATH`. A design may read
+  files only from its own folder and OpenSCAD's own libraries: the source is checked before the render,
+  and OpenSCAD's `-d` list of the files it read is checked after it (a version that read anything else
+  is refused: no STL, no pictures, no echo).
 - **Background job.** One `--no-agent --script` cron job, every 2 minutes by default (720 runs a day).
   It runs while the Hermes scheduler runs (`hermes gateway`). No model calls; empty output sends
   nothing. The script lives at `HERMES_HOME/scripts/home3d_watch.py`. It reads the plugin settings
@@ -108,19 +116,22 @@ loop in about 10 seconds and sends nothing.
   `hermes home3d teardown` removes the job and the script.
 - **Files and personal data.** Kept locally under `HERMES_HOME/plugin-data/home-3d-workshop`: SQLite
   (requests, jobs, household sender ids and names, approval requests, audit events), `outbox.jsonl`
-  (every message), camera photos, model files, a watcher log and a settings snapshot without secrets
-  (the watcher's fallback when it cannot read `config.yaml`).
+  (every message), camera photos, model files, `designs/` (OpenSCAD source, STL, preview pictures and
+  facts for every version), a watcher log and a settings snapshot without secrets (the watcher's
+  fallback when it cannot read `config.yaml`).
 - **Prompt context.** `pre_llm_call` adds up to 900 characters: for household members and the local
   owner on the first turn, on printing turns and on printer state changes, else one speaker line; for
   other senders only on printing turns. `inject_context: never` turns it off. While the plugin is
-  enabled, its skill adds one line to the skills index of every session.
+  enabled, its two skills add one line each to the skills index of every session.
 
 ## Validation and testing
 
 - `HERMES_HOME=$(mktemp -d) hermes plugins validate <checkout at <SHA40>> --install-deps` on Hermes
   0.22.5: passes. <!-- paste the final output -->
 - The pytest suite (no Hermes needed) runs in the repo CI, plus a job that runs `hermes plugins
-  validate` against Hermes 0.22.5.
+  validate` against Hermes 0.22.5, and a job that installs `openscad` and `xvfb` on ubuntu-24.04 and
+  runs the real-OpenSCAD tests with OpenSCAD 2021.01: the templates, a sample design and the
+  file-access probes (each refused). <!-- confirm this job is green on <SHA40> -->
 - `hermes home3d demo` runs the full loop on the simulator. Scripted stand-ins are marked `[staged]`.
 
 ## Status on real hardware
@@ -134,9 +145,12 @@ This matches the README's status table at the same commit.
 - The watcher in dry run (outbox only) on a real family print it did not queue: no light or camera
   during the print, FINISH caught, one light cycle for the photo and plate check, one owner notice. The
   A1's auto-eject order (RUNNING through the cool-down and the push, then FINISH) was seen on that print.
+- Designing: the templates, a sample design and the file-access probes are tested with OpenSCAD
+  2021.01 (locally and in the CI `openscad` job); a design upload and slice are tested on the
+  simulator.
 - Planned on the real printer: start, stop, pause, resume and plate-clear confirm, watcher notices
-  sent with `hermes send`, and the auto-eject push with this plugin (the push itself is real in the
-  original setup).
+  sent with `hermes send`, the auto-eject push with this plugin (the push itself is real in the
+  original setup), and the upload and slice of a designed part.
   <!-- update before opening -->
 
 ## Links

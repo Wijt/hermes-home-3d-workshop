@@ -650,6 +650,20 @@ def _h_customize(rt, a: dict, kw: dict) -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _design_bodies(store, fid: int) -> Optional[int]:
+    """Separate bodies of the design version uploaded as library file ``fid`` (None: not a design, or unknown)."""
+    try:
+        ref = store.kv_get(f"design_lib:{fid}")
+        if not isinstance(ref, dict) or not ref.get("slug"):
+            return None
+        from . import design
+        meta = design.load_version(str(ref["slug"]), int(ref["version"]))["meta"]
+        bodies = meta.get("bodies")
+        return int(bodies) if isinstance(bodies, int) and not isinstance(bodies, bool) else None
+    except Exception:  # noqa: BLE001 - a missing or broken design record never blocks a slice
+        return None
+
+
 def _h_slice(rt, a: dict, kw: dict) -> dict:
     s, be, store = rt.settings, rt.backend, rt.store
     fid = _int(a, "library_file_id", required=True)
@@ -675,6 +689,10 @@ def _h_slice(rt, a: dict, kw: dict) -> dict:
     pla_like = material_family(material) == "PLA"
     if eject == "auto" and not pla_like:
         use_auto = False  # PETG/TPU/... are never pushed off: skip the auto-eject slice entirely
+    parts = _design_bodies(store, fid)
+    multi = eject == "auto" and parts is not None and parts > 1
+    if multi:
+        use_auto = False  # a box and its lid, letters and their strip: the push knocks the small one off or misses it
 
     printer_preset = auto_p if use_auto else std_p
     res, text, info = _slice_once(be, fid, SliceOptions(printer_preset=printer_preset, **base))
@@ -698,7 +716,9 @@ def _h_slice(rt, a: dict, kw: dict) -> dict:
                 planned = True
                 warnings.append("the standard printer preset also pushes the part off (eject marker found)")
     else:
-        reasons = (["eject=off"] if eject == "off" else list(assess.reasons) if not pla_like and auto_p
+        reasons = (["eject=off"] if eject == "off"
+                   else [f"several separate parts ({parts} bodies in the design): remove them by hand"] if multi
+                   else list(assess.reasons) if not pla_like and auto_p
                    else ["no auto-eject printer preset configured"])
         if info.has_eject_marker:
             planned = True
@@ -1148,6 +1168,157 @@ def _h_upgrades(rt, a: dict, kw: dict) -> dict:
             "next": nxt}
 
 
+DESIGN_NEXT_RENDER = ("Look at the previews yourself first (vision); send the person one picture and the size in cm; "
+                      "on their OK: home3d_design action=upload name={name} version={version}")
+DESIGN_NEXT_NO_PREVIEW = ("No preview picture this time (see warnings): check the numbers, tell the person the size in "
+                          "cm and that you have no picture; on their OK: home3d_design action=upload name={name} "
+                          "version={version}")
+DESIGN_NEXT_SUSPECT = ("OpenSCAD ignored part of the code (see suspect and warnings: a typo, an unknown name, 2D mixed "
+                       "with 3D), so part of the model is missing. Fix it and render again before you show or upload "
+                       "this version.")
+DESIGN_NEXT_FAILED = ("Fix the code (error, error_line) and render again with the full scad; earlier versions are kept "
+                      "(from_version re-renders one with new params).")
+DESIGN_SOURCE_LIMIT = 60_000  # characters of source returned by action=get
+
+
+def _obj(a: dict, key: str) -> Optional[dict]:
+    v = a.get(key)
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            raise ArgError(f"'{key}' must be an object") from None
+    if not isinstance(v, dict):
+        raise ArgError(f"'{key}' must be an object")
+    return v
+
+
+def _design_out(res) -> dict:
+    out = res.to_dict()
+    out["size_cm"] = [round(v / 10.0, 1) for v in res.size_mm] if res.size_mm else None
+    if not res.ok:
+        out["next"] = DESIGN_NEXT_FAILED
+    elif res.suspect:
+        out["next"] = DESIGN_NEXT_SUSPECT
+    else:
+        tmpl = DESIGN_NEXT_RENDER if res.previews else DESIGN_NEXT_NO_PREVIEW
+        out["next"] = tmpl.format(name=res.name, version=res.version)
+    return out
+
+
+def _versions_text(rows: list[dict]) -> str:
+    def one(r: dict) -> str:
+        size = "x".join(f"{float(v):g}" for v in r["size_mm"]) + " mm" if r.get("size_mm") else "size unknown"
+        what = f"part {r['part']}" if r.get("part") else "whole design"
+        return f"v{r['version']} ({what}, {size}{', code partly ignored' if r.get('suspect') else ''})"
+    return ", ".join(one(r) for r in rows[-8:])
+
+
+def _h_design(rt, a: dict, kw: dict) -> dict:
+    from . import design
+
+    action = _choice(a, "action", ("render", "get", "list", "upload"))
+    try:
+        if action == "list":
+            status = design.openscad_status()
+            return {"ok": True, "designs": design.list_designs(limit=_int(a, "limit", 20) or 20),
+                    "openscad": status["version"] or None, "previews": status["previews"]}
+        name = _str(a, "name")
+        if not name:
+            raise ArgError("'name' is required: a few words naming the part, e.g. 'phone stand'")
+        if action == "render":
+            scad = a.get("scad")
+            if scad is not None and not isinstance(scad, str):
+                raise ArgError("'scad' must be the OpenSCAD source as text")
+            part = a.get("part")
+            res = design.render(name, scad, from_version=_int(a, "from_version"), params=_obj(a, "params"),
+                                views=a.get("views"), part=None if part is None else str(part),
+                                timeout_s=_int(a, "timeout_s", design.DEFAULT_TIMEOUT_S),
+                                request_id=_int(a, "request_id"))
+            return _design_out(res)
+        if action == "get":
+            v = design.load_version(name, _int(a, "version"))
+            meta = v["meta"]
+            source = v["source"]
+            out = {"ok": True, "name": v["name"], "version": v["version"], "versions": v["versions"],
+                   "rendered": bool(meta.get("ok")), "error": meta.get("error") or "",
+                   "error_line": meta.get("error_line"), "size_mm": meta.get("size_mm"),
+                   "volume_cm3": meta.get("volume_cm3"), "est_grams_max": meta.get("est_grams_max"),
+                   "params": meta.get("params") or {}, "part": meta.get("part") or "",
+                   "bodies": meta.get("bodies"), "simple": meta.get("simple"), "inverted": meta.get("inverted"),
+                   "suspect": meta.get("suspect") or [],
+                   "warnings": meta.get("warnings") or [], "echo": meta.get("echo") or [],
+                   "library_file_ids": meta.get("library_file_ids") or [],
+                   "scad": source[:DESIGN_SOURCE_LIMIT], "scad_path": v["scad_path"], "stl_path": v["stl_path"],
+                   "previews": v["previews"], "media": [f"MEDIA:{p}" for p in v["previews"]]}
+            if len(source) > DESIGN_SOURCE_LIMIT:
+                out["scad_truncated"] = True
+            return out
+        return _design_upload(rt, design, name, a, kw)
+    except design.DesignError as e:
+        out = {"ok": False, "code": e.code, "error": str(e)}
+        out.update(e.extra)
+        if e.code == "no_openscad":
+            out["hint"] = design.INSTALL_HINT
+        return out
+
+
+def _design_upload(rt, design, name: str, a: dict, kw: dict) -> dict:
+    be, store = rt.backend, rt.store
+    slug = design.slugify(name)
+    version = _int(a, "version")
+    if version is None:
+        rendered = design.ok_versions(slug)
+        if not rendered:
+            if not design.versions(slug):
+                raise design.DesignError("not_found", f"no design named '{slug}' (home3d_design action=list)")
+            raise design.DesignError("not_found", f"no version of '{slug}' rendered to a model yet: fix it and "
+                                                  "render again first")
+        # never guess: design names are shared between chats, and a later render may be one part or a picture
+        if len(rendered) > 1 or rendered[0]["part"] not in ("", "all"):
+            raise design.DesignError("bad_args", f"give the version the person approved: '{slug}' has "
+                                                 f"{_versions_text(rendered)}", versions=rendered)
+        version = rendered[0]["version"]
+    v = design.load_version(slug, version)
+    meta = v["meta"]
+    if not meta.get("ok") or not v["stl_path"]:
+        raise design.DesignError("not_found", f"{slug} v{version} did not render to a model "
+                                              f"({meta.get('error') or 'no STL'}): render it again first")
+    lib = be.upload_file(Path(v["stl_path"]))
+    store.kv_set(f"design_lib:{lib.id}", {"slug": slug, "version": int(version)})
+    design.record_upload(slug, int(version), lib.id)
+    ref = f"design:{slug}_v{version}"
+    warnings: list[str] = []
+    if meta.get("suspect"):
+        warnings.append(f"v{version} rendered with part of its code ignored: " + "; ".join(meta["suspect"][:3]))
+    if meta.get("part") not in (None, "", "all"):
+        warnings.append(f"v{version} is only part '{meta['part']}' of the design")
+    request_id = _int(a, "request_id")
+    if request_id is None and meta.get("request_id") is not None:
+        request_id = int(meta["request_id"])
+    if request_id is not None and store.get_request(request_id) is None:
+        warnings.append(f"request {request_id} not found")
+        request_id = None
+    if request_id is None and _str(a, "request_text"):
+        requester, sender = _who(rt, kw, _str(a, "requester"))
+        request_id = store.add_request(requester=requester, text=_str(a, "request_text"), channel="text",
+                                       sender_id=sender, model_ref=ref)
+    if request_id is not None:
+        store.update_request(request_id, library_file_id=lib.id, model_ref=ref)
+    size = meta.get("size_mm")
+    bodies = meta.get("bodies")
+    nxt = f"home3d_slice library_file_id={lib.id}" + (f" request_id={request_id}" if request_id else "")
+    if isinstance(bodies, int) and bodies > 1:
+        nxt += f" ({bodies} separate parts: the slice keeps them on the plate for the owner to take off)"
+    return {"ok": True, "library_file_id": lib.id, "name": lib.name, "design": slug, "version": int(version),
+            "part": meta.get("part") or "", "bodies": bodies,
+            "size_mm": size, "size_cm": [round(float(x) / 10.0, 1) for x in size] if size else None,
+            "est_grams_max": meta.get("est_grams_max"), "request_id": request_id, "warnings": warnings,
+            "next": nxt}
+
+
 # ---- schemas ----------------------------------------------------------------------------------------
 def _schema(name: str, description: str, props: Optional[dict] = None, required: Optional[list] = None) -> dict:
     params: dict = {"type": "object", "properties": props or {}}
@@ -1200,6 +1371,38 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
       "name": {"type": "string", "description": "Model title, used to spot fitted parts (lid, thread, ...)."},
       "confirm_mechanism": {"type": "boolean", "description": "The requester agreed to scale a fitted part."},
       "request_id": _INT}, [], _h_customize),
+    ("home3d_design",
+     "Design a 3D-printable part in OpenSCAD. Write parametric .scad code, render it to STL with preview images, "
+     "iterate in versions, then upload it for slicing. render (name + scad, or name + from_version + params) "
+     "returns size, volume, warnings, echo and preview images (media: MEDIA lines; look at them first); get "
+     "returns a version's code; list; upload returns a library_file_id for home3d_slice.",
+     {"action": {"type": "string", "enum": ["render", "get", "list", "upload"]},
+      "name": {"type": "string", "description": "Design name, a few words (e.g. 'phone stand'); the folder slug "
+                                                "it returns as name works too."},
+      "scad": {"type": "string", "description": "render: the full OpenSCAD source (parameters with units first, "
+                                                "assert/echo checks). Omit it to re-render from_version."},
+      "from_version": {"type": "integer", "description": "render: reuse this version's code, params and part, "
+                                                         "with 'params' applied on top (a quick tweak)."},
+      "params": {"type": "object", "description": "render: top-level variables to override (-D), e.g. "
+                                                  "{\"width\": 80, \"label\": \"Sam\"}: numbers, true/false, short "
+                                                  "strings, lists of numbers; null drops an inherited one."},
+      "views": {"type": "array", "items": {"type": "string", "enum": ["iso", "top", "front", "side", "plan",
+                                                                       "bottom"]},
+                "description": "render: preview images (default iso and top; [] for none). top/front/side are flat "
+                               "outlines that hide raised or cut-in detail; plan (top tilted 25 deg) and iso show "
+                               "text, pockets and compartments; bottom shows the bed face."},
+      "part": {"type": "string", "description": "render: sets the .scad variable part (e.g. \"lid\") to render "
+                                                "one part of a multi-part design; \"\" clears an inherited one."},
+      "version": {"type": "integer", "description": "get/upload: version number (get: the latest). upload: the "
+                                                    "version the person approved; needed when more than one "
+                                                    "rendered."},
+      "request_id": _INT,
+      "request_text": {"type": "string", "description": "upload without request_id: 2-3 words naming the thing in "
+                                                        "the requester's language (records a new request)."},
+      "requester": {"type": "string", "description": "upload: who asked (defaults to the person talking)."},
+      "timeout_s": {"type": "integer", "description": "render: OpenSCAD time limit in seconds (default 180, max "
+                                                      "600)."}},
+     ["action"], _h_design),
     ("home3d_slice",
      "Slice a 3D model for printing with the right presets. Picks process/filament presets, uses the "
      "auto-eject printer preset only when the part is safe to push off (eject=auto), inspects the G-code and "

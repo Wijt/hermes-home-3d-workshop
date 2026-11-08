@@ -41,6 +41,33 @@ jobs:
           sys.exit(0 if all(r["ok"] for r in runs) else 1)
           EOF
 
+  openscad:
+    # AI modelling (home3d_design) with the real OpenSCAD: the two templates, a sample design and every .scad under
+    # skills/parametric-design/templates render to a clean solid with a preview PNG (xvfb gives OpenSCAD a display),
+    # and the file-access probes (sentinel files outside the design folder) are all refused.
+    # HOME3D_REQUIRE_OPENSCAD=1 turns "openscad is not installed" from a skip into a failure. The runner image is
+    # pinned: the docs say "OpenSCAD 2021.01", and ubuntu-24.04's apt package is that version (asserted below).
+    name: real OpenSCAD renders (apt openscad + xvfb)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install OpenSCAD and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openscad xvfb
+          openscad --version 2>&1 | tee openscad-version.txt
+          grep -q "version 2021.01" openscad-version.txt || { echo "::error::expected OpenSCAD 2021.01"; exit 1; }
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+      - name: Real-OpenSCAD tests (renders, previews, errors, skill templates)
+        env:
+          HOME3D_REQUIRE_OPENSCAD: "1"
+        run: python -m pytest -q tests/test_design.py -k real_openscad -rA
+
   hermes-validate:
     # The check the Hermes plugin catalog runs: install Hermes v0.22.5 from its git tag (Python 3.14 via uv, the
     # locked dependency set) and validate this checkout in a throwaway HERMES_HOME (never a real one). The same
