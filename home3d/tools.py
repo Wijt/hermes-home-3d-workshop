@@ -24,8 +24,8 @@ from typing import Any, Callable, Optional
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
 from .config import watch_script_path
-from .gates import (clear_plate_gate, describe, printer_blocks, refusal, requester_name, resume_gate, same_person,
-                    start_gate, stop_refusal, write_refusal)
+from .gates import (approval_refusal, clear_plate_gate, describe, printer_blocks, refusal, requester_name,
+                    resume_gate, same_person, start_gate, stop_refusal, write_refusal)
 from .gcode import assess_eject, inspect_gcode, material_family
 from .hooks import LIGHT_FLAG, acked_codes, approval_target, watcher_fresh, watcher_stale_s
 
@@ -196,7 +196,18 @@ def _take_pass(rt, tool: str, target: str, kw: dict) -> tuple[Optional[dict], st
     except Exception:  # a store we cannot read authorises nothing
         granted = None
     if granted is not None:
-        return None, str(granted.get("detail") or "")
+        # the pass is used up either way; the handler still re-checks who is asking now (gates.approval_refusal:
+        # a person present, the owner, typed), so a pass can never carry a start into a run nobody watches
+        try:
+            why = approval_refusal(rt.actor(sid))
+        except Exception:
+            why = "unattended"
+        if not why:
+            return None, str(granted.get("detail") or "")
+        lang = getattr(rt.settings, "language", "en")
+        return {"ok": False, "blocked": True, "code": why, "codes": [why],
+                "error": refusal(why, "en", cmd="/home3d approve"),
+                "message": refusal(why, lang, cmd="/home3d approve")}, ""
     error = (f"{tool} must be approved through Hermes (pre_tool_call) or /home3d approve; no approval pass found "
              "(nothing was done)")
     out = {"ok": False, "blocked": True, "error": error, "codes": ["no_pass"]}
@@ -936,7 +947,7 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
             warnings.append(f"plate check failed: {e}")
     warnings += _light_warning(plate)
     req = store.request_for_queue_item(qid)
-    gate = start_gate(status, queue, qid, plate=plate, in_cron=rt.in_cron(), own_item_ids=_own_item_ids(rt),
+    gate = start_gate(status, queue, qid, plate=plate, in_cron=rt.nobody_present(), own_item_ids=_own_item_ids(rt),
                       requesters=store.active_job_requesters(), owner_name=s.owner_name,
                       allow_jump=jump, voice_request=bool(req and req.get("channel") == "voice"),
                       plate_confirmed=_plate_confirmed(store, status.job_name, status),
@@ -1017,7 +1028,7 @@ def _h_stop(rt, a: dict, kw: dict) -> dict:
     shown = acked_codes(pass_detail)
     now_codes = {str(h.code or "").strip().upper() for h in st.blocking_hms}
     ack = _bool(a, "ack_hms") and _is_owner(rt, sender) and bool(shown) and now_codes <= shown
-    gate = resume_gate(st, in_cron=rt.in_cron(), hms_acknowledged=ack)
+    gate = resume_gate(st, in_cron=rt.nobody_present(), hms_acknowledged=ack)
     if not gate.ok:
         return {"ok": False, "blocked": True, "error": describe(gate, "en"), "message": describe(gate, s.language),
                 "codes": gate.codes, "reasons": gate.reasons, "warnings": gate.warnings, "state": st.state}
@@ -1057,7 +1068,7 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
     auto = [q for q in queue if q.is_pending and not q.manual_start]
     # a confirm is always the owner's own statement (approved through the hook or /home3d approve), and "check"
     # reports whether such a confirm could pass
-    gate = clear_plate_gate(st, plate, in_cron=rt.in_cron(), cool_temp_c=s.eject_cool_temp_c,
+    gate = clear_plate_gate(st, plate, in_cron=rt.nobody_present(), cool_temp_c=s.eject_cool_temp_c,
                             auto_start_pending=auto, person_confirms=True)
     out.update(plate=_plate_dict(plate), can_confirm=gate.ok, reasons=gate.reasons,
                warnings=gate.warnings + _light_warning(plate), message=describe(gate, s.language))

@@ -672,12 +672,13 @@ def test_start_blocked_in_cron(be, tmp_path):
     rt.store.remember_sender("s-mum", MUM, "whatsapp")
     _, q = queued(rt)
     out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
-    assert out["ok"] is False and "in_cron" in out["codes"] and not be.called("start")
+    assert out["ok"] is False and "unattended" in out["codes"] and not be.called("start")
 
 
 def test_start_message_in_household_language(be, tmp_path):
     rt = Runtime(settings=settings(language="tr"), store=Store(tmp_path / "t.db"), backend=be)
     rt.store.remember_sender("s-mum", MUM, "whatsapp")
+    rt.store.remember_sender("s-owner", OWNER, "whatsapp")
     be.plate = PlateCheck(is_empty=False, difference_pct=60.0)
     _, q = queued(rt)
     out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
@@ -711,7 +712,7 @@ def test_pause_resume(rt, be, tmp_path):
     assert paused["ok"] and be.called("pause") and "/home3d approve resume" in paused["next"]
     cron = Runtime(CronCtx(), settings=settings(), store=rt.store, backend=be)
     resume = {"action": "resume", "reason": "ok"}
-    assert "in_cron" in gated(cron, "home3d_stop", resume)["codes"]
+    assert "unattended" in gated(cron, "home3d_stop", resume)["codes"]  # the handler's own re-check
     out = gated(rt, "home3d_stop", {"action": "resume", "reason": "swapped"})
     assert out["ok"] and be.called("resume")
     assert "not_paused" in gated(rt, "home3d_stop", resume)["codes"]  # not paused any more
@@ -722,9 +723,9 @@ def test_resume_with_an_active_printer_error_needs_the_owners_ack(rt, be):
     be.state.hms = [HMSError(code="0C00-0300-0002-0001", message="first layer defect")]
     out = gated(rt, "home3d_stop", {"action": "resume"})
     assert out["blocked"] and "hms_unacknowledged" in out["codes"] and not be.called("resume")
-    # ack_hms from someone who is not the owner does not count (even with a pass)
+    # someone who is not the owner never resumes, not even with a pass (the handler re-checks who asks)
     out = gated(rt, "home3d_stop", {"action": "resume", "ack_hms": True}, session="s-mum")
-    assert "hms_unacknowledged" in out["codes"] and not be.called("resume")
+    assert "not_owner" in out["codes"] and not be.called("resume")
     out = gated(rt, "home3d_stop", {"action": "resume", "ack_hms": True})
     assert out["ok"] and be.called("resume") and any("0C00-0300-0002-0001" in w for w in out["warnings"])
     ev = json.loads(rt.store.events(kind="resume_request")[0]["payload"])

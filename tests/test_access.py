@@ -362,3 +362,27 @@ def test_settings_defaults_and_unreadable_values():
     assert load_settings(overrides={"stop_policy": "OWNER"}).stop_policy == "owner"
     assert load_settings(overrides={"stop_policy": "sometimes"}).stop_policy == "known"
     assert load_settings(overrides={"allow_guests": "true"}).allow_guests is True
+
+
+# ---- 6. no other path: a pass alone never starts, resumes or clears ----------------------------------------
+@pytest.mark.parametrize("tool,args,target", [("home3d_start", {"queue_item_id": None}, None),
+                                              ("home3d_clear_plate", {"action": "confirm"}, ""),
+                                              ("home3d_stop", {"action": "resume"}, "")])
+def test_a_pass_alone_never_acts_for_someone_the_rule_refuses(monkeypatch, tool, args, target):
+    """The handler re-checks the actor after using the pass: a non-owner, a session without a sender, a voice
+    turn or a run nobody watches gets nothing, even holding a pass (e.g. one issued before the run changed)."""
+    r = Rig()
+    qid = r.queue_job()
+    if tool == "home3d_start":
+        args, target = {"queue_item_id": qid}, str(qid)
+    r.turn("s-voice-owner", OWNER, '"go"')  # a voice-shaped turn from the owner
+    for session in ("s-mum", "s-stranger", "s-nobody", "s-voice-owner"):
+        r.store.issue_pass(tool, target, session)
+        out = r.call(tool, args, session)
+        assert out["ok"] is False and out.get("codes") and out["codes"][0] in (
+            "not_owner", "no_identity", "voice_message"), (session, out)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_9")
+    r.store.issue_pass(tool, target, "s-local")
+    out = r.call(tool, args, "s-local")
+    assert out["ok"] is False and out["codes"] == ["unattended"]
+    assert r.be.status().state == "IDLE"
