@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
-from .config import watch_script_path
+from .config import norm_id, watch_script_path
 from .gates import (approval_refusal, clear_plate_gate, describe, printer_blocks, refusal, requester_name,
                     resume_gate, same_person, start_gate, stop_refusal, write_refusal)
 from .gcode import assess_eject, inspect_gcode, material_family
@@ -128,8 +128,18 @@ def _who(rt, kw: dict, explicit: str = "") -> tuple[str, str]:
     so no request or job is ever stored with an empty requester that could pass for the owner's."""
     sid = str(kw.get("session_id") or "")
     actor = rt.actor(sid)
-    name = (explicit or "").strip() or requester_name(actor)
-    return name, actor.sender
+    return _claimed_name(actor, explicit), actor.sender
+
+
+def _claimed_name(actor, explicit: str = "") -> str:
+    """The name to record for ``actor``: a name the caller passes (``requester``, ``who``) counts only from the
+    owner (who may ask on someone's behalf) or when it is the actor's own name; anyone else is recorded as
+    themselves, so a guest can never label a job, a note or a moment as the owner's or a family member's."""
+    own = requester_name(actor)
+    explicit = (explicit or "").strip()
+    if explicit and (actor.is_owner or same_person(explicit, own)):
+        return explicit
+    return own
 
 
 # Who may use which tool action (checked in ``_wrap`` for every caller: the agent, ``/home3d``, the CLI demo).
@@ -138,7 +148,10 @@ def _who(rt, kw: dict, explicit: str = "") -> tuple[str, str]:
 # approval actions (start, resume, plate confirm) are gated by the pre_tool_call hook and the handler pass.
 WRITE_ACTIONS: dict[str, Optional[frozenset]] = {
     "home3d_import": None, "home3d_customize": None, "home3d_slice": None,  # None = every call
-    "home3d_design": frozenset({"upload"}), "home3d_queue": frozenset({"add", "remove"})}
+    "home3d_design": frozenset({"upload"}), "home3d_queue": frozenset({"add", "remove"}),
+    # household context and "a person was needed" moments: the agent reads them back as the household's own words,
+    # and moments drive the owner's upgrade proposals
+    "home3d_household": frozenset({"remember", "note"}), "home3d_human_needed": frozenset({"log"})}
 STOP_TOOL_ACTIONS = {"home3d_stop": frozenset({"stop", "pause"})}
 _DEFAULT_ACTION = {"home3d_queue": "list", "home3d_stop": "stop"}
 
@@ -843,15 +856,20 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
                     "error": f"queue item {qid} was not queued through the workshop; remove it in Bambuddy yourself "
                              "(the workshop never removes, postpones or reorders other people's jobs)"}
         requester = str(job.get("requester") or "")
-        # a session without any sender is nobody: it never owns a job, not even another anonymous one
-        mine = bool(sender) and bool(who) and same_person(requester, who)
+        actor = rt.actor(str(kw.get("session_id") or ""))
+        if actor.known:  # a listed person's name is theirs alone (names come from the settings)
+            # a session without any sender is nobody: it never owns a job, not even another anonymous one
+            mine = bool(sender) and bool(who) and same_person(requester, who)
+        else:  # a guest's name is only a label (``Guest (…1234)``) that another sender id can match: compare ids
+            mine = bool(sender) and norm_id(_job_sender(store, qid)) == norm_id(sender) != ""
         if not mine:
             # another person's job: never from here, not even for the owner (it would postpone their job and let a
             # later start pass the jump check). The person who asked removes it, or the owner does it in Bambuddy.
+            whose = requester or "nobody recorded"
+            asker = requester or "Nobody is recorded as having asked for it, so nobody"
             return {"ok": False, "code": "not_theirs",
-                    "error": f"queue item {qid} is {requester or 'the owner'}'s: the workshop never removes another "
-                             f"person's job. {requester or 'The owner'} can ask to remove it, or the owner removes "
-                             "it in Bambuddy by hand"}
+                    "error": f"queue item {qid} is {whose}'s: the workshop never removes another person's job. "
+                             f"{asker} can ask to remove it here; the owner can remove it in Bambuddy by hand"}
         be.queue_remove(qid)
         by = who or "owner"
         store.upsert_job(qid, state="cancelled", outcome=f"removed by {by}")
@@ -905,9 +923,13 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
     if request_id is None:
         request_id = meta.get("request_id")
     req = store.get_request(int(request_id)) if request_id is not None else None
-    requester = _str(a, "requester") or (req or {}).get("requester") or meta.get("requester") or who
+    explicit = _str(a, "requester")
+    requester = ((_claimed_name(rt.actor(str(kw.get("session_id") or "")), explicit) if explicit else "")
+                 or (req or {}).get("requester") or meta.get("requester") or who)
     item = be.queue_add(sid, ams_mapping=mapping, manual_start=True)
     planned = bool(meta.get("eject_planned"))
+    if sender:  # who really queued it: a guest's job is theirs by sender id, never by a look-alike name
+        store.kv_set(f"job_sender:{item.id}", {"sender": sender, "ts": time.time()})
     store.upsert_job(item.id, request_id=req["id"] if req else None, name=item.name or meta.get("name", ""),
                      requester=requester or "", sliced_file_id=sid, eject_planned=1 if planned else 0,
                      eject_reason="; ".join(meta.get("eject_reasons") or []), max_z_mm=meta.get("max_z"),
@@ -1096,6 +1118,18 @@ def _h_clear_plate(rt, a: dict, kw: dict) -> dict:
     return out
 
 
+def _job_sender(store, qid: int) -> str:
+    """The sender id that queued workshop job ``qid`` ('' when none was recorded)."""
+    try:
+        rec = store.kv_get(f"job_sender:{qid}") or {}
+        if rec.get("sender"):
+            return str(rec["sender"])
+        req = store.request_for_queue_item(qid)
+        return str((req or {}).get("sender_id") or "")
+    except Exception:
+        return ""
+
+
 def _person_notes(store, name: str) -> list:
     return (store.kv_get(f"person:{name.strip().lower()}") or {}).get("notes", [])
 
@@ -1122,7 +1156,7 @@ def _h_household(rt, a: dict, kw: dict) -> dict:
                 "jobs": jobs, "notes": _person_notes(store, person)[-10:] if person else []}
     if not text:
         raise ArgError("'text' is required")
-    by = me.name if me else "owner"
+    by = requester_name(rt.actor(sid))  # who really wrote it: never "owner" by default
     if action == "remember":
         if not person:
             raise ArgError("'person' is required (nobody is identified in this chat)")
@@ -1163,7 +1197,7 @@ def _h_human_needed(rt, a: dict, kw: dict) -> dict:
     raw_kind = _str(a, "kind") or "other"
     normalize = getattr(upgrades, "normalize_kind", None)
     kind = normalize(raw_kind) if callable(normalize) else raw_kind.lower()
-    who = _str(a, "who") or _who(rt, kw)[0]
+    who = _who(rt, kw, _str(a, "who"))[0]  # a caller-chosen "who" counts only from the owner
     mid = upgrades.log_moment(store, raw_kind, _str(a, "detail"), job_name=_str(a, "job_name"), who=who,
                               source="agent")
     new = upgrades.evaluate(store, rt.settings) or []
