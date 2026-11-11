@@ -206,14 +206,21 @@ def _cmd_setup(rt, args) -> int:
     from .notify import hermes_bin
 
     s = rt.settings
-    print(f"settings snapshot : {write_snapshot(s)} (fallback only)")
+    dry = bool(args.print_only)  # --print-only writes nothing: no snapshot, no script, no cron job
+    if dry:
+        print("settings snapshot : would be written to the data dir (fallback only)")
+    else:
+        print(f"settings snapshot : {write_snapshot(s)} (fallback only)")
     try:
         from .config import load_watcher_settings
 
         print(f"watcher settings  : {load_watcher_settings()[1]}")
     except Exception:
         pass
-    print(f"watcher script    : {install_watch_script()}")
+    if dry:
+        print(f"watcher script    : would be installed at {hermes_home() / 'scripts' / SCRIPT_NAME}")
+    else:
+        print(f"watcher script    : {install_watch_script()}")
     if s.backend == "simulator":
         print("note              : backend is 'simulator' (the watcher watches the simulated printer)")
     if not s.owner_target:

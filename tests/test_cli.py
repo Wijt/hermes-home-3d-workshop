@@ -247,6 +247,25 @@ def test_teardown_print_only_changes_nothing(fake_hermes, capsys):
     assert f"would remove      : {script}" in out
 
 
+def test_setup_print_only_writes_nothing(tmp_path, data_dir, monkeypatch, capsys):
+    """--print-only prints the cron command; it must not write the settings snapshot or install the script."""
+    from home3d_ws.home3d.config import SNAPSHOT_FILE
+
+    home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(cli, "hermes_home", lambda: home)
+    monkeypatch.setattr(notify, "hermes_bin", lambda: "/usr/bin/hermes")
+    ran = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: ran.append(a))
+    before = sorted(p.name for p in data_dir.iterdir())
+    assert cli.handle(_parse(["setup", "--print-only"]), _rt()) == 0
+    out = capsys.readouterr().out
+    assert "create the cron job with:" in out and "cron create" in out
+    assert not (data_dir / SNAPSHOT_FILE).exists() and sorted(p.name for p in data_dir.iterdir()) == before
+    assert not home.exists() and ran == []
+    assert "would be installed at" in out
+
+
 def test_teardown_keeps_the_script_while_a_job_remains(fake_hermes, monkeypatch, capsys):
     script, _calls = fake_hermes
     monkeypatch.setenv("FAKE_REMOVE_FAILS", "1")
