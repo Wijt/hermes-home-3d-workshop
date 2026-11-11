@@ -54,7 +54,9 @@ except ImportError:  # pragma: no cover - Windows
 
 MAX_SOURCE_BYTES = 200_000
 MAX_PARAMS = 64
-MAX_PARAM_STR = 200
+MAX_PARAM_STR = 200  # a text value (a label, an engraving)
+MAX_PARAM_PATH = 4096  # a value with a path separator: a file name may be as long as the OS allows (PATH_MAX)
+MAX_PARAMS_CHARS = 32_768  # all -D values together: the command line stays small whatever the agent sends
 MAX_PARAM_LIST = 16
 DEFAULT_TIMEOUT_S = 180
 MAX_TIMEOUT_S = 600
@@ -484,8 +486,11 @@ def _scad_value(name: str, value: Any) -> str:
             raise DesignError("bad_args", f"param '{name}' must be a finite number")
         return customize._fmt(f)
     if isinstance(value, str):
-        if len(value) > MAX_PARAM_STR:
-            raise DesignError("bad_args", f"param '{name}' is longer than {MAX_PARAM_STR} characters")
+        # A file name may be a long absolute path (a deep temporary or data directory). Its length is not the
+        # guard: the static source check and the render's dependency list refuse any file outside the folder.
+        limit = MAX_PARAM_PATH if ("/" in value or "\\" in value) else MAX_PARAM_STR
+        if len(value) > limit:
+            raise DesignError("bad_args", f"param '{name}' is longer than {limit} characters")
         if re.search(r"[\x00-\x1f\x7f]", value):
             raise DesignError("bad_args", f"param '{name}' contains a control character (newline, tab, ...)")
         return customize._scad_literal(value)
@@ -511,6 +516,8 @@ def check_params(params: Optional[dict]) -> list[str]:
         if not isinstance(name, str) or not PARAM_NAME_RE.match(name):
             raise DesignError("bad_args", f"param name {name!r} is not an OpenSCAD variable name")
         out += ["-D", f"{name}={_scad_value(name, value)}"]
+    if sum(len(a) for a in out[1::2]) > MAX_PARAMS_CHARS:
+        raise DesignError("bad_args", f"the params are longer than {MAX_PARAMS_CHARS} characters together")
     return out
 
 

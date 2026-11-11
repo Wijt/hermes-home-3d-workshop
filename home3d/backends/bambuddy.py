@@ -780,6 +780,30 @@ class BambuddyBackend(Backend):
             raise BackendError("GET /settings/: unexpected response")
         return d
 
+    # read-only probes for ``home3d.checks`` (GET only; each raises BackendError like every other request)
+    def version(self) -> str:
+        """Bambuddy's version (``GET /updates/version``, unauthenticated); "" when the answer names none."""
+        d = self._get("/updates/version")
+        if isinstance(d, str):
+            return d.strip()
+        if isinstance(d, dict):
+            v = d.get("version") or d.get("current_version") or d.get("current")
+            return str(v).strip() if v else ""
+        return ""
+
+    def makerworld_status(self) -> dict:
+        """``GET /makerworld/status``: ``has_cloud_token``, ``can_download``, ``sign_in_expired`` (imports need a
+        Bambu Cloud sign-in in Bambuddy)."""
+        d = self._get("/makerworld/status")
+        if not isinstance(d, dict):
+            raise BackendError("GET /makerworld/status: unexpected response")
+        return d
+
+    def camera_status(self) -> dict:
+        """``GET /printers/<id>/camera/status``: whether a camera stream is active (never switches the light)."""
+        d = self._get(f"{self._printer}/camera/status")
+        return d if isinstance(d, dict) else {}
+
     def presets(self) -> dict:
         """``{source: {kind: [{"id", "name", "filament_type"}]}}`` for the local and standard tiers."""
         d = self._get("/slicer/presets", timeout=self.slice_timeout_s) or {}
