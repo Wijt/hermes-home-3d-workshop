@@ -1,0 +1,411 @@
+{
+ "schema": 1,
+ "generated_ts": 1794380000,
+ "backend": "simulator",
+ "persona": "Mıstık",
+ "simulated": true,
+ "printer": {
+  "state": "printing",
+  "job_name": "Screw box",
+  "progress": 62,
+  "remaining_min": 41,
+  "layer": 88,
+  "total_layers": 142,
+  "bed_temp": 65,
+  "errors": [],
+  "awaiting_plate_clear": false
+ },
+ "now": {
+  "queue_item_id": 11,
+  "name": "Screw box",
+  "for": {
+   "name": "Mum",
+   "group": "Family"
+  },
+  "eject_planned": true,
+  "model": {
+   "stl": "designs/screw-box/v1.stl",
+   "preview": "designs/screw-box/v1-iso.png"
+  }
+ },
+ "camera": {
+  "available": true,
+  "frame": "camera/latest.png",
+  "taken_ts": 1794379980,
+  "note": ""
+ },
+ "waiting": [
+  {
+   "id": 12,
+   "action": "start",
+   "queue_item_id": 12,
+   "name": "Name tag for Sam",
+   "asked_by": {
+    "name": "Engineer",
+    "group": "Lab"
+   },
+   "asked_ts": 1794379280,
+   "facts": {
+    "print_time_min": 38,
+    "grams": 9.4,
+    "material": "PLA Basic",
+    "color": "#2e7d8c",
+    "slot": 2,
+    "eject_planned": true
+   },
+   "checklist": [
+    {
+     "id": "plate",
+     "label": "Plate is clear",
+     "ok": true,
+     "detail": "camera: empty bed"
+    },
+    {
+     "id": "fits",
+     "label": "Fits the 256 mm bed",
+     "ok": true,
+     "detail": "70 × 25 × 5.2 mm"
+    },
+    {
+     "id": "filament",
+     "label": "Filament loaded in slot 2",
+     "ok": true,
+     "detail": "PLA Basic, 46% left"
+    },
+    {
+     "id": "eject",
+     "label": "Safe to push off when done",
+     "ok": true,
+     "detail": "5.2 mm tall, flat base"
+    },
+    {
+     "id": "confirmed",
+     "label": "Requester confirmed the size",
+     "ok": true,
+     "detail": "in the Lab chat"
+    }
+   ],
+   "command": "home3d approve start 12",
+   "model": {
+    "stl": "designs/name-tag-sam/v2.stl",
+    "preview": "designs/name-tag-sam/v2-iso.png"
+   }
+  }
+ ],
+ "queue": [
+  {
+   "id": 13,
+   "name": "Cable clips ×4",
+   "for": {
+    "name": "Sam",
+    "group": "Family"
+   },
+   "status": "approved",
+   "ours": true,
+   "print_time_min": 22,
+   "eject_planned": true,
+   "model": null
+  },
+  {
+   "id": 14,
+   "name": "Lens cap",
+   "for": {
+    "name": "Engineer",
+    "group": "Lab"
+   },
+   "status": "slicing",
+   "ours": true,
+   "print_time_min": null,
+   "eject_planned": false,
+   "model": null
+  },
+  {
+   "id": 15,
+   "name": "Calibration plate",
+   "for": {
+    "name": "",
+    "group": ""
+   },
+   "status": "queued in Bambuddy",
+   "ours": false,
+   "print_time_min": 64,
+   "eject_planned": null,
+   "model": null
+  }
+ ],
+ "done_box": [
+  {
+   "job_id": 9,
+   "name": "Key tag for Mum",
+   "for": {
+    "name": "Mum",
+    "group": "Family"
+   },
+   "finished_ts": 1794372800,
+   "outcome": "pushed",
+   "photo": "photos/job-9.png",
+   "collected": false
+  },
+  {
+   "job_id": 8,
+   "name": "Test cube",
+   "for": {
+    "name": "Engineer",
+    "group": "Lab"
+   },
+   "finished_ts": 1794362000,
+   "outcome": "on_plate",
+   "photo": null,
+   "collected": false
+  },
+  {
+   "job_id": 7,
+   "name": "Wall hook",
+   "for": {
+    "name": "Sam",
+    "group": "Family"
+   },
+   "finished_ts": 1794286400,
+   "outcome": "failed",
+   "photo": null,
+   "collected": false
+  },
+  {
+   "job_id": 6,
+   "name": "Drawer label",
+   "for": {
+    "name": "Mum",
+    "group": "Family"
+   },
+   "finished_ts": 1794120800,
+   "outcome": "pushed",
+   "photo": null,
+   "collected": true
+  }
+ ],
+ "notices": {
+  "pending": 1,
+  "failed": 1,
+  "recent": [
+   {
+    "ts": 1794379940,
+    "to": "Family chat",
+    "kind": "Print started",
+    "status": "sent",
+    "error": ""
+   },
+   {
+    "ts": 1794379280,
+    "to": "Lab chat",
+    "kind": "Waiting for the owner",
+    "status": "pending",
+    "error": ""
+   },
+   {
+    "ts": 1794372800,
+    "to": "Family chat",
+    "kind": "Done, in the done box",
+    "status": "sent",
+    "error": ""
+   },
+   {
+    "ts": 1794286400,
+    "to": "Sam",
+    "kind": "Print failed",
+    "status": "failed",
+    "error": "Telegram: chat not found"
+   }
+  ]
+ },
+ "filament": {
+  "slots": [
+   {
+    "slot": 1,
+    "material": "PLA Basic",
+    "color": "#1d1d1f",
+    "name": "Black",
+    "remain_pct": 80,
+    "loaded": true
+   },
+   {
+    "slot": 2,
+    "material": "PLA Basic",
+    "color": "#2e7d8c",
+    "name": "Teal",
+    "remain_pct": 46,
+    "loaded": true
+   },
+   {
+    "slot": 3,
+    "material": "PETG HF",
+    "color": "#f2f2ee",
+    "name": "White",
+    "remain_pct": 9,
+    "loaded": true
+   },
+   {
+    "slot": 4,
+    "material": "",
+    "color": "",
+    "name": "",
+    "remain_pct": null,
+    "loaded": false
+   }
+  ]
+ },
+ "needs_human": [
+  {
+   "id": 3,
+   "kind": "unclear_size",
+   "text": "Sam asked for a “small” tag; it could not tell 40 mm from 80 mm and asked back.",
+   "ts": 1794377000,
+   "open": true
+  },
+  {
+   "id": 2,
+   "kind": "plate_not_clear",
+   "text": "The camera saw something on the bed before a start.",
+   "ts": 1794207200,
+   "open": false
+  }
+ ],
+ "upgrades": [
+  {
+   "id": "ask-size-first",
+   "title": "Ask for a size in mm before designing",
+   "why": "3 requests this week needed a follow-up about size.",
+   "count": 3,
+   "status": "proposed"
+  },
+  {
+   "id": "no-eject-thin",
+   "title": "Leave parts under 3 mm on the plate",
+   "why": "Thin parts bent twice when pushed off.",
+   "count": 2,
+   "status": "proposed"
+  }
+ ],
+ "designs": [
+  {
+   "slug": "name-tag-sam",
+   "title": "Name tag for Sam",
+   "versions": [
+    {
+     "version": 1,
+     "stl": "designs/name-tag-sam/v1.stl",
+     "previews": [
+      "designs/name-tag-sam/v1-iso.png"
+     ],
+     "facts": {
+      "size_mm": [
+       80,
+       25,
+       4.2
+      ],
+      "est_grams_max": 8.1
+     },
+     "note": "First try, 80 mm wide."
+    },
+    {
+     "version": 2,
+     "stl": "designs/name-tag-sam/v2.stl",
+     "previews": [
+      "designs/name-tag-sam/v2-iso.png",
+      "designs/name-tag-sam/v2-top.png"
+     ],
+     "facts": {
+      "size_mm": [
+       70,
+       25,
+       5.2
+      ],
+      "est_grams_max": 9.4,
+      "print_time_min": 38
+     },
+     "note": "Narrower and thicker, rounder corners, as Engineer asked."
+    }
+   ]
+  },
+  {
+   "slug": "screw-box",
+   "title": "Screw box",
+   "versions": [
+    {
+     "version": 1,
+     "stl": "designs/screw-box/v1.stl",
+     "previews": [
+      "designs/screw-box/v1-iso.png"
+     ],
+     "facts": {
+      "size_mm": [
+       60,
+       40,
+       30
+      ],
+      "est_grams_max": 21
+     },
+     "note": ""
+    }
+   ]
+  }
+ ],
+ "setup": {
+  "checks": [
+   {
+    "id": "backend",
+    "label": "Printer connection",
+    "status": "ok",
+    "detail": "Simulator answering",
+    "fix": ""
+   },
+   {
+    "id": "watcher",
+    "label": "Watcher running",
+    "status": "ok",
+    "detail": "Cron job every 2m",
+    "fix": ""
+   },
+   {
+    "id": "openscad",
+    "label": "OpenSCAD for designs",
+    "status": "ok",
+    "detail": "OpenSCAD 2021.01",
+    "fix": ""
+   },
+   {
+    "id": "camera",
+    "label": "Camera",
+    "status": "warn",
+    "detail": "Simulated frames only",
+    "fix": ""
+   },
+   {
+    "id": "lab_channel",
+    "label": "Lab group chat",
+    "status": "missing",
+    "detail": "No chat to tell the Lab group about their prints",
+    "fix": "Run `hermes home3d setup` and pick a chat for Lab"
+   }
+  ]
+ },
+ "watcher": {
+  "fresh": true,
+  "last_pass_ts": 1794379960,
+  "interval": "2m",
+  "model_calls": 0
+ },
+ "groups": [
+  {
+   "name": "Family",
+   "tone": "family"
+  },
+  {
+   "name": "Lab",
+   "tone": "team"
+  }
+ ],
+ "viewer": {
+  "is_owner": true,
+  "reason": ""
+ }
+}

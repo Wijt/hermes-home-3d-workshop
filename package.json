@@ -1,0 +1,25 @@
+{
+  "name": "hermes-home-3d-workshop-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workshop screen for Hermes Desktop: the printer owner's back room (now printing, approvals, queue, done box, filament, notices, health, design versions) with a three.js part viewer.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/plugin.tsx --bundle --format=esm --platform=browser --jsx=automatic --minify --legal-comments=none --external:@hermes/plugin-sdk --external:react --external:react/jsx-runtime --outfile=desktop/plugin.js",
+    "build:harness": "esbuild dev/harness.tsx --bundle --format=esm --platform=browser --jsx=automatic --alias:@hermes/plugin-sdk=./dev/sdk-shim.tsx --outfile=dev/harness.js",
+    "test": "node --experimental-strip-types --no-warnings --test tests/desktop/*.test.mjs && node --input-type=module --check < desktop/plugin.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.12",
+    "@types/three": "0.180.0",
+    "esbuild": "0.28.1",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "typescript": "5.9.2"
+  }
+}

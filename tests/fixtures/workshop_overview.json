@@ -1,0 +1,514 @@
+{
+ "schema": 1,
+ "generated_ts": 1794360034.9105072,
+ "backend": "simulator",
+ "persona": "Mıstık",
+ "owner": "Sam",
+ "simulated": true,
+ "printer": {
+  "state": "printing",
+  "raw_state": "RUNNING",
+  "job_name": "Flower gift box",
+  "progress": 40.6,
+  "remaining_min": 81,
+  "layer": 92,
+  "total_layers": 225,
+  "bed_temp": 65.0,
+  "nozzle_temp": 220.0,
+  "printer_name": "Simulated A1",
+  "errors": [],
+  "awaiting_plate_clear": false
+ },
+ "now": {
+  "queue_item_id": 3,
+  "name": "Flower gift box",
+  "for": {
+   "name": "Mum",
+   "group": "Family"
+  },
+  "ours": true,
+  "eject_planned": true,
+  "started_ts": 1794360031.0,
+  "model": null
+ },
+ "camera": {
+  "available": true,
+  "frame": "media/watcher/sim-snapshot-0006.png",
+  "taken_ts": 1794360030.9199426,
+  "note": "Latest stored photo; this screen never switches the chamber light on."
+ },
+ "waiting": [
+  {
+   "id": 1,
+   "key": "req-1",
+   "action": "start",
+   "source": "request",
+   "queue_item_id": 4,
+   "name": "rail-bracket v2",
+   "asked_by": {
+    "name": "Engineer",
+    "group": "R&D"
+   },
+   "asked_ts": 1794360034.4582856,
+   "request_text": "a bracket for the lab rail, 4 mm thick",
+   "facts": {
+    "print_time_min": 30,
+    "grams": 14.2,
+    "material": "PLA",
+    "color": "#000000",
+    "slot": 2,
+    "slot_label": "Slot 3",
+    "slot_loaded": {
+     "material": "PLA",
+     "color": "#000000",
+     "remain_pct": 40,
+     "loaded": true
+    },
+    "eject_planned": true,
+    "eject_reason": "sturdy PLA part, 40 x 30 mm footprint, 35 mm tall; check shape: round, fragile or several separate parts should not be pushed",
+    "max_z_mm": 35.0,
+    "quality": "standard"
+   },
+   "checklist": [
+    {
+     "id": "printer_free",
+     "label": "Printer is free",
+     "ok": false,
+     "detail": "the printer is busy (printing: Flower gift box)"
+    },
+    {
+     "id": "no_error",
+     "label": "No printer error",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "still_waiting",
+     "label": "Job is still waiting in the queue",
+     "ok": true,
+     "detail": ""
+    },
+    {
+     "id": "plate",
+     "label": "Plate is clear",
+     "ok": true,
+     "detail": "the camera checks the plate right before the start"
+    },
+    {
+     "id": "turn",
+     "label": "Nobody else's job is skipped",
+     "ok": false,
+     "detail": "Flower gift box (#3, for Mum) is waiting ahead and is someone else's"
+    },
+    {
+     "id": "filament",
+     "label": "Filament is loaded",
+     "ok": true,
+     "detail": "slot 3: PLA #000000, 40% left"
+    }
+   ],
+   "ready": false,
+   "command": "home3d approve start 4",
+   "alt": null,
+   "model": {
+    "stl": "designs/rail-bracket/rail-bracket_v2.stl",
+    "preview": "designs/rail-bracket/rail-bracket_v2_iso.png",
+    "design": "rail-bracket",
+    "version": 2
+   }
+  }
+ ],
+ "queue": [
+  {
+   "id": 3,
+   "name": "Flower gift box",
+   "for": {
+    "name": "Mum",
+    "group": "Family"
+   },
+   "status": "printing",
+   "position": 1,
+   "manual_start": true,
+   "ours": true,
+   "print_time_min": 136,
+   "eject_planned": true,
+   "model": null
+  },
+  {
+   "id": 4,
+   "name": "rail-bracket v2",
+   "for": {
+    "name": "Engineer",
+    "group": "R&D"
+   },
+   "status": "pending",
+   "position": 2,
+   "manual_start": true,
+   "ours": true,
+   "print_time_min": 30,
+   "eject_planned": true,
+   "model": {
+    "stl": "designs/rail-bracket/rail-bracket_v2.stl",
+    "preview": "designs/rail-bracket/rail-bracket_v2_iso.png",
+    "design": "rail-bracket",
+    "version": 2
+   }
+  }
+ ],
+ "done_box": [
+  {
+   "job_id": 2,
+   "name": "Cable clip",
+   "for": {
+    "name": "Sam",
+    "group": ""
+   },
+   "finished_ts": 1794356015,
+   "outcome": "on_plate",
+   "detail": "left on the plate; a person took it off",
+   "photo": "media/watcher/sim-snapshot-0004.png",
+   "collected": true,
+   "command": "home3d collected 2"
+  },
+  {
+   "job_id": 1,
+   "name": "Coaster",
+   "for": {
+    "name": "Mum",
+    "group": "Family"
+   },
+   "finished_ts": 1794354815,
+   "outcome": "pushed",
+   "detail": "pushed off into the done box",
+   "photo": "media/watcher/sim-snapshot-0001.png",
+   "collected": false,
+   "command": "home3d collected 1"
+  }
+ ],
+ "notices": {
+  "pending": 0,
+  "failed": 0,
+  "recent": [
+   {
+    "ts": 1794360034.7813148,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "🙋 Engineer asks to start #4 \"rail-bracket v2\" (30 min, 14 g). To start it: /home3d approve start 4",
+    "photo": null
+   },
+   {
+    "ts": 1794360031.0012825,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "▶️ The camera thinks the plate is empty (diff 1.8%). Next workshop job ready: \"Flower gift box\" (#3) · for Mum Check the photo, then start it: /home3d approve s",
+    "photo": "media/watcher/sim-snapshot-0006.png"
+   },
+   {
+    "ts": 1794360030.1092212,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "✅ The camera thinks the plate is empty (diff 1.8%); \"Cable clip\" (#2) looks taken off. Check the photo: the camera can miss thin parts.",
+    "photo": "media/watcher/sim-snapshot-0005.png"
+   },
+   {
+    "ts": 1794360029.8325343,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "✅ Finished: \"Cable clip\" (#2) · layer 60/60 · 15 min · bed 55 °C, nozzle 101 °C · for Sam No auto-eject: take the part off, then /home3d approve clear. 💡 Upgrad",
+    "photo": "media/watcher/sim-snapshot-0004.png"
+   },
+   {
+    "ts": 1794360028.5274923,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "▶️ The camera thinks the plate is empty (diff 1.8%). Next workshop job ready: \"Cable clip\" (#2) · for Sam Check the photo, then start it: /home3d approve start ",
+    "photo": "media/watcher/sim-snapshot-0003.png"
+   },
+   {
+    "ts": 1794360027.6583762,
+    "to": "family",
+    "target": "telegram:<family-group>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "✅ Mum, \"a coaster for the living room\" is done. It dropped off by itself, you can take it from the box.",
+    "photo": "media/watcher/sim-snapshot-0001.png"
+   },
+   {
+    "ts": 1794360027.6574547,
+    "to": "owner",
+    "target": "telegram:<owner-chat>",
+    "kind": "",
+    "status": "no_target",
+    "error": "dry run: kept in the outbox, not sent",
+    "text": "✅ Finished: \"Coaster\" (#1) · layer 20/20 · 1 h 5 min · bed 26 °C, nozzle 25 °C · for Mum ✅ \"Coaster\" (#1) was pushed off; the camera thinks the plate is empty (",
+    "photo": "media/watcher/sim-snapshot-0002.png"
+   }
+  ]
+ },
+ "filament": {
+  "slots": [
+   {
+    "slot": 0,
+    "label": "Slot 1",
+    "material": "PLA",
+    "color": "#FFFFFF",
+    "name": "Bambu PLA Basic",
+    "remain_pct": 85,
+    "loaded": true
+   },
+   {
+    "slot": 1,
+    "label": "Slot 2",
+    "material": "PLA",
+    "color": "#C12E1F",
+    "name": "Bambu PLA Basic",
+    "remain_pct": 60,
+    "loaded": true
+   },
+   {
+    "slot": 2,
+    "label": "Slot 3",
+    "material": "PLA",
+    "color": "#000000",
+    "name": "Bambu PLA Matte",
+    "remain_pct": 40,
+    "loaded": true
+   },
+   {
+    "slot": 3,
+    "label": "Slot 4",
+    "material": "PETG",
+    "color": "#F5F5F5",
+    "name": "Bambu PETG HF",
+    "remain_pct": 70,
+    "loaded": true
+   }
+  ]
+ },
+ "needs_human": [
+  {
+   "id": 4,
+   "kind": "approve_start",
+   "text": "Wait for the owner to approve a start: home3d_start start:4 waited for the owner's approval",
+   "ts": 1794360034.630611,
+   "open": true,
+   "job": "",
+   "who": "Engineer",
+   "source": "agent"
+  },
+  {
+   "id": 3,
+   "kind": "remove_part",
+   "text": "Take a finished part off the plate: no auto-eject planned",
+   "ts": 1794360029.6193812,
+   "open": true,
+   "job": "Cable clip",
+   "who": "",
+   "source": "watcher"
+  },
+  {
+   "id": 2,
+   "kind": "remove_part",
+   "text": "Take a finished part off the plate: part left on the plate",
+   "ts": 1794360024.5843236,
+   "open": true,
+   "job": "Pen holder",
+   "who": "",
+   "source": "watcher"
+  },
+  {
+   "id": 1,
+   "kind": "remove_part",
+   "text": "Take a finished part off the plate: part left on the plate",
+   "ts": 1794360024.4927998,
+   "open": true,
+   "job": "Pen holder",
+   "who": "",
+   "source": "watcher"
+  }
+ ],
+ "upgrades": [
+  {
+   "id": "1",
+   "kind": "remove_part",
+   "title": "Auto-eject: tilted base + push-off preset",
+   "why": "Auto-eject: tilt the printer forward ~15° on a printed base and let the nozzle push cooled parts off; slice sturdy PLA parts with the auto-eject preset. Recalibrate the camera plate check on the tilted base.",
+   "count": 3,
+   "status": "proposed",
+   "model_ref": "https://makerworld.com/en/models/2335000",
+   "updated_ts": 1794360029.6823967
+  }
+ ],
+ "designs": [
+  {
+   "slug": "rail-bracket",
+   "title": "Rail bracket",
+   "latest_ok": 2,
+   "updated": "2026-11-11 04:20",
+   "versions": [
+    {
+     "version": 1,
+     "stl": "designs/rail-bracket/rail-bracket_v1.stl",
+     "previews": [
+      "designs/rail-bracket/rail-bracket_v1_iso.png",
+      "designs/rail-bracket/rail-bracket_v1_top.png"
+     ],
+     "facts": {
+      "ok": true,
+      "size_mm": [
+       40.0,
+       30.0,
+       35.0
+      ],
+      "volume_cm3": 5.934,
+      "est_grams_max": 7.4,
+      "bodies": 1,
+      "triangles": 284,
+      "fits_build_volume": true,
+      "simple": true,
+      "render_s": 0.17,
+      "created": 1794360032.0673559,
+      "warnings": 0
+     },
+     "note": ""
+    },
+    {
+     "version": 2,
+     "stl": "designs/rail-bracket/rail-bracket_v2.stl",
+     "previews": [
+      "designs/rail-bracket/rail-bracket_v2_iso.png",
+      "designs/rail-bracket/rail-bracket_v2_top.png"
+     ],
+     "facts": {
+      "ok": true,
+      "size_mm": [
+       40.0,
+       30.0,
+       35.0
+      ],
+      "volume_cm3": 9.634,
+      "est_grams_max": 11.9,
+      "bodies": 1,
+      "triangles": 284,
+      "fits_build_volume": true,
+      "simple": true,
+      "render_s": 0.15,
+      "library_file_ids": [
+       7
+      ],
+      "created": 1794360032.860839,
+      "warnings": 0
+     },
+     "note": ""
+    }
+   ]
+  }
+ ],
+ "setup": {
+  "checks": [
+   {
+    "id": "backend",
+    "label": "Printer backend",
+    "status": "warn",
+    "detail": "simulated printer: nothing real prints",
+    "fix": "set backend to bambuddy and bambuddy_url in the plugin settings"
+   },
+   {
+    "id": "printer",
+    "label": "Printer reachable",
+    "status": "ok",
+    "detail": "state: printing",
+    "fix": ""
+   },
+   {
+    "id": "owner",
+    "label": "Owner identity",
+    "status": "ok",
+    "detail": "1 owner id(s)",
+    "fix": ""
+   },
+   {
+    "id": "household",
+    "label": "Household",
+    "status": "ok",
+    "detail": "2 person(s)",
+    "fix": ""
+   },
+   {
+    "id": "owner_target",
+    "label": "Owner notices",
+    "status": "ok",
+    "detail": "telegram:<owner-chat>",
+    "fix": ""
+   },
+   {
+    "id": "family_target",
+    "label": "Family notices",
+    "status": "ok",
+    "detail": "telegram:<family-group>",
+    "fix": ""
+   },
+   {
+    "id": "watcher",
+    "label": "Watcher",
+    "status": "ok",
+    "detail": "last pass 0 s ago",
+    "fix": ""
+   },
+   {
+    "id": "autoeject",
+    "label": "Auto-eject preset",
+    "status": "ok",
+    "detail": "simulator preset",
+    "fix": ""
+   },
+   {
+    "id": "openscad",
+    "label": "OpenSCAD (design)",
+    "status": "ok",
+    "detail": "/usr/bin/openscad",
+    "fix": ""
+   }
+  ]
+ },
+ "watcher": {
+  "fresh": true,
+  "last_pass_ts": 1794360034.8540335,
+  "interval": "2m",
+  "model_calls": 0,
+  "installed": false,
+  "stale_after_s": 600.0,
+  "error": ""
+ },
+ "groups": [
+  {
+   "name": "Family",
+   "tone": "family"
+  },
+  {
+   "name": "R&D",
+   "tone": "team"
+  }
+ ],
+ "viewer": {
+  "is_owner": true,
+  "reason": ""
+ },
+ "problems": []
+}

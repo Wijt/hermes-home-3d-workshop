@@ -1,0 +1,191 @@
+// Pure-module tests for the Workshop screen (no app, no DOM):
+//   node --experimental-strip-types --no-warnings --test tests/desktop/*.test.mjs
+import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
+import { test } from 'node:test'
+
+import {
+  approvalCopy,
+  chipText,
+  designFacts,
+  errorInfo,
+  filamentLine,
+  fmtAgo,
+  fmtDuration,
+  heroMode,
+  hexColor,
+  isReady,
+  normalize,
+  noticeLine,
+  noticeSummary,
+  partColor,
+  personLabel,
+  progressPct,
+  setupSummary,
+  sortChecks,
+  staleness,
+  waitingCommand,
+  watcherLine
+} from '../../src/model.ts'
+
+const root = new URL('../../', import.meta.url)
+const fixtures = ['tests/fixtures/workshop_overview.json', 'dev/fixtures/workshop_overview.json']
+  .map(p => new URL(p, root))
+  .filter(u => existsSync(u))
+  .map(u => [u.pathname.split('/').slice(-3).join('/'), JSON.parse(readFileSync(u, 'utf8'))])
+
+const base = () => normalize(JSON.parse(readFileSync(new URL('dev/fixtures/workshop_overview.json', root), 'utf8')))
+
+test('every fixture normalizes into every section the page renders', () => {
+  assert.ok(fixtures.length >= 1)
+  for (const [name, raw] of fixtures) {
+    const ov = normalize(raw)
+    for (const key of ['printer', 'camera', 'notices', 'filament', 'setup', 'watcher', 'viewer']) assert.ok(ov[key], `${name}: ${key}`)
+    for (const key of ['waiting', 'queue', 'done_box', 'needs_human', 'upgrades', 'designs', 'groups']) assert.ok(Array.isArray(ov[key]), `${name}: ${key}`)
+    for (const w of ov.waiting) {
+      assert.ok(waitingCommand(w).startsWith('home3d approve '), `${name}: waiting command`)
+      assert.equal(typeof w.facts.slot_label, 'string')
+    }
+    for (const s of ov.filament.slots) assert.match(s.label, /^Slot \d+$/, `${name}: slot label`)
+    for (const d of ov.designs) assert.deepEqual(d.versions.map(v => v.version), [...d.versions.map(v => v.version)].sort((a, b) => a - b))
+    assert.ok(chipText(ov).text.length > 0)
+  }
+})
+
+test('normalize survives an empty, partial or wrong answer', () => {
+  for (const raw of [undefined, null, 42, 'x', [], {}, { printer: { state: 'weird' }, waiting: [{}], queue: 'no', filament: { slots: [{}] } }]) {
+    const ov = normalize(raw)
+    assert.equal(typeof ov.printer.state, 'string')
+    assert.ok(Array.isArray(ov.waiting) && Array.isArray(ov.queue) && Array.isArray(ov.filament.slots))
+    assert.equal(ov.viewer.is_owner, true) // the backend's owner check still guards every action
+  }
+  const odd = normalize({ printer: { state: 'weird' }, waiting: [{ action: 'explode' }] })
+  assert.equal(odd.printer.state, 'offline')
+  assert.equal(odd.waiting[0].action, 'start')
+  assert.equal(odd.waiting[0].model, null)
+  const upgrade = normalize({ upgrades: [{ id: 'a', model_ref: 'javascript:alert(1)' }, { id: 'b', model_ref: 'https://example.org/m/1' }] }).upgrades
+  assert.deepEqual(upgrade.map(u => u.model_ref), ['', 'https://example.org/m/1'])
+})
+
+test('the status-bar chip says the one thing that matters', () => {
+  const ov = base()
+  assert.deepEqual(chipText(ov), { text: 'Waiting for you: 1', tone: 'accent' })
+  ov.waiting = []
+  assert.equal(chipText(ov).text, 'Printing 62% · for Mum · 41 min')
+  ov.printer.state = 'paused'
+  assert.equal(chipText(ov).text, 'Paused 62% · for Mum')
+  ov.printer.state = 'idle'
+  ov.now = null
+  assert.equal(chipText(ov).text, 'Idle')
+  ov.printer.awaiting_plate_clear = true
+  assert.equal(chipText(ov).text, 'Plate needs clearing')
+  ov.printer.state = 'offline'
+  assert.equal(chipText(ov).tone, 'bad')
+})
+
+test('the top band leads with the approval, then the running print', () => {
+  const ov = base()
+  assert.equal(heroMode(ov), 'approve')
+  ov.waiting = []
+  assert.equal(heroMode(ov), 'running')
+  ov.printer.state = 'failed'
+  assert.equal(heroMode(ov), 'attention')
+  ov.printer.state = 'offline'
+  assert.equal(heroMode(ov), 'offline')
+  ov.printer.state = 'idle'
+  assert.equal(heroMode(ov), 'idle')
+})
+
+test('people are named with their group', () => {
+  assert.equal(personLabel({ name: 'Mum', group: 'Family' }), 'Mum · Family')
+  assert.equal(personLabel({ name: 'Sam', group: '' }), 'Sam')
+  assert.equal(personLabel({ name: '', group: '' }), 'someone')
+  assert.equal(personLabel(null), 'someone')
+})
+
+test('durations, ages and percentages read naturally', () => {
+  assert.equal(fmtDuration(41), '41 min')
+  assert.equal(fmtDuration(65), '1 h 05 min')
+  assert.equal(fmtDuration(120), '2 h')
+  assert.equal(fmtDuration(0.2), 'under a minute')
+  assert.equal(fmtDuration(null), '')
+  const now = 1_800_000_000
+  assert.equal(fmtAgo(now - 2, now), 'just now')
+  assert.equal(fmtAgo(now - 40, now), '40 s ago')
+  assert.equal(fmtAgo(now - 12 * 60, now), '12 min ago')
+  assert.equal(fmtAgo((now - 3 * 3600) * 1000, now), '3 h ago') // milliseconds accepted
+  assert.equal(fmtAgo(now - 86400 * 1.5, now), 'yesterday')
+  assert.equal(fmtAgo(0, now), '')
+  assert.equal(progressPct({ progress: 40.6 }), 41)
+  assert.equal(progressPct({ progress: 140 }), 100)
+})
+
+test('filament colours and lines use the printed slot label', () => {
+  assert.equal(hexColor('#C12E1FFF'), '#c12e1f')
+  assert.equal(hexColor('fff'), '#ffffff')
+  assert.equal(hexColor('teal'), null)
+  const slots = [{ slot: 2, label: 'Slot 3', material: 'PLA', color: '#000000', name: 'Bambu PLA Matte', remain_pct: 40, loaded: true }]
+  const facts = { print_time_min: 30, grams: 14.2, material: 'PLA', color: '', slot: 2, slot_label: '', eject_planned: true, eject_reason: '' }
+  assert.equal(filamentLine(facts, slots), 'PLA · Bambu PLA Matte · Slot 3')
+  assert.equal(partColor(facts, slots), '#000000')
+  assert.equal(partColor({ ...facts, slot: null }, slots), null)
+})
+
+test('approval: ready, command and the sentence under the button', () => {
+  const w = base().waiting[0]
+  assert.equal(isReady(w), true)
+  assert.equal(isReady({ ...w, ready: null, checklist: [{ id: 'p', label: 'Plate', ok: false, detail: '' }] }), false)
+  assert.equal(isReady({ ...w, ready: false }), false)
+  assert.equal(waitingCommand({ ...w, command: '/home3d approve start 12' }), 'home3d approve start 12')
+  assert.equal(waitingCommand({ ...w, command: '', queue_item_id: 7 }), 'home3d approve start 7')
+  assert.equal(waitingCommand({ ...w, command: '', action: 'clear' }), 'home3d approve clear')
+  assert.equal(approvalCopy(w).button, 'Start print')
+  assert.match(approvalCopy(w).explain, /done box/)
+  assert.match(approvalCopy({ ...w, facts: { ...w.facts, eject_planned: false } }).explain, /stays on the plate/)
+  assert.equal(approvalCopy({ ...w, action: 'resume' }).button, 'Resume print')
+})
+
+test('notices: failures first, then pending, then messages with nowhere to go', () => {
+  assert.equal(noticeSummary({ pending: 1, failed: 2, recent: [] }).tone, 'bad')
+  assert.equal(noticeSummary({ pending: 1, failed: 0, recent: [] }).text, '1 waiting to send')
+  const nowhere = { ts: 1, to: 'owner', kind: '', status: 'no_target', error: '', text: '✅ Finished: "Coaster" (#1)' }
+  assert.equal(noticeSummary({ pending: 0, failed: 0, recent: [nowhere] }).tone, 'warn')
+  assert.equal(noticeSummary({ pending: 0, failed: 0, recent: [{ ...nowhere, status: 'sent' }] }).text, 'Everyone was told')
+  assert.equal(noticeLine(nowhere), 'Finished: "Coaster" (#1)')
+  assert.equal(noticeLine({ ...nowhere, kind: 'Print started' }), 'Print started')
+})
+
+test('health: worst checks first, watcher line, model calls', () => {
+  const checks = [
+    { id: 'a', label: 'A', status: 'ok', detail: '', fix: '' },
+    { id: 'b', label: 'B', status: 'warn', detail: '', fix: '' },
+    { id: 'c', label: 'C', status: 'missing', detail: '', fix: '' }
+  ]
+  assert.deepEqual(sortChecks(checks).map(c => c.id), ['c', 'b', 'a'])
+  assert.equal(setupSummary(checks).tone, 'bad')
+  assert.equal(setupSummary([checks[0]]).text, 'All 1 checks pass')
+  assert.equal(watcherLine({ fresh: true, last_pass_ts: 960, interval: '2m', model_calls: 0 }, 1000).text, 'Watcher checked 40 s ago (every 2m)')
+  assert.equal(watcherLine({ fresh: false, last_pass_ts: null, interval: '', model_calls: 0 }, 1000).tone, 'warn')
+})
+
+test('design facts in plain words', () => {
+  assert.deepEqual(designFacts({ size_mm: [40, 30, 35], est_grams_max: 11.9, fits_build_volume: true }), ['40 × 30 × 35 mm', 'about 12 g'])
+  assert.deepEqual(designFacts({ size_mm: [300, 10, 10], volume_cm3: 5.94, fits_build_volume: false }), ['300 × 10 × 10 mm', '5.9 cm³', 'too big for the bed'])
+  assert.deepEqual(designFacts({}), [])
+})
+
+test('backend errors: 404 means the Python half is off, the rest is "unreachable" or an error', () => {
+  assert.equal(errorInfo(new Error('404: {"detail":"Not Found"}')).kind, 'not_enabled')
+  assert.equal(errorInfo(new Error('503: {"detail":"gateway restarting"}')).text, 'gateway restarting')
+  assert.equal(errorInfo(new Error('503: x')).kind, 'unreachable')
+  assert.equal(errorInfo(new Error('Failed to fetch')).kind, 'unreachable')
+  assert.equal(errorInfo(new Error('403: {"detail":"forbidden"}')).kind, 'error')
+})
+
+test('stale data says how old it is', () => {
+  const now = 1_800_000_000_000
+  assert.deepEqual(staleness(now - 3000, now, false), { stale: false, text: 'Updated just now', ago: 'just now' })
+  assert.equal(staleness(now - 40_000, now, false).text, 'Last update 40 s ago')
+  assert.equal(staleness(now - 3000, now, true).stale, true)
+  assert.equal(staleness(0, now, true).text, 'No data yet')
+})

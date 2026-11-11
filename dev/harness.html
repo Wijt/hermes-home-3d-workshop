@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workshop harness (dev only)</title>
+<style>
+/* DEV ONLY. An approximation of Hermes Desktop's theme variables (apps/desktop/src/styles.css: the same
+   color-mix formulas over light and dark seeds) and its app frame, so the plugin is seen as in the app. */
+:root {
+  color-scheme: light;
+  --theme-foreground: #17171a; --theme-midground: #0053fd;
+  --theme-background-seed: #f8faff; --theme-card-seed: #ffffff; --theme-elevated-seed: #ffffff;
+  --theme-neutral-chrome: #f3f3f3; --theme-neutral-card: #fcfcfc;
+  --theme-mix-chrome: 92%; --theme-mix-card: 22%; --theme-mix-elevated: 28%;
+  --ui-base: var(--theme-foreground); --ui-accent: var(--theme-midground);
+  --ui-red: #cf2d56; --ui-orange: #db704b; --ui-yellow: #c08532; --ui-green: #1f8a65; --ui-blue: #0053fd;
+  --ui-bg-chrome: color-mix(in srgb, var(--theme-background-seed) var(--theme-mix-chrome), var(--theme-neutral-chrome));
+  --ui-bg-editor: color-mix(in srgb, var(--theme-card-seed) var(--theme-mix-card), var(--theme-neutral-card));
+  --ui-bg-elevated: color-mix(in srgb, var(--theme-elevated-seed) var(--theme-mix-elevated), var(--theme-neutral-card));
+  --ui-bg-card: color-mix(in srgb, var(--ui-accent) 4%, color-mix(in srgb, var(--ui-base) 4%, transparent));
+  --ui-bg-secondary: color-mix(in srgb, var(--ui-accent) 11%, color-mix(in srgb, var(--ui-base) 7%, transparent));
+  --ui-control-hover-background: color-mix(in srgb, var(--ui-accent) 6%, color-mix(in srgb, var(--ui-base) 4%, transparent));
+  --ui-text-primary: color-mix(in srgb, var(--ui-base) 94%, transparent);
+  --ui-text-secondary: color-mix(in srgb, var(--ui-base) 74%, transparent);
+  --ui-text-tertiary: color-mix(in srgb, var(--ui-base) 54%, transparent);
+  --ui-stroke-primary: color-mix(in srgb, var(--ui-accent) 24%, color-mix(in srgb, var(--ui-base) 10%, transparent));
+  --ui-stroke-secondary: color-mix(in srgb, var(--ui-accent) 16%, color-mix(in srgb, var(--ui-base) 7%, transparent));
+}
+:root.dark {
+  color-scheme: dark;
+  --theme-foreground: #e9e9ee; --theme-midground: #7c9cff;
+  --theme-background-seed: #101217; --theme-card-seed: #191b22; --theme-elevated-seed: #20232b;
+  --theme-neutral-chrome: #0d0d0e; --theme-neutral-card: #161618;
+  --theme-mix-chrome: 74%; --theme-mix-card: 38%; --theme-mix-elevated: 46%;
+  --ui-red: #e75e78; --ui-green: #55a583; --ui-orange: #e08a68; --ui-yellow: #d4a052; --ui-blue: #7c9cff;
+}
+html, body { margin: 0; height: 100%; }
+body { font-family: Inter, "Segoe UI", system-ui, sans-serif; background: var(--ui-bg-chrome); color: var(--ui-text-primary); }
+#root { height: 100%; }
+.frame { display: grid; grid-template-columns: 240px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 24px; height: 100vh; }
+.side { background: var(--ui-bg-chrome); padding: 44px 10px; display: grid; align-content: start; gap: 2px; font-size: 13px; color: var(--ui-text-secondary); }
+.side-row { padding: 5px 10px; border-radius: 6px; }
+.side-row.active { background: color-mix(in srgb, var(--ui-accent) 12%, transparent); color: var(--ui-text-primary); }
+.main { background: var(--ui-bg-editor); border-left: 1px solid var(--ui-stroke-secondary); min-height: 0; overflow: hidden; }
+.status { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 10px; font-size: 11px; color: var(--ui-text-tertiary); background: var(--ui-bg-chrome); border-top: 1px solid var(--ui-stroke-secondary); }
+.transcript { max-width: 760px; margin: 0 auto; padding: 32px 24px; display: grid; gap: 10px; font-size: 14px; }
+.bubble { color: var(--ui-text-primary); line-height: 1.5; }
+.toasts { position: fixed; right: 16px; bottom: 36px; display: grid; gap: 8px; }
+.toast { padding: 8px 12px; border-radius: 8px; background: var(--ui-bg-elevated); border: 1px solid var(--ui-stroke-primary); font-size: 12.5px; max-width: 360px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="harness.js"></script>
+</body>
+</html>
