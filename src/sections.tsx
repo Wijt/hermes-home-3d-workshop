@@ -14,12 +14,13 @@ import {
   noticeSummary,
   noticeTone,
   outcomeLabel,
+  sentence,
   setupSummary,
   sortChecks,
   watcherLine
 } from './model.ts'
 import type { Design, Overview } from './types.ts'
-import { Empty, PersonTag, RefImage, Reply, Section, Spinner, Tag, Thumb, useAction } from './ui.tsx'
+import { Empty, FixText, PersonTag, RefImage, Reply, Section, Spinner, Tag, Thumb, useAction } from './ui.tsx'
 import { PartViewer } from './viewer.tsx'
 
 type P = { ov: Overview; rest: Rest; nowSec: number }
@@ -31,7 +32,7 @@ const isPrinting = (status: string) => /^printing$|^running$/i.test(status.trim(
 export function Queue({ ov, rest }: P) {
   const nextIndex = ov.queue.findIndex(q => !isPrinting(q.status))
   return (
-    <Section id="queue" icon="layers" title="Up next" count={ov.queue.length} question="What prints next, and whose turn is it?">
+    <Section id="queue" title="Up next" count={ov.queue.length}>
       {ov.queue.length ? (
         <ol className="w-rows" aria-label="Print queue">
           {ov.queue.map((q, i) => (
@@ -40,14 +41,15 @@ export function Queue({ ov, rest }: P) {
                 {i + 1}
               </span>
               <Thumb rest={rest} fileRef={q.model?.preview ?? null} alt={`Preview of ${q.name}`} />
-              <div className="main">
+              <div className="w-main">
                 <span className="title">
                   <span className="ellipsis">{q.name || 'Untitled job'}</span>
-                  {isPrinting(q.status) ? <Tag tone="accent">Printing now</Tag> : i === nextIndex ? <Tag tone="accent" outline>Next</Tag> : null}
-                  {!q.ours ? (
-                    <Tag tone="neutral" outline>
-                      from elsewhere
-                    </Tag>
+                  {!isPrinting(q.status) ? null : ov.printer.state === 'printing' ? (
+                    <Tag tone="accent">Printing now</Tag>
+                  ) : ov.printer.state === 'paused' ? (
+                    <Tag tone="warn">Paused</Tag>
+                  ) : ov.printer.state === 'failed' ? (
+                    <Tag tone="bad">Failed</Tag>
                   ) : null}
                 </span>
                 <span className="sub">
@@ -60,9 +62,10 @@ export function Queue({ ov, rest }: P) {
                   )}
                   {fmtDuration(q.print_time_min) ? <span className="num">{fmtDuration(q.print_time_min)}</span> : null}
                   {q.eject_planned !== null ? <span>{q.eject_planned ? 'auto-eject' : 'stays on plate'}</span> : null}
+                  {!q.ours ? <span>from elsewhere</span> : null}
                 </span>
               </div>
-              <div className="end">{q.status && !isPrinting(q.status) ? <Tag tone="neutral">{q.status}</Tag> : null}</div>
+              <div className="end">{q.status && !isPrinting(q.status) ? <span className="state">{sentence(q.status)}</span> : null}</div>
             </li>
           ))}
         </ol>
@@ -81,20 +84,18 @@ export function DoneBox({ ov, rest, nowSec }: P) {
   return (
     <Section
       id="done"
-      icon="box"
       title="Done box"
       count={ov.done_box.length}
-      question="Did it come out, and whose part is waiting in the box?"
       aside={waiting ? <span className="faint">{waiting} to pick up</span> : null}
     >
       <Reply state={action} inline />
       {ov.done_box.length ? (
         <ul className="w-rows">
-          {ov.done_box.map(d => {
+          {ov.done_box.map((d, i) => {
             const out = outcomeLabel(d)
             const cmd = d.command || `home3d collected ${d.id}`
             return (
-              <li key={d.id} className="w-row" data-workshop-part={d.id}>
+              <li key={d.id || `row-${i}`} className="w-row" data-workshop-part={d.id}>
                 <span className="w-thumb" style={{ width: 64, height: 48 }}>
                   {d.photo ? (
                     <RefImage rest={rest} fileRef={d.photo} alt={`Photo of ${d.name} after printing`} fallback={<Icon name="camera" />} />
@@ -102,7 +103,7 @@ export function DoneBox({ ov, rest, nowSec }: P) {
                     <Icon name="camera" />
                   )}
                 </span>
-                <div className="main">
+                <div className="w-main">
                   <span className="title">
                     <span className="ellipsis">{d.name || 'A print'}</span>
                     <Tag tone={out.tone}>{out.text}</Tag>
@@ -122,6 +123,7 @@ export function DoneBox({ ov, rest, nowSec }: P) {
                       className="w-btn sm"
                       disabled={!!action.busy}
                       onClick={() => void action.run(cmd)}
+                      aria-label={`Picked up: ${d.name || 'a print'}`}
                       title={`Marks it as picked up (runs /${cmd})`}
                       data-workshop-action="collected"
                     >
@@ -145,7 +147,7 @@ export function DoneBox({ ov, rest, nowSec }: P) {
 export function Filament({ ov }: P) {
   const slots = ov.filament.slots
   return (
-    <Section id="filament" icon="spool" title="Filament" question="What is loaded in each slot.">
+    <Section id="filament" title="Filament">
       {slots.length ? (
         <div className="w-slots">
           {slots.map(s => {
@@ -154,41 +156,33 @@ export function Filament({ ov }: P) {
             if (!s.loaded) {
               return (
                 <div key={s.slot} className="w-slot empty">
-                  <div className="top">
-                    <span className="spool" style={{ ['--sw' as string]: 'transparent' }} aria-hidden />
-                    <span>{s.label} · empty</span>
-                  </div>
+                  <Spool pct={null} empty />
+                  <span className="mat faint">Empty</span>
+                  <span className="sub ellipsis">{s.label}</span>
                 </div>
               )
             }
             return (
-              <div key={s.slot} className="w-slot" title={hex ?? undefined}>
-                <div className="top">
-                  <span className="spool" style={{ ['--sw' as string]: hex ?? 'transparent' }} aria-hidden />
-                  <div style={{ minWidth: 0 }}>
-                    <div className="ellipsis" style={{ fontWeight: 600 }}>
-                      {s.material || 'Unknown material'}
-                    </div>
-                    <div className="faint ellipsis" style={{ fontSize: 12 }}>
-                      {s.label}
-                      {s.name ? ` · ${s.name}` : ''}
-                    </div>
-                  </div>
-                </div>
-                {s.remain_pct !== null ? (
-                  <>
-                    <div className={`lvl${low ? ' low' : ''}`} role="meter" aria-label={`${s.label} remaining`} aria-valuenow={s.remain_pct} aria-valuemin={0} aria-valuemax={100}>
-                      <i style={{ width: `${Math.max(0, Math.min(100, s.remain_pct))}%` }} />
-                    </div>
-                    <span className={`num ${low ? '' : 'faint'}`} style={{ fontSize: 11.5, color: low ? 'var(--w-red)' : undefined }}>
-                      {s.remain_pct}% left{low ? ' · running low' : ''}
-                    </span>
-                  </>
-                ) : (
-                  <span className="faint" style={{ fontSize: 11.5 }}>
-                    Amount not reported
-                  </span>
-                )}
+              <div
+                key={s.slot}
+                className={`w-slot${low ? ' low' : ''}`}
+                style={{ ['--sw' as string]: hex ?? undefined }}
+                title={[s.name, hex].filter(Boolean).join(', ') || undefined}
+              >
+                <Spool pct={s.remain_pct} />
+                <span className="mat ellipsis">{s.material || 'Unknown material'}</span>
+                <span
+                  className="sub num ellipsis"
+                  role={s.remain_pct !== null ? 'meter' : undefined}
+                  aria-label={s.remain_pct !== null ? `${s.label} remaining` : undefined}
+                  aria-valuenow={s.remain_pct ?? undefined}
+                  aria-valuemin={s.remain_pct !== null ? 0 : undefined}
+                  aria-valuemax={s.remain_pct !== null ? 100 : undefined}
+                >
+                  {s.label}
+                  {s.remain_pct !== null ? `, ${s.remain_pct}%${low ? ', low' : ''}` : ''}
+                </span>
+                {s.name ? <span className="brand">{s.name}</span> : null}
               </div>
             )
           })}
@@ -200,6 +194,31 @@ export function Filament({ ov }: P) {
   )
 }
 
+/** A spool seen from the side: the filament is wound as far out from the hub as the slot is full. */
+function Spool({ pct, empty }: { pct: number | null; empty?: boolean }) {
+  const hub = 7
+  const rim = 23.5
+  const level = pct === null ? 0.72 : Math.max(0, Math.min(100, pct)) / 100
+  const wound = hub + (rim - hub) * level
+  return (
+    <svg width="60" height="60" viewBox="-27 -27 54 54" aria-hidden>
+      <circle r="26" className="flange" />
+      {empty || wound <= hub + 0.5 ? null : (
+        <>
+          <circle r={wound} className="wound" />
+          {wound - hub > 6 ? <circle r={(wound + hub) / 2} className="turn" /> : null}
+        </>
+      )}
+      {empty ? null : (
+        <>
+          <circle r={hub} className="hub" />
+          <circle r="2.4" className="hole" />
+        </>
+      )}
+    </svg>
+  )
+}
+
 // ---- 6. Trust ---------------------------------------------------------------------------------------
 
 export function Notices({ ov, nowSec }: P) {
@@ -208,7 +227,7 @@ export function Notices({ ov, nowSec }: P) {
   const recent = n.recent.slice(0, 4)
   const older = n.recent.length - recent.length
   return (
-    <Section id="notices" icon="bell" title="Messages" question="Did everyone get told?">
+    <Section id="notices" title="Messages">
       {sum.tone !== 'neutral' ? (
         <div className={`w-summary t-${sum.tone}`}>
           <Icon name={sum.tone === 'good' ? 'check' : 'alert'} />
@@ -220,18 +239,16 @@ export function Notices({ ov, nowSec }: P) {
           {recent.map((r, i) => {
             const tone = noticeTone(r.status)
             return (
-              <li key={`${r.ts}-${i}`} className="w-row" style={{ alignItems: 'flex-start', padding: '8px 2px' }}>
+              <li key={`${r.ts}-${i}`} className="w-row" style={{ alignItems: 'flex-start', padding: '9px 0' }}>
                 <span className={`w-dot t-${tone}`} aria-hidden />
-                <div className="main">
+                <div className="w-main">
                   <span className="clamp2" title={r.text || undefined}>
                     {noticeLine(r)}
                   </span>
                   <span className="sub">
                     <span>to {r.to || 'someone'}</span>
                     <span>{fmtAgo(r.ts, nowSec)}</span>
-                    <span className={`t-${tone}`} style={{ color: 'var(--tone)', fontWeight: 600 }}>
-                      {noticeStatusLabel(r.status)}
-                    </span>
+                    <span className={`t-${tone} w-ink`}>{noticeStatusLabel(r.status)}</span>
                     {r.error ? <span className="faint">{r.error}</span> : null}
                   </span>
                 </div>
@@ -259,23 +276,21 @@ export function Improve({ ov, nowSec }: P) {
   return (
     <Section
       id="improve"
-      icon="hand"
       title="Where it needed you"
       count={open.length || null}
-      question="Moments it asked a human, and what it proposes to do better."
     >
       {open.length ? null : <Empty>Nothing needs a person right now{closed ? ` (${closed} handled before)` : ''}.</Empty>}
       {shown.length ? (
         <ul className="w-rows">
           {shown.map(h => (
             <li key={h.id} className="w-row" style={{ alignItems: 'flex-start' }} data-workshop-moment={h.open ? 'open' : 'handled'}>
-              <span style={{ color: h.open ? 'var(--w-yellow)' : 'var(--w-fg3)', marginTop: 2 }}>
+              <span className={`lead${h.open ? ' t-warn' : ''}`}>
                 <Icon name="hand" />
               </span>
-              <div className="main">
+              <div className="w-main">
                 <span className={h.open ? undefined : 'muted'}>{h.text}</span>
                 <span className="sub">
-                  {h.open ? null : <Tag tone="neutral">handled</Tag>}
+                  {h.open ? null : <span className="faint">Handled</span>}
                   {h.job ? <span>{h.job}</span> : null}
                   {h.who ? <span>for {h.who}</span> : null}
                   <span>{fmtAgo(h.ts, nowSec)}</span>
@@ -285,24 +300,22 @@ export function Improve({ ov, nowSec }: P) {
           ))}
         </ul>
       ) : null}
-      <div style={{ marginTop: 10 }}>
-        <div className="faint" style={{ fontSize: 11.5, fontWeight: 650, textTransform: 'uppercase', letterSpacing: '.06em', padding: '6px 0' }}>
-          Proposed upgrades
-        </div>
+      <div>
+        <h3 className="w-subhead">Proposed upgrades</h3>
         {ov.upgrades.length ? (
           <ul className="w-rows">
             {ov.upgrades.map(u => (
               <li key={u.id} className="w-row" style={{ alignItems: 'flex-start' }}>
-                <span style={{ color: 'var(--w-accent)', marginTop: 2 }}>
+                <span className="lead t-accent">
                   <Icon name="spark" />
                 </span>
-                <div className="main">
+                <div className="w-main">
                   <span className="title">
                     <span>{u.title}</span>
                   </span>
                   {u.why ? <span className="muted clamp3">{u.why}</span> : null}
                   <span className="sub">
-                    {u.status ? <Tag tone={u.status === 'done' ? 'good' : 'neutral'}>{u.status}</Tag> : null}
+                    {u.status ? <span className={u.status === 'done' ? 't-good w-ink' : 'faint'}>{sentence(u.status)}</span> : null}
                     {u.count ? <span className="num">came up {u.count}×</span> : null}
                     {u.model_ref ? (
                       <a className="w-link" href={u.model_ref} target="_blank" rel="noreferrer noopener">
@@ -326,7 +339,7 @@ export function Improve({ ov, nowSec }: P) {
 
 export function Designs({ ov, rest }: P) {
   return (
-    <Section id="designs" icon="cube" title="Design versions" count={ov.designs.length} question="Parts designed in chat, version by version.">
+    <Section id="designs" title="Design versions" count={ov.designs.length}>
       {ov.designs.length ? (
         <div>
           {ov.designs.map(d => (
@@ -377,14 +390,14 @@ function DesignRow({ d, rest }: { d: Design; rest: Rest }) {
         <div style={{ display: 'grid', gap: 8, minWidth: 0 }}>
           <div style={{ fontWeight: 600 }}>
             v{v.version}
-            {v.version === latest.version ? <span className="faint" style={{ fontWeight: 500 }}> · latest</span> : null}
+            {v.version === latest.version ? <span className="faint" style={{ fontWeight: 400 }}>, latest</span> : null}
           </div>
           {facts.length ? (
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <div className="w-facts-line num">
               {facts.map(f => (
-                <Tag key={f} tone={f.includes('too big') ? 'bad' : 'neutral'}>
+                <span key={f} className={f.includes('too big') ? 'bad' : undefined}>
                   {f}
-                </Tag>
+                </span>
               ))}
             </div>
           ) : null}
@@ -414,21 +427,18 @@ export function Setup({ ov, nowSec }: P) {
   const good = checks.filter(c => c.status === 'ok')
   const calls = ov.watcher.model_calls
   return (
-    <Section id="setup" icon="wrench" title="Health" question="Is the workshop connected and watching?">
+    <Section id="setup" title="Health">
       {checks.length ? (
         <div className={`w-summary t-${sum.tone}`}>
           <Icon name={sum.tone === 'good' ? 'check' : 'alert'} />
           {sum.text}
         </div>
       ) : null}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '2px 0 8px' }}>
-        <span className={`t-${w.tone}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--w-fg2)' }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--tone)' }} aria-hidden />
-          {w.text}
-        </span>
+      <div className="w-watch">
+        <span className={`beat t-${w.tone}`}>{w.text}</span>
         {calls !== null ? (
-          <span className="w-zero num" title="The watcher checks the printer with plain code: it spends no model calls.">
-            model calls: <b style={{ color: calls === 0 ? undefined : 'var(--w-yellow)' }}>{calls}</b>
+          <span className={`w-zero num${calls === 0 ? '' : ' spent'}`} title="The watcher checks the printer with plain code: it spends no model calls.">
+            <b>{calls}</b> model call{calls === 1 ? '' : 's'}
           </span>
         ) : null}
         {ov.setup.pending ? (
@@ -443,10 +453,10 @@ export function Setup({ ov, nowSec }: P) {
         <ul className="w-rows">
           {bad.map(c => (
             <li key={c.id || c.label} className="w-row" style={{ alignItems: 'flex-start' }}>
-              <span style={{ color: c.status === 'warn' ? 'var(--w-yellow)' : 'var(--w-red)', marginTop: 2 }}>
+              <span className={`lead t-${c.status === 'warn' ? 'warn' : 'bad'}`}>
                 <Icon name={c.status === 'warn' ? 'alert' : 'x'} />
               </span>
-              <div className="main">
+              <div className="w-main">
                 <span className="title">{c.label}</span>
                 {c.detail ? <span className="sub">{c.detail}</span> : null}
                 {c.fix ? (
@@ -467,11 +477,11 @@ export function Setup({ ov, nowSec }: P) {
           </summary>
           <ul className="w-rows">
             {good.map(c => (
-              <li key={c.id || c.label} className="w-row" style={{ padding: '6px 2px' }}>
-                <span style={{ color: 'var(--w-green)' }}>
+              <li key={c.id || c.label} className="w-row" style={{ padding: '6px 0' }}>
+                <span className="lead t-good">
                   <Icon name="check" />
                 </span>
-                <div className="main">
+                <div className="w-main">
                   <span>{c.label}</span>
                   {c.detail ? <span className="sub">{c.detail}</span> : null}
                 </div>
@@ -484,15 +494,5 @@ export function Setup({ ov, nowSec }: P) {
         <Empty icon="wrench">{ov.setup.pending ? 'The setup check is running; its results show here in a moment.' : 'The workshop has not run its setup check yet.'}</Empty>
       ) : null}
     </Section>
-  )
-}
-
-/** Show `backticked` parts of a fix line as code. */
-function FixText({ text }: { text: string }) {
-  const parts = text.split(/(`[^`]+`)/g)
-  return (
-    <span>
-      {parts.map((p, i) => (p.startsWith('`') && p.endsWith('`') && p.length > 2 ? <code key={i}>{p.slice(1, -1)}</code> : <span key={i}>{p}</span>))}
-    </span>
   )
 }

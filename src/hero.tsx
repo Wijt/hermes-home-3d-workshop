@@ -11,8 +11,9 @@ import {
   approvalCopy,
   ejectLabel,
   failingChecks,
-  filamentLine,
+  filamentParts,
   fmtAgo,
+  groupTone,
   fmtDuration,
   heroMode,
   isActive,
@@ -28,7 +29,7 @@ import {
   waitingCommand
 } from './model.ts'
 import type { Overview, Waiting } from './types.ts'
-import { PersonTag, RefImage, Reply, Spinner, useAction } from './ui.tsx'
+import { Avatar, FixText, PersonTag, RefImage, Reply, Spinner, Tag, useAction } from './ui.tsx'
 import { PartViewer } from './viewer.tsx'
 
 export function Hero({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: number }) {
@@ -36,7 +37,7 @@ export function Hero({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
   const printerAction = useAction()
   return (
     <section className="w-hero" aria-label="Printer now" data-workshop-hero={mode}>
-      <StatusStrip ov={ov} action={printerAction} rest={rest} nowSec={nowSec} showCam={mode === 'approve'} />
+      <StatusStrip ov={ov} action={printerAction} rest={rest} nowSec={nowSec} showCam={mode === 'approve'} brief={mode === 'running'} />
       <Reply state={printerAction} />
       {mode === 'approve' ? (
         <Approvals ov={ov} rest={rest} nowSec={nowSec} action={printerAction} />
@@ -60,7 +61,8 @@ function StatusStrip({
   action,
   rest,
   nowSec,
-  showCam
+  showCam,
+  brief
 }: {
   ov: Overview
   action: ReturnType<typeof useAction>
@@ -68,6 +70,8 @@ function StatusStrip({
   nowSec: number
   /** The body shows something else (an approval): keep the camera one click away. */
   showCam: boolean
+  /** The body below is the print itself: the strip keeps the state and the controls, and repeats nothing. */
+  brief: boolean
 }) {
   const p = ov.printer
   const [confirmStop, setConfirmStop] = useState(false)
@@ -90,7 +94,7 @@ function StatusStrip({
             onClick={() => setBigCam(v => !v)}
             aria-expanded={bigCam}
             aria-label={`Camera picture${camAgo ? `, ${camAgo}` : ''}: ${bigCam ? 'hide' : 'show larger'}`}
-            title={`Camera${camAgo ? ` · ${camAgo}` : ''}`}
+            title={`Camera${camAgo ? `, ${camAgo}` : ''}`}
             data-workshop-camthumb=""
           >
             <RefImage rest={rest} fileRef={cam} alt="" fallback={<Icon name="camera" />} />
@@ -100,11 +104,11 @@ function StatusStrip({
           <span className="dot" aria-hidden />
           {stateLabel(p.state)}
         </span>
-        {job ? (
+        {job && !brief ? (
           <span className="w-strip-job">
             <span className="name ellipsis">{job}</span>
             {ov.now ? (
-              <span className="faint">
+              <span className="faint w-for">
                 for <PersonTag p={ov.now.for} groups={ov.groups} />
               </span>
             ) : null}
@@ -112,7 +116,7 @@ function StatusStrip({
         ) : (
           <span className="w-strip-job" />
         )}
-        {active ? (
+        {brief ? null : active ? (
           <span className="w-strip-meta num">
             <span>{pct}%</span>
             {fmtDuration(p.remaining_min) ? (
@@ -175,7 +179,7 @@ function StatusStrip({
           </span>
         ) : null}
       </div>
-      {active ? (
+      {active && !brief ? (
         <div
           className="w-strip-bar"
           role="progressbar"
@@ -188,12 +192,12 @@ function StatusStrip({
         </div>
       ) : null}
       {cam && bigCam ? (
-        <div style={{ padding: '0 16px 14px', maxWidth: 560 }}>
+        <div style={{ padding: '0 20px 16px', maxWidth: 560 }}>
           <CameraFrame ov={ov} rest={rest} nowSec={nowSec} fallback={null} />
         </div>
       ) : null}
       {confirmStop && active ? (
-        <div style={{ padding: '0 16px 14px' }}>
+        <div style={{ padding: '0 20px 16px' }}>
           <div className="w-confirm" role="alertdialog" aria-labelledby="w-stop-q">
             <p id="w-stop-q">
               <b>Stop “{job || 'this print'}” now?</b>{' '}
@@ -227,7 +231,7 @@ function StatusStrip({
         </div>
       ) : null}
       {p.errors.length ? (
-        <div style={{ padding: '0 16px 12px' }}>
+        <div style={{ padding: '0 20px 12px' }}>
           {p.errors.map((e, i) => (
             <div key={`${e.code}-${i}`} className="w-banner t-bad" style={{ marginBottom: 6 }}>
               <Icon name="alert" />
@@ -253,19 +257,26 @@ function Approvals({ ov, rest, nowSec, action }: { ov: Overview; rest: Rest; now
   return (
     <>
       {ov.waiting.length > 1 ? (
-        <div className="w-tabs" role="tablist" aria-label="Waiting for you">
-          {ov.waiting.map((x, i) => (
-            <button
-              key={`${x.action}-${x.queue_item_id ?? 'x'}-${x.id}`}
-              type="button"
-              role="tab"
-              className="w-tab"
-              aria-selected={i === index}
-              onClick={() => setPick(i)}
-            >
-              {i + 1}. {x.name || 'Job'} · {x.asked_by.name || 'someone'}
-            </button>
-          ))}
+        <div className="w-tabs">
+          <span className="w-tabs-label" id="w-tabs-label">
+            {ov.waiting.length} waiting for your OK
+          </span>
+          <div role="group" aria-labelledby="w-tabs-label" style={{ display: 'contents' }}>
+            {ov.waiting.map((x, i) => (
+              <button
+                key={`${x.action}-${x.queue_item_id ?? 'x'}-${x.id}`}
+                type="button"
+                className="w-tab"
+                aria-pressed={i === index}
+                aria-label={`${x.name || 'Job'}, asked by ${personLabel(x.asked_by)}`}
+                title={`${x.name || 'Job'}, asked by ${personLabel(x.asked_by)}`}
+                onClick={() => setPick(i)}
+              >
+                <Avatar p={x.asked_by} groups={ov.groups} small />
+                <span className="ellipsis">{x.name || 'Job'}</span>
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
       <ApprovalCard key={`${w.action}-${w.queue_item_id ?? 'x'}-${w.id}`} w={w} ov={ov} rest={rest} nowSec={nowSec} action={action} />
@@ -286,10 +297,17 @@ function ApprovalCard({ w, ov, rest, nowSec, action }: { w: Waiting; ov: Overvie
   const busyAlt = !!w.alt && action.busy === w.alt.command
   const done = action.outcome?.kind === 'ran' && action.outcome.ok && (action.outcome.command === command || action.outcome.command === w.alt?.command)
   const owner = ov.viewer.is_owner
-  const kicker = w.action === 'start' ? 'Waiting for your OK' : w.action === 'clear' ? 'Plate check' : 'Paused, waiting for you'
+  const need = w.action === 'start' ? 'Waiting for your OK' : w.action === 'clear' ? 'Plate check' : 'Paused, waiting for you'
   const notReady = failing.length
     ? `${failing.length} check${failing.length > 1 ? 's' : ''} not passed yet: the printer refuses until ${failing.length > 1 ? 'they are' : 'it is'} fixed.`
     : 'Not ready yet: the printer refuses for now.'
+  const ago = fmtAgo(w.asked_ts, nowSec)
+  const words = w.request_text.trim()
+  const group = w.asked_by.group.trim()
+  const fil = filamentParts(w.facts, ov.filament.slots)
+  const filMore = [fil.name, fil.where.toLowerCase()].filter(Boolean).join(', ')
+  const passed = w.checklist.length - failing.length
+  const [allWords, setAllWords] = useState(false)
   return (
     <div className="w-hero-body" data-workshop-approval={w.id}>
       <PartViewer
@@ -298,48 +316,57 @@ function ApprovalCard({ w, ov, rest, nowSec, action }: { w: Waiting; ov: Overvie
         preview={w.model?.preview ?? null}
         color={swatch}
         label={w.name || 'the part'}
+        className="tall"
         autoMount
       />
-      <div style={{ minWidth: 0 }}>
-        <span className="w-kicker t-accent">
-          <Icon name="hand" size={13} /> {kicker}
-        </span>
-        <h3 className="w-big">{w.name || 'A print job'}</h3>
-        <p className="w-asked">
-          <span>asked by</span> <PersonTag p={w.asked_by} groups={ov.groups} />
-          {fmtAgo(w.asked_ts, nowSec) ? <span className="faint">· {fmtAgo(w.asked_ts, nowSec)}</span> : null}
+      <div className="w-ask">
+        <p className="w-sender">
+          {words ? null : <span className="faint">asked by</span>}
+          <Avatar p={w.asked_by} groups={ov.groups} />
+          <PersonTag p={w.asked_by} groups={ov.groups} />
+          {ago ? <span className="faint">{ago}</span> : null}
         </p>
-        {w.request_text ? <blockquote className="w-quote">“{w.request_text}”</blockquote> : null}
+        {words ? (
+          <>
+            <blockquote className={`w-bubble g-${group ? groupTone(ov.groups, group) : 'other'}${words.length > 140 ? ' long' : ''}`}>
+              <span className={`words${allWords ? '' : ' clamped'}`}>{words}</span>
+            </blockquote>
+            {words.length > 260 ? (
+              <button type="button" className="w-link w-bubble-more" aria-expanded={allWords} onClick={() => setAllWords(v => !v)}>
+                {allWords ? 'Show less' : 'Show the whole request'}
+              </button>
+            ) : null}
+          </>
+        ) : null}
+        <div className="w-jobline">
+          <h3 className={words ? 'w-job' : 'w-big'}>{w.name || 'A print job'}</h3>
+          <Tag tone="accent">{need}</Tag>
+        </div>
         {w.action === 'start' ? (
-          <dl className="w-facts">
-            <div className="w-fact">
-              <dt>Print time</dt>
-              <dd className="num">{fmtDuration(w.facts.print_time_min) || 'Unknown'}</dd>
-            </div>
-            <div className="w-fact">
-              <dt>Filament</dt>
-              <dd className="num">{w.facts.grams !== null ? `${Math.round(w.facts.grams * 10) / 10} g` : 'Unknown'}</dd>
-            </div>
-            <div className="w-fact">
-              <dt>Material</dt>
-              <dd>
-                {swatch ? <span className="w-swatch" style={{ ['--sw' as string]: swatch }} aria-hidden /> : null}
-                <span>{filamentLine(w.facts, ov.filament.slots)}</span>
-              </dd>
-            </div>
-            <div className="w-fact" title={w.facts.eject_reason || undefined}>
-              <dt>When done</dt>
-              <dd>
-                <Icon name={w.facts.eject_planned ? 'eject' : 'box'} size={13} />
-                <span>{ejectLabel(w.facts.eject_planned)}</span>
-              </dd>
-            </div>
+          <dl className="w-spec">
+            <dt>Print time</dt>
+            <dd className="num">{fmtDuration(w.facts.print_time_min) || 'Unknown'}</dd>
+            <dt>Filament</dt>
+            <dd>
+              {swatch ? <span className="w-swatch" style={{ ['--sw' as string]: swatch }} aria-hidden /> : null}
+              <span className="num">
+                {w.facts.grams === null && !fil.material
+                  ? 'Not chosen yet'
+                  : `${w.facts.grams !== null ? `${Math.round(w.facts.grams * 10) / 10} g` : 'Amount unknown,'} ${
+                      fil.material ? `${w.facts.grams !== null ? 'of ' : ''}${fil.material}` : 'of a material not chosen yet'
+                    }`}
+              </span>
+              {filMore ? <span className="more">{filMore}</span> : null}
+            </dd>
+            <dt>When done</dt>
+            <dd title={w.facts.eject_reason || undefined}>
+              <Icon name={w.facts.eject_planned ? 'eject' : 'box'} size={13} />
+              <span>{ejectLabel(w.facts.eject_planned)}</span>
+            </dd>
           </dl>
-        ) : (
-          <div style={{ height: 14 }} />
-        )}
+        ) : null}
         {slot && slot.remain_pct !== null && w.facts.grams !== null && slot.remain_pct < 15 ? (
-          <div className="w-banner t-warn">
+          <div className="w-banner t-warn" style={{ margin: '14px 0 0' }}>
             <Icon name="spool" />
             <span>
               {slotLabel(w.facts, ov.filament.slots)} is down to {slot.remain_pct}%: check there is enough for {Math.round(w.facts.grams)} g.
@@ -347,17 +374,23 @@ function ApprovalCard({ w, ov, rest, nowSec, action }: { w: Waiting; ov: Overvie
           </div>
         ) : null}
         {w.checklist.length ? (
-          <ul className="w-checks" aria-label="Safety checklist">
-            {w.checklist.map(c => (
-              <li key={c.id || c.label} className={c.ok ? 'ok' : 'no'}>
-                <Icon name={c.ok ? 'check' : 'x'} title={c.ok ? 'passed' : 'not passed'} />
-                <span>
-                  {c.label}
-                  {c.detail ? <span className="detail"> · {c.detail}</span> : null}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <p className={`w-checks-sum t-${failing.length ? 'bad' : 'good'}`}>
+              <Icon name={failing.length ? 'alert' : 'check'} />
+              {failing.length ? `${failing.length} of ${w.checklist.length} checks not passed` : `All ${passed} checks passed`}
+            </p>
+            <ul className="w-checks" aria-label="Safety checklist">
+              {w.checklist.map(c => (
+                <li key={c.id || c.label} className={c.ok ? 'ok' : 'no'}>
+                  <Icon name={c.ok ? 'check' : 'x'} title={c.ok ? 'passed' : 'not passed'} />
+                  <span>
+                    {c.label}
+                    {c.detail ? <span className="detail">{c.detail}</span> : null}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
         ) : null}
         <div className="w-go">
           <button
@@ -405,7 +438,7 @@ function CameraFrame({ ov, rest, nowSec, fallback }: { ov: Overview; rest: Rest;
       <RefImage rest={rest} fileRef={cam.frame} alt="Latest picture from the printer camera" className="fill cover" fallback={fallback} />
       <div className="over bl">
         <span className="w-photo-cap">
-          <Icon name="camera" size={12} /> Camera{ago ? ` · ${ago}` : ''}
+          <Icon name="camera" size={12} /> Camera{ago ? `, ${ago}` : ''}
         </span>
       </div>
     </div>
@@ -441,19 +474,18 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
   return (
     <div className="w-hero-body">
       <CameraFrame ov={ov} rest={rest} nowSec={nowSec} fallback={fallback} />
-      <div style={{ minWidth: 0, alignSelf: 'center' }}>
-        <span className={`w-kicker t-${stateTone(p.state)}`}>{p.state === 'paused' ? 'Paused' : 'Printing now'}</span>
+      <div className="w-run">
         <h3 className="w-big">{ov.now?.name || p.job_name || 'A print job'}</h3>
         {ov.now ? (
           <p className="w-asked">
             <span>for</span> <PersonTag p={ov.now.for} groups={ov.groups} />
           </p>
         ) : null}
-        <div className="w-pct num" style={{ marginTop: 16 }}>
+        <div className="w-pct num">
           {pct}
           <small>%</small>
         </div>
-        <div className="w-bigbar" aria-hidden>
+        <div className="w-bigbar" role="progressbar" aria-label="Print progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
           <i style={{ width: `${pct}%` }} />
         </div>
         <div className="w-lines num">
@@ -461,7 +493,7 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
             <div>
               <Icon name="clock" />
               <span>
-                <b>{left}</b> left{endsAt ? ` · done around ${endsAt}` : ''}
+                <b>{left}</b> left{endsAt ? `, done around ${endsAt}` : ''}
               </span>
             </div>
           ) : null}
@@ -487,7 +519,7 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
           ) : null}
         </div>
         {after.length ? (
-          <div className="w-banner t-accent" style={{ marginTop: 16, marginBottom: 0 }} data-workshop-after-print="">
+          <div className="w-banner t-accent" style={{ marginTop: 18, marginBottom: 0 }} data-workshop-after-print="">
             <Icon name="hand" />
             <span>
               <b>Waiting for your OK after this print:</b>{' '}
@@ -495,7 +527,18 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
                 <span key={`${w.action}-${w.queue_item_id ?? i}`}>
                   {i ? ', ' : ''}
                   {w.name || 'a job'}
-                  {w.asked_by.name ? <span className="muted"> for {personLabel(w.asked_by)}</span> : null}
+                  {w.asked_by.name ? (
+                    <span className="muted">
+                      {' '}
+                      for <PersonTag p={w.asked_by} groups={ov.groups} />
+                    </span>
+                  ) : null}
+                  {failingChecks(w.checklist).length ? (
+                    <span className="muted">
+                      {' '}
+                      ({failingChecks(w.checklist).length} check{failingChecks(w.checklist).length > 1 ? 's' : ''} not passed yet)
+                    </span>
+                  ) : null}
                 </span>
               ))}
             </span>
@@ -514,7 +557,6 @@ function Idle({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: number }
   return (
     <div className="w-idle">
       <div>
-        {finished ? <span className="w-kicker t-good">Finished</span> : null}
         <h3 className="w-big">
           {finished ? `${ov.now?.name || ov.printer.job_name || 'The last job'} is done.` : 'Nothing is printing, and nothing is waiting for you.'}
         </h3>
@@ -522,7 +564,7 @@ function Idle({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: number }
           {next ? (
             <>
               Next in line: <b>{next.name}</b> for <PersonTag p={next.for} groups={ov.groups} />
-              {next.status ? <span className="faint"> · {next.status}</span> : null}
+              {next.status ? <span className="faint">, {next.status}</span> : null}
             </>
           ) : (
             <>When someone asks {ov.persona || 'the printer'} for a part in a chat, it shows up here for your OK.</>
@@ -545,9 +587,6 @@ function Attention({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: num
   return (
     <div className="w-idle">
       <div>
-        <span className="w-kicker t-bad">
-          <Icon name="alert" size={13} /> Needs a look
-        </span>
         <h3 className="w-big">{title}</h3>
         <p className="muted" style={{ marginTop: 6 }}>
           {p.awaiting_plate_clear
@@ -565,19 +604,17 @@ function Offline({ ov }: { ov: Overview }) {
   return (
     <div className="w-idle">
       <div>
-        <span className="w-kicker t-bad">
-          <Icon name="alert" size={13} /> Offline
-        </span>
         <h3 className="w-big">The printer is not answering.</h3>
         <p className="muted" style={{ marginTop: 6 }}>
           {firstBad ? (
             <>
               {firstBad.label}: {firstBad.detail}
+              {/[.!?]$/.test(firstBad.detail.trim()) ? '' : '.'}
               {firstBad.fix ? (
-                <>
-                  {' '}
-                  <b>Fix:</b> {firstBad.fix}
-                </>
+                <span className="w-fix" style={{ fontSize: 13 }}>
+                  <b>Fix:</b>
+                  <FixText text={firstBad.fix} />
+                </span>
               ) : null}
             </>
           ) : (

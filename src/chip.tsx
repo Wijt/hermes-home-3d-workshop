@@ -1,4 +1,4 @@
-/** Status-bar chip: "Printing 62% · for Mum · 41 min", "Waiting for you: 1", "Idle". Click opens the page. */
+/** Status-bar chip: "Printing 62% for Mum, 41 min left", "Waiting for you: 1", "Idle". Click opens the page. */
 
 import { host } from '@hermes/plugin-sdk'
 

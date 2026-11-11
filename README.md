@@ -141,7 +141,7 @@ The screen has these parts:
 - **Design versions**: parts designed in chat, each version in 3D.
 - **Health**: the setup check, the watcher's last pass and its model calls (0).
 
-Hermes Desktop also gets a status-bar chip ("Printing 62% · for Mum · 41 min", "Waiting for you: 1",
+Hermes Desktop also gets a status-bar chip ("Printing 62% for Mum, 41 min left", "Waiting for you: 1",
 "Idle"), a command-palette entry, and an inline 3D card for parts made with `home3d_design` (on a Desktop
 that offers the tool-media slot; older ones keep their own picture).
 

@@ -269,8 +269,8 @@ export function normalize(raw: unknown): Overview {
 export function personLabel(p: Person | null | undefined): string {
   const name = p?.name?.trim() || ''
   const group = p?.group?.trim() || ''
-  if (!name) return group ? `someone · ${group}` : 'someone'
-  return group ? `${name} · ${group}` : name
+  if (!name) return group ? `someone (${group})` : 'someone'
+  return group ? `${name} (${group})` : name
 }
 
 /** "41 min", "1 h 05 min", "2 h", "under a minute"; "" when unknown. */
@@ -359,18 +359,17 @@ export function chipText(ov: Overview): { text: string; tone: Tone } {
   const who = ov.now?.for?.name?.trim()
   if (approvalLeads(ov)) return { text: `Waiting for you: ${ov.waiting.length}`, tone: 'accent' }
   if (p.state === 'printing') {
-    const parts = [`Printing ${progressPct(p)}%`]
-    if (who) parts.push(`for ${who}`)
+    const parts = [`Printing ${progressPct(p)}%${who ? ` for ${who}` : ''}`]
     const left = fmtDuration(p.remaining_min)
-    if (left) parts.push(left)
+    if (left) parts.push(`${left} left`)
     if (ov.waiting.length) parts.push(`${ov.waiting.length} waiting`)
-    return { text: parts.join(' · '), tone: 'neutral' }
+    return { text: parts.join(', '), tone: 'neutral' }
   }
-  if (p.state === 'paused') return { text: `Paused ${progressPct(p)}%${who ? ` · for ${who}` : ''}`, tone: 'warn' }
+  if (p.state === 'paused') return { text: `Paused ${progressPct(p)}%${who ? ` for ${who}` : ''}`, tone: 'warn' }
   if (p.state === 'failed') return { text: 'Print failed', tone: 'bad' }
   if (p.state === 'offline') return { text: 'Printer offline', tone: 'bad' }
   if (p.awaiting_plate_clear) return { text: 'Plate needs clearing', tone: 'warn' }
-  if (p.state === 'finished') return { text: who ? `Finished · for ${who}` : 'Finished', tone: 'good' }
+  if (p.state === 'finished') return { text: who ? `Finished for ${who}` : 'Finished', tone: 'good' }
   return { text: 'Idle', tone: 'neutral' }
 }
 
@@ -434,12 +433,31 @@ export function partColor(f: Facts | null, slots: Slot[]): string | null {
 }
 
 /** "PLA · Bambu PLA Matte · Slot 3" */
-export function filamentLine(f: Facts, slots: Slot[]): string {
+/** What a job prints with: the material, the spool's name (or a colour word), and where it is loaded. */
+export function filamentParts(f: Facts, slots: Slot[]): { material: string; name: string; where: string } {
   const slot = slotByNumber(slots, f.slot)
-  const material = f.material || slot?.material || ''
-  const colour = slot?.name || (hexColor(f.color) ? '' : f.color)
-  const where = f.slot_label || slot?.label || (f.slot !== null ? `Slot ${f.slot}` : '')
-  return [material, colour, where].filter(Boolean).join(' · ') || 'Not chosen yet'
+  return {
+    material: f.material || slot?.material || '',
+    name: slot?.name || (hexColor(f.color) ? '' : f.color),
+    where: f.slot_label || slot?.label || (f.slot !== null ? `Slot ${f.slot}` : '')
+  }
+}
+
+export function filamentLine(f: Facts, slots: Slot[]): string {
+  const { material, name, where } = filamentParts(f, slots)
+  return [material, name, where].filter(Boolean).join(', ') || 'Not chosen yet'
+}
+
+/** A backend word or phrase ("pending", "queued in Bambuddy") as the page writes states: sentence case. */
+export function sentence(text: string | null | undefined): string {
+  const t = (text || '').trim()
+  return t ? t.charAt(0).toLocaleUpperCase() + t.slice(1) : ''
+}
+
+/** The letter on a person's avatar. */
+export function initial(name: string | null | undefined): string {
+  const first = Array.from((name || '').trim())[0]
+  return first ? first.toLocaleUpperCase() : '?'
 }
 
 export function slotLabel(f: Facts, slots: Slot[]): string {

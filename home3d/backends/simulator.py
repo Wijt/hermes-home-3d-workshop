@@ -399,15 +399,17 @@ def _hex_rgb(colour: str, default=(226, 226, 220)) -> tuple[int, int, int]:
     if not m:
         return default
     r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4))
-    if 0.3 * r + 0.59 * g + 0.11 * b < 110:  # keep the part visible on the dark plate
+    if 0.3 * r + 0.59 * g + 0.11 * b < 70:  # keep a black or navy part visible on the dark sheet
         r, g, b = ((v + 255) // 2 for v in (r, g, b))
     return r, g, b
 
 
 def render_plate_png(part: Optional[dict], lit: bool = True) -> bytes:
-    """320x240 camera-ish frame: dark textured plate, light rectangle for a part (footprint to scale)."""
+    """320x240 camera-ish frame, looking straight down: the dark bronze build sheet fills the frame (the
+    camera crops its front and back edge), with a light rectangle for a part (footprint to scale)."""
     W, H = SNAPSHOT_SIZE
-    buf = bytearray(bytes((16, 16, 18)) * (W * H))
+    sheet, line, shadow = (58, 52, 45), (70, 63, 55), (36, 32, 28)
+    buf = bytearray(bytes(sheet) * (W * H))
 
     def rect(xa: int, ya: int, xb: int, yb: int, col) -> None:
         xa, xb, ya, yb = max(0, xa), min(W, xb), max(0, ya), min(H, yb)
@@ -418,19 +420,17 @@ def render_plate_png(part: Optional[dict], lit: bool = True) -> bytes:
             o = (y * W + xa) * 3
             buf[o:o + len(row)] = row
 
-    size = 216
-    px, py = (W - size) // 2, (H - size) // 2
-    rect(px, py, px + size, py + size, (42, 42, 48))
-    for k in range(1, 8):
-        rect(px + k * size // 8, py, px + k * size // 8 + 1, py + size, (52, 52, 59))
-        rect(px, py + k * size // 8, px + size, py + k * size // 8 + 1, (52, 52, 59))
+    scale = W / PLATE_MM
+    step = round(32 * scale)  # a line every 32 mm, one of them through the centre
+    for x in range((W // 2) % step, W, step):
+        rect(x, 0, x + 1, H, line)
+    for y in range((H // 2) % step, H, step):
+        rect(0, y, W, y + 1, line)
     if part:
         w, d = part.get("dims", (40, 40, 10))[:2]
-        scale = size / PLATE_MM
         pw, ph = max(4, round(w * scale)), max(4, round(d * scale))
-        cx, cy = px + size // 2, py + size // 2
-        xa, ya = cx - pw // 2, cy - ph // 2
-        rect(xa - 2, ya - 2, xa + pw + 2, ya + ph + 2, (120, 120, 116))
+        xa, ya = W // 2 - pw // 2, H // 2 - ph // 2
+        rect(xa + 3, ya + 4, xa + pw + 5, ya + ph + 6, shadow)
         rect(xa, ya, xa + pw, ya + ph, _hex_rgb(part.get("colour", "")))
     if not lit:
         buf = buf.translate(bytes(int(i * 0.3) for i in range(256)))

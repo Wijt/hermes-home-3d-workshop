@@ -1,12 +1,12 @@
 /** Small building blocks shared by the page, the transcript card and the chip. */
 
 import { host } from '@hermes/plugin-sdk'
-import { type ReactNode, useCallback, useRef, useState } from 'react'
+import { type ReactNode, type SyntheticEvent, useCallback, useRef, useState } from 'react'
 
 import { type ActionOutcome, runCommand } from './actions.ts'
 import { refreshOverview, type Rest, useFile } from './data.ts'
 import { Icon, type IconName } from './icons.tsx'
-import { groupTone, personLabel, type Tone } from './model.ts'
+import { groupTone, initial, personLabel, type Tone } from './model.ts'
 import { CSS } from './styles.ts'
 import type { Group, Person } from './types.ts'
 
@@ -18,32 +18,42 @@ export function Tag({ tone = 'neutral', children, outline }: { tone?: Tone; chil
   return <span className={`w-tag t-${tone}${outline ? ' outline' : ''}`}>{children}</span>
 }
 
-/** "Mum · Family" with the group's colour dot; the plain text is the accessible name. */
+/** The round initial a chat shows beside a sender, in the colour of the group they asked from. */
+export function Avatar({ p, groups, small }: { p: Person | null | undefined; groups: Group[]; small?: boolean }) {
+  const group = p?.group?.trim() || ''
+  return (
+    <span className={`w-ava${small ? ' sm' : ''} g-${group ? groupTone(groups, group) : 'other'}`} aria-hidden>
+      {initial(p?.name)}
+    </span>
+  )
+}
+
+/** "Mum", then the group with its colour dot; the title says both in words. */
 export function PersonTag({ p, groups }: { p: Person | null | undefined; groups: Group[] }) {
   const name = p?.name?.trim() || 'someone'
   const group = p?.group?.trim() || ''
   return (
     <span className="w-person" title={personLabel(p)}>
       <b>{name}</b>
-      {group ? <span className={`grp g-${groupTone(groups, group)}`}>{group}</span> : null}
+      {group ? (
+        <span className={`grp g-${groupTone(groups, group)}`}>
+          <span>{group}</span>
+        </span>
+      ) : null}
     </span>
   )
 }
 
 export function Section({
   id,
-  icon,
   title,
   count,
-  question,
   aside,
   children
 }: {
   id: string
-  icon: IconName
   title: string
   count?: number | null
-  question?: string
   aside?: ReactNode
   children: ReactNode
 }) {
@@ -51,13 +61,11 @@ export function Section({
     <section aria-labelledby={`w-sec-${id}`} data-workshop-section={id}>
       <div className="w-sec-head">
         <h2 id={`w-sec-${id}`}>
-          <Icon name={icon} />
           {title}
           {count ? <span className="count num">{count}</span> : null}
         </h2>
         {aside ? <div className="aside">{aside}</div> : null}
       </div>
-      {question ? <p className="w-sec-q">{question}</p> : null}
       {children}
     </section>
   )
@@ -78,18 +86,20 @@ export function RefImage({
   fileRef,
   alt,
   className,
-  fallback = null
+  fallback = null,
+  onLoad
 }: {
   rest: Rest
   fileRef: string | null
   alt: string
   className?: string
   fallback?: ReactNode
+  onLoad?: (e: SyntheticEvent<HTMLImageElement>) => void
 }) {
   const { file, loading } = useFile(rest, fileRef)
   if (loading) return <div className={`w-skel ${className ?? ''}`} style={{ width: '100%', height: '100%' }} aria-hidden />
   if (!file?.dataUrl || !/^data:image\//.test(file.dataUrl)) return <>{fallback}</>
-  return <img className={className} src={file.dataUrl} alt={alt} draggable={false} />
+  return <img className={className} src={file.dataUrl} alt={alt} draggable={false} onLoad={onLoad} />
 }
 
 export function Thumb({ rest, fileRef, alt, icon = 'cube' }: { rest: Rest; fileRef: string | null; alt: string; icon?: IconName }) {
@@ -166,10 +176,19 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+/** Show `backticked` parts of a line as code (a fix the owner may want to copy). */
+export function FixText({ text }: { text: string }) {
+  const parts = text.split(/(`[^`]+`)/g)
+  return (
+    <span>
+      {parts.map((p, i) => (p.startsWith('`') && p.endsWith('`') && p.length > 2 ? <code key={i}>{p.slice(1, -1)}</code> : <span key={i}>{p}</span>))}
+    </span>
+  )
+}
+
 export function Spinner() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden style={{ animation: 'h3w-spin 0.9s linear infinite' }}>
-      <style>{'@keyframes h3w-spin { to { transform: rotate(360deg) } }'}</style>
+    <svg className="w-spin" width="14" height="14" viewBox="0 0 16 16" aria-hidden>
       <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity=".25" strokeWidth="2" />
       <path d="M14 8a6 6 0 0 0-6-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>

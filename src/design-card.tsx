@@ -74,16 +74,16 @@ function Card({
       </div>
       <PartViewer rest={rest} stl={version?.stl ?? null} preview={null} still={src} color={null} label={`${title} v${call.version}`} />
       {facts.length || call.warnings.length ? (
-        <div className="facts">
+        <div className="w-facts-line num">
           {facts.map(f => (
-            <Tag key={f} tone={f.includes('too big') ? 'bad' : 'neutral'}>
+            <span key={f} className={f.includes('too big') ? 'bad' : undefined}>
               {f}
-            </Tag>
+            </span>
           ))}
           {call.warnings.map(w => (
-            <Tag key={w} tone="warn">
+            <span key={w} className="warn" title={w}>
               {w.length > 60 ? `${w.slice(0, 57)}…` : w}
-            </Tag>
+            </span>
           ))}
         </div>
       ) : null}

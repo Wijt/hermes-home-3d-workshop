@@ -75,14 +75,14 @@ test('the status-bar chip says the one thing that matters', () => {
   const ov = base()
   ov.waiting[0].ready = false // the backend says it can only start after Mum's print
   // the chip says the print, and that one job waits
-  assert.deepEqual(chipText(ov), { text: 'Printing 62% · for Mum · 41 min · 1 waiting', tone: 'neutral' })
+  assert.deepEqual(chipText(ov), { text: 'Printing 62% for Mum, 41 min left, 1 waiting', tone: 'neutral' })
   ov.printer.state = 'idle'
   assert.deepEqual(chipText(ov), { text: 'Waiting for you: 1', tone: 'accent' })
   ov.printer.state = 'printing'
   ov.waiting = []
-  assert.equal(chipText(ov).text, 'Printing 62% · for Mum · 41 min')
+  assert.equal(chipText(ov).text, 'Printing 62% for Mum, 41 min left')
   ov.printer.state = 'paused'
-  assert.equal(chipText(ov).text, 'Paused 62% · for Mum')
+  assert.equal(chipText(ov).text, 'Paused 62% for Mum')
   ov.printer.state = 'idle'
   ov.now = null
   assert.equal(chipText(ov).text, 'Idle')
@@ -118,7 +118,7 @@ test('the top band leads with an approval that can go now, else the running prin
 })
 
 test('people are named with their group', () => {
-  assert.equal(personLabel({ name: 'Mum', group: 'Family' }), 'Mum · Family')
+  assert.equal(personLabel({ name: 'Mum', group: 'Family' }), 'Mum (Family)')
   assert.equal(personLabel({ name: 'Sam', group: '' }), 'Sam')
   assert.equal(personLabel({ name: '', group: '' }), 'someone')
   assert.equal(personLabel(null), 'someone')
@@ -147,7 +147,7 @@ test('filament colours and lines use the printed slot label', () => {
   assert.equal(hexColor('teal'), null)
   const slots = [{ slot: 2, label: 'Slot 3', material: 'PLA', color: '#000000', name: 'Bambu PLA Matte', remain_pct: 40, loaded: true }]
   const facts = { print_time_min: 30, grams: 14.2, material: 'PLA', color: '', slot: 2, slot_label: '', eject_planned: true, eject_reason: '' }
-  assert.equal(filamentLine(facts, slots), 'PLA · Bambu PLA Matte · Slot 3')
+  assert.equal(filamentLine(facts, slots), 'PLA, Bambu PLA Matte, Slot 3')
   assert.equal(partColor(facts, slots), '#000000')
   assert.equal(partColor({ ...facts, slot: null }, slots), null)
 })

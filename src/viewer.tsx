@@ -4,12 +4,12 @@
  */
 
 import * as sdk from '@hermes/plugin-sdk'
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import { type SyntheticEvent, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 
 import { type Rest, useFile } from './data.ts'
 import { Icon } from './icons.tsx'
 import { viewSlot } from './slot.ts'
-import { createStage, dataUrlToBuffer, type PartStats, type Stage, themeColors } from './stage.ts'
+import { createStage, dataUrlToBuffer, type PartStats, prefersStill, type Stage, themeColors } from './stage.ts'
 import { RefImage, Spinner } from './ui.tsx'
 
 // Older Desktops have no useTheme: then the scene reads the theme once per load.
@@ -42,6 +42,11 @@ export function PartViewer({
   const id = useId()
   const holder = useSyncExternalStore(viewSlot.subscribe, viewSlot.holder, viewSlot.holder)
   const live = holder === id && !!stl
+  // A preview picture carries its own background (the renderer's), and `contain` leaves bands beside it:
+  // the frame takes the picture's corner colour, so the picture reads as filling it.
+  const [backdrop, setBackdrop] = useState<string | null>(null)
+  const onPicture = (e: SyntheticEvent<HTMLImageElement>) => setBackdrop(cornerColor(e.currentTarget))
+  useEffect(() => setBackdrop(null), [still, preview])
 
   useEffect(() => {
     if (autoMount && stl) viewSlot.claim(id)
@@ -49,15 +54,15 @@ export function PartViewer({
   useEffect(() => () => viewSlot.release(id), [id])
 
   return (
-    <div className={`w-media ${className}`} data-workshop-viewer={live ? 'live' : 'still'}>
+    <div className={`w-media ${className}`} data-workshop-viewer={live ? 'live' : 'still'} style={!live && backdrop ? { background: backdrop } : undefined}>
       {live && stl ? (
         <LiveStage rest={rest} stl={stl} color={color} label={label} onClose={() => viewSlot.release(id)} />
       ) : (
         <>
           {still ? (
-            <img className="fill" src={still} alt={`Preview of ${label}`} draggable={false} />
+            <img className="fill" src={still} alt={`Preview of ${label}`} draggable={false} onLoad={onPicture} />
           ) : preview ? (
-            <RefImage rest={rest} fileRef={preview} alt={`Preview of ${label}`} className="fill" fallback={<NoPicture />} />
+            <RefImage rest={rest} fileRef={preview} alt={`Preview of ${label}`} className="fill" fallback={<NoPicture />} onLoad={onPicture} />
           ) : (
             <NoPicture />
           )}
@@ -74,6 +79,21 @@ export function PartViewer({
   )
 }
 
+/** The colour of a picture's top-left pixel, or null when it is not opaque or the canvas may not read it. */
+function cornerColor(img: HTMLImageElement): string | null {
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    const g = canvas.getContext('2d', { willReadFrequently: true })
+    if (!g) return null
+    g.drawImage(img, 0, 0, 1, 1, 0, 0, 1, 1)
+    const [r, gr, b, a] = g.getImageData(0, 0, 1, 1).data
+    return a === 255 ? `rgb(${r}, ${gr}, ${b})` : null
+  } catch {
+    return null
+  }
+}
+
 function NoPicture() {
   return (
     <div className="center">
@@ -88,7 +108,7 @@ function LiveStage({ rest, stl, color, label, onClose }: { rest: Rest; stl: stri
   const stage = useRef<Stage | null>(null)
   const [glError, setGlError] = useState<string | null>(null)
   const [stats, setStats] = useState<PartStats | null>(null)
-  const [spinning, setSpinning] = useState(true)
+  const [spinning, setSpinning] = useState(() => !prefersStill())
   const { file, error, loading } = useFile(rest, stl)
   const theme = useThemeSafe()
 
@@ -104,10 +124,15 @@ function LiveStage({ rest, stl, color, label, onClose }: { rest: Rest; stl: stri
     }
     const s = stage.current
     const stop = () => setSpinning(false)
+    const stopKey = (e: KeyboardEvent) => {
+      if (/^Arrow|^[+=-]$/.test(e.key)) setSpinning(false)
+    }
     el.addEventListener('pointerdown', stop)
+    el.addEventListener('keydown', stopKey)
     el.addEventListener('wheel', stop, { passive: true })
     return () => {
       el.removeEventListener('pointerdown', stop)
+      el.removeEventListener('keydown', stopKey)
       el.removeEventListener('wheel', stop)
       s.dispose()
       stage.current = null
