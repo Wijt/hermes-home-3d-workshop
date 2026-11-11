@@ -528,6 +528,7 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
 | `household` | `[]` | People: `{id, name, address_as, role}` |
 | `stop_policy` | `known` | Who may stop or pause: `known`, `anyone` or `owner` |
 | `start_policy` | `owner` | Who may start a queued print: `owner`, or `known` (a listed person may also start their own job, typed, when the safety gate passes and nothing is jumped; the owner is told). Resume and plate clear stay with the owner |
+| `problem_notices` | `everyone` | Who hears about a failed or paused print: `everyone` (the person who asked gets one plain line, the owner the technical note), or `owner` (only the owner is told; the person who asked hears when the part is done). The Workshop screen's failure card still says the people who asked were told |
 | `allow_guests` | `false` | Let senders who are in no list prepare prints |
 | `inject_context` | `auto` | Per-turn printing context: `auto`, `always` or `never` |
 | `owner_target` | `""` | `hermes send` target for the owner's technical notices |

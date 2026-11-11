@@ -103,6 +103,12 @@ config_schema:
     default: owner
     label: Who may start a queued print
     description: "owner: the owner only (default). known: a person in the household list may also start a job they asked for themselves, typed (never by voice note), with a person present, when the safety gate passes and nothing is jumped; the owner is told who started what (owner_target, sent by the watcher). Somebody else's job, a start that needs jump, resume and marking the plate clear stay with the owner, and unknown senders never start anything."
+  problem_notices:
+    type: str
+    choices: [everyone, owner]
+    default: everyone
+    label: Who hears about a failed or paused print
+    description: "everyone: the person who asked gets one plain line and the owner gets the technical note (default). owner: only the owner is told about a failed or paused print; the person who asked hears when the part is done."
   allow_guests:
     type: bool
     default: false

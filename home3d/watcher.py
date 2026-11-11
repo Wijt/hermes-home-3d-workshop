@@ -440,6 +440,8 @@ class _Pass:
     def _note(self, kind: str, job: str, ctx: dict, *, family: bool = False, owner_media: Optional[Path] = None,
               family_media: Optional[Path] = None, human: str = "", detail: str = "", owner: bool = True,
               **payload: Any) -> None:
+        if family and kind in ("failed", "paused") and getattr(self.s, "problem_notices", "everyone") == "owner":
+            family = False  # problem_notices owner: a problem is the owner's to fix, the person who asked is not told
         self.notes.append(_Note(kind, job, ctx, family, owner_media, family_media, payload, owner))
         if human:
             try:

@@ -1215,6 +1215,20 @@ def test_r3_a_real_failure_still_tells_the_family():
     assert rig.store.get_job(5)["state"] == "failed" and rig.store.human_needed(kind="failure_check")
 
 
+def test_problem_notices_owner_keeps_a_failure_from_the_person_who_asked():
+    """``problem_notices: owner``: the owner gets the technical note, the person who asked is not told."""
+    rig = Rig(language="en", problem_notices="owner")
+    rig.run()
+    rig.store.upsert_job(5, name="vase.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=5, status="printing", name="vase.gcode.3mf")]
+    rig.status(RUNNING, job_name="vase", progress=20, layer=5, total_layers=40, bed_temp=60)
+    rig.run(2)
+    rig.status(FAILED, job_name="vase", progress=21, layer=5, total_layers=40, bed_temp=50)
+    out = rig.run(2)
+    assert kinds(out) == ["failed"] and out[0]["family_text"] == "" and "Print failed" in out[0]["owner_text"]
+    assert rig.store.get_job(5)["state"] == "failed" and rig.store.human_needed(kind="failure_check")
+
+
 def test_r3_the_finish_duration_is_the_real_print_time_or_left_out():
     """W3: a print first seen mid-way (watcher set up late) gets no duration; a queue item's started_at is used."""
     rig = Rig(language="en")

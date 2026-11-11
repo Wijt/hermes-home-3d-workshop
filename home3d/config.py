@@ -41,6 +41,9 @@ STOP_POLICIES = ("known", "anyone", "owner")
 # Who may start a queued print (``start_policy``): owner = the owner only (default), known = also a listed person, for
 # a job they asked for themselves (``gates.approval_refusal``). Opt-in: an unreadable value counts as "owner".
 START_POLICIES = ("owner", "known")
+# Who hears about a failed or paused print (``problem_notices``): everyone = the person who asked gets one plain line
+# and the owner the technical note (default), owner = the owner only. An unreadable value counts as "everyone".
+PROBLEM_NOTICES = ("everyone", "owner")
 # Hermes platforms whose user id the sender chooses freely (an IRC nick, an ntfy topic). A sender from there is
 # recorded as "<platform>:<id>" (``scoped_sender``), so only a household entry written the same way ("irc:<nick>")
 # matches it: a bare id (e.g. the owner's Slack or WhatsApp id) never makes an IRC user the owner.
@@ -195,6 +198,7 @@ class Settings:
     inject_context: str = "auto"  # auto | always | never (pre_llm_call context)
     stop_policy: str = "known"  # known | anyone | owner: who may stop or pause a print (STOP_POLICIES)
     start_policy: str = "owner"  # owner | known: who may start a queued print (START_POLICIES)
+    problem_notices: str = "everyone"  # everyone | owner: who hears about a failed or paused print
     allow_guests: bool = False  # senders who are not in the list may prepare prints (import, slice, queue ...)
 
     # ---- derived helpers -------------------------------------------------------------------
@@ -346,6 +350,9 @@ def _build(values: Mapping[str, Any]) -> Settings:
     base.start_policy = str(base.start_policy or "").strip().lower()
     if base.start_policy not in START_POLICIES:
         base.start_policy = "owner"
+    base.problem_notices = str(base.problem_notices or "").strip().lower()
+    if base.problem_notices not in PROBLEM_NOTICES:
+        base.problem_notices = "everyone"
     base.groups = [dict(g) for g in base.groups or [] if isinstance(g, Mapping)]
     if not 1.0 <= base.send_timeout_s <= 120.0:  # a watcher pass must never hang in a send
         base.send_timeout_s = Settings.send_timeout_s
