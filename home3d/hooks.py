@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .backends.base import BackendError
-from .config import LOCAL_SENDER, norm_id, scoped_sender
+from .config import LOCAL_SENDER, norm_id, scoped_sender, session_chat_id
 from .gates import (VOICE, Gate, approval_refusal, clear_plate_gate, describe, person_can_overrule, printer_blocks,
                     resume_gate, start_gate)
 from .runtime import ABSENT_CRON, message_text
@@ -611,7 +611,9 @@ class _Hooks:
             who = store.sender_for(parent)  # a delegate_task child (or a rotated session) speaks for its parent
             inherited = parent if who else ""
         if session_id:
-            store.remember_sender(session_id, who, platform, inherited_from=inherited)
+            # the chat this turn came from (a delegated child speaks in its parent's chat): the origin of a request
+            chat = session_chat_id() or (str(store.sender_info(parent).get("chat_id") or "") if inherited else "")
+            store.remember_sender(session_id, who, platform, inherited_from=inherited, chat_id=chat)
         return who
 
     def _context(self, session_id: str, user_message: Any, platform: str, sender: str, first: bool,
@@ -754,8 +756,9 @@ class _Hooks:
             from . import upgrades
 
             who = rt.requester_name(session_id, "") if session_id else ""
+            job = (store.get_job(qid) or {}) if qid else {}  # the start of THIS job closes the moment
             upgrades.log_moment(store, "approve_start", f"{tool} {target} waited for the owner's approval",
-                                who=who, source="agent")
+                                job_name=str(job.get("name") or ""), who=who, source="agent")
 
 
 _message_text = message_text  # multimodal turn: text parts only (runtime.message_text)

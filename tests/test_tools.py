@@ -1007,3 +1007,29 @@ def test_design_is_not_gated_and_its_audit_never_stores_the_code(rt, monkeypatch
                         result=json.dumps({"ok": True, "name": "pen-cup", "version": 1}), session_id="s-mum")
     events = [e for e in rt.store.events(limit=20) if e.get("kind") == "tool"]
     assert events and "x" * 50 not in json.dumps(events)
+
+
+def test_a_queued_job_keeps_where_it_was_asked_from(rt):
+    """Delivery: the job stores the platform, chat and sender of the session that queued it (its group's chat)."""
+    rt.store.remember_sender("s-mum", MUM, "whatsapp", chat_id="<family-group>")
+    _, q = queued(rt)
+    job = rt.store.get_job(q["queue_item_id"])
+    assert (job["platform"], job["chat_id"], job["sender_id"]) == ("whatsapp", "<family-group>", MUM)
+
+
+def test_status_shows_notice_targets_texts_and_names_to_the_owner_only(rt, be):
+    """Review: home3d_status is not gated; a stranger in a group must not read chat ids, message texts or names."""
+    from home3d_ws.home3d import notify
+    rt.store.remember_sender("s-stranger", "stranger-77", "whatsapp")
+    notify.enqueue(rt.settings, rt.store, audience="owner", target="whatsapp:<owner-chat>",
+                   text="Mum asked to start #7; approve with /home3d approve start 7", requester="Mum", now=0)
+    rt.store.record_done_part(7, job_name="box", requester="Mum", left_plate="on_plate")
+    rt.store.add_human_needed("remove_part", "take Mum's box off", job_name="box", source="watcher")
+    out = call(rt, "home3d_status", session="s-stranger")
+    flat = json.dumps(out, ensure_ascii=False)
+    assert "<owner-chat>" not in flat and "approve with" not in flat and "Mum" not in flat
+    assert out["notices"]["undelivered"] == 1 and out["notices"]["oldest_pending_age_s"] is not None
+    assert out["done_box"] == {"waiting": 1} and out["waiting_on_people"] == {"open": 1}
+    out = call(rt, "home3d_status", session="s-owner")
+    assert out["notices"]["pending"][0]["target"] == "whatsapp:<owner-chat>"
+    assert out["done_box"][0]["requester"] == "Mum" and out["waiting_on_people"][0]["kind"] == "remove_part"

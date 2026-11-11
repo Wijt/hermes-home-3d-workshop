@@ -504,6 +504,18 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
     if err:
         out["watcher"]["error"] = str(err)[:200]
     me = rt.actor(str(kw.get("session_id") or "")).name  # '' when the session has no sender
+    from .notify import outbox_counts_public, outbox_summary  # notices, parts waiting, people still needed
+    _, sender = _who(rt, kw)
+    if _is_owner(rt, sender):  # targets, texts and names: the owner only (any group member may call status)
+        out["notices"] = outbox_summary(store, failures=3)
+        out["done_box"] = [{k: p.get(k) for k in ("id", "job_name", "title", "requester", "group_name",
+                                                  "left_plate")} for p in store.done_box(collected=False, limit=5)]
+        out["waiting_on_people"] = [{k: m.get(k) for k in ("id", "kind", "job_name", "detail")}
+                                    for m in store.open_human_needed(limit=5)]
+    else:
+        out["notices"] = outbox_counts_public(store)
+        out["done_box"] = {"waiting": len(store.done_box(collected=False, limit=50))}
+        out["waiting_on_people"] = {"open": len(store.open_human_needed(limit=50))}
     if me:
         out["speaking"] = me
     from .checks import cached_capabilities  # what works on this install (cached; read-only probes)
@@ -638,7 +650,8 @@ def _h_import(rt, a: dict, kw: dict) -> dict:
     if request_id is None:
         text = _str(a, "request_text")
         request_id = store.add_request(requester=requester, text=text, channel=_str(a, "channel") or "text",
-                                       sender_id=sender, model_ref=url)
+                                       sender_id=sender, model_ref=url,
+                                       session_id=str(kw.get("session_id") or ""))  # origin: platform + chat
     store.update_request(request_id, library_file_id=lib_id, model_ref=url)
     return {"ok": True, "library_file_id": lib_id, "name": name, "model_id": mid, "profile_id": profile_id,
             "reused": reused, "request_id": request_id, "requester": requester, "warnings": warnings,
@@ -936,7 +949,7 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
     store.upsert_job(item.id, request_id=req["id"] if req else None, name=item.name or meta.get("name", ""),
                      requester=requester or "", sliced_file_id=sid, eject_planned=1 if planned else 0,
                      eject_reason="; ".join(meta.get("eject_reasons") or []), max_z_mm=meta.get("max_z"),
-                     state="queued")
+                     state="queued", **store.session_origin(kw.get("session_id")))  # who queued it, in which chat
     if req:
         store.update_request(req["id"], queue_item_id=item.id, sliced_file_id=sid, status="queued")
     ahead = []
@@ -1388,7 +1401,8 @@ def _design_upload(rt, design, name: str, a: dict, kw: dict) -> dict:
     if request_id is None and _str(a, "request_text"):
         requester, sender = _who(rt, kw, _str(a, "requester"))
         request_id = store.add_request(requester=requester, text=_str(a, "request_text"), channel="text",
-                                       sender_id=sender, model_ref=ref)
+                                       sender_id=sender, model_ref=ref,
+                                       session_id=str(kw.get("session_id") or ""))  # origin: platform + chat
     if request_id is not None:
         store.update_request(request_id, library_file_id=lib.id, model_ref=ref)
     size = meta.get("size_mm")

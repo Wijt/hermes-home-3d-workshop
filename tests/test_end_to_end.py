@@ -206,7 +206,9 @@ def test_request_to_plate_clear_full_loop(house):
     assert owner and family
     assert all(r["target"] == OWNER_TARGET for r in owner) and all(r["target"] == FAMILY_TARGET for r in family)
     assert any(r.get("media") for r in owner)
-    assert len(family) == 1 and "Anneciğim" in family[0]["text"] and "çiçek kutusu" in family[0]["text"]
+    # Mum hears that her print started (one line) and that it is done; nothing else
+    assert len(family) == 2 and "basılmaya başladı" in family[0]["text"] and "\n" not in family[0]["text"]
+    assert "Anneciğim" in family[1]["text"] and "çiçek kutusu" in family[1]["text"]
     assert not any("Babacığım" in r["text"] for r in family)  # Dad's job has not printed yet
     assert all(r["dry_run"] for r in box)  # deliver=False: outbox only, nothing went through hermes send
 

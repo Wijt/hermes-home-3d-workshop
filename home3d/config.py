@@ -98,6 +98,72 @@ class Person:
         return self.address_as or self.name
 
 
+# ---- groups: the chats people ask from (a family group, a lab group) ------------------------------------------
+GROUP_TONES = ("family", "team")  # family: warm, addressed by name / address_as; team: plain and neutral (a lab)
+CHAT_ID_ENV = "HERMES_SESSION_CHAT_ID"  # Hermes' documented session identity (developer guide, slash commands)
+_TARGET_PLATFORM = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def split_target(target: object) -> tuple[str, str]:
+    """A ``hermes send`` target ``"<platform>:<chat>"`` -> ``(platform, chat)``, lower-cased; a target without a
+    platform prefix is ``("", chat)``. The chat part keeps any further colons (a Matrix room id, a thread)."""
+    raw = str(target if target is not None else "").strip()
+    head, sep, rest = raw.partition(":")
+    if sep and rest.strip() and _TARGET_PLATFORM.match(head):
+        return head.lower(), rest.strip().lower()
+    return "", raw.lower()
+
+
+def target_is_chat(target: object, platform: object, chat_id: object) -> bool:
+    """Is ``target`` (a ``hermes send`` target) the chat ``chat_id`` on ``platform``? The chat id is compared
+    EXACTLY (after ``norm_id``, so a WhatsApp phone chat matches with or without its suffix) and the platform must
+    agree when both sides name one. An empty chat id or target never matches."""
+    chat = str(chat_id if chat_id is not None else "").strip()
+    if not chat or not str(target or "").strip():
+        return False
+    t_plat, t_chat = split_target(target)
+    plat = str(getattr(platform, "value", platform) or "").strip().lower()
+    if t_plat and plat and t_plat != plat:
+        return False
+    return bool(t_chat) and norm_id(t_chat) == norm_id(chat)
+
+
+@dataclass
+class Group:
+    """One chat the workshop serves: where its notices go, in which language and tone, and who belongs to it."""
+    name: str
+    target: str = ""  # hermes send target of the group chat ('' = nowhere to send: its notices stay "no_target")
+    language: str = ""  # "en" | "tr"; '' = the household language
+    tone: str = "family"  # GROUP_TONES
+    members: list = field(default_factory=list)  # sender ids (compared exactly, like owner_ids)
+
+    def has_member(self, sender_id: object) -> bool:
+        sid = norm_id(sender_id)
+        return bool(sid) and sid != LOCAL_SENDER and any(norm_id(m) == sid for m in self.members or [])
+
+    def is_chat(self, platform: object, chat_id: object) -> bool:
+        return target_is_chat(self.target, platform, chat_id)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def session_chat_id() -> str:
+    """The chat (a DM or a group) the current turn came from, '' when unknown. Hermes binds the calling session's
+    identity as ``HERMES_SESSION_*`` and documents ``gateway.session_context.get_session_env`` as the way to read it;
+    the module is looked up in ``sys.modules`` (never imported: outside Hermes there is no session), with the
+    process environment as the fallback Hermes itself uses. Not a secret. Never raises."""
+    import sys
+
+    try:
+        sc = sys.modules.get("gateway.session_context")
+        getter = getattr(sc, "get_session_env", None) if sc is not None else None
+        raw = getter(CHAT_ID_ENV, "") if callable(getter) else os.environ.get(CHAT_ID_ENV, "")
+        return str(raw or "").strip()[:200]
+    except Exception:
+        return ""
+
+
 @dataclass
 class Settings:
     backend: str = "simulator"
@@ -111,7 +177,10 @@ class Settings:
     household: list = field(default_factory=list)
     owner_target: str = ""
     family_target: str = ""
+    groups: list = field(default_factory=list)  # [{"name", "target", "language", "tone", "members"}] (Group)
     send_profile: str = ""
+    send_timeout_s: float = 20.0  # one `hermes send` may take this long; a watcher pass never waits longer for it
+    send_budget_s: float = 45.0  # all sends of one watcher pass together; what is left goes out on the next pass
     autoeject_printer_preset: str = ""
     standard_printer_preset: str = ""
     process_presets: dict = field(default_factory=dict)
@@ -159,6 +228,47 @@ class Settings:
     def is_owner(self, sender_id: Optional[str]) -> bool:
         p = self.person_for(sender_id)
         return bool(p and p.role == "owner")
+
+    # ---- groups ------------------------------------------------------------------------------
+    def group_list(self) -> list[Group]:
+        """The configured groups (entries without a name are skipped; the first entry of a name wins)."""
+        out: list[Group] = []
+        seen: set[str] = set()
+        for raw in self.groups or []:
+            if not isinstance(raw, Mapping) or not str(raw.get("name") or "").strip():
+                continue
+            name = str(raw["name"]).strip()
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            tone = str(raw.get("tone") or "family").strip().lower()
+            lang = str(raw.get("language") or "").strip().lower()
+            members = raw.get("members") or []
+            if isinstance(members, str):
+                members = [m.strip() for m in members.split(",")]
+            if not isinstance(members, (list, tuple, set)):
+                members = []
+            out.append(Group(name=name, target=str(raw.get("target") or "").strip(),
+                             language=lang if lang in {"tr", "en"} else "",
+                             tone=tone if tone in GROUP_TONES else "family",
+                             members=[str(m).strip() for m in members if str(m).strip()]))
+        return out
+
+    def group_named(self, name: object) -> Optional[Group]:
+        want = str(name or "").strip().lower()
+        return next((g for g in self.group_list() if want and g.name.lower() == want), None)
+
+    def group_for(self, platform: object = "", chat_id: object = "", sender_id: object = "") -> Optional[Group]:
+        """The group a request belongs to: the one whose target IS the chat it was sent in, else the one that lists
+        its sender; None when neither matches (the ``family_target`` behaviour applies then)."""
+        groups = self.group_list()
+        for g in groups:
+            if g.is_chat(platform, chat_id):
+                return g
+        return next((g for g in groups if g.has_member(sender_id)), None)
+
+    def group_language(self, group: Optional[Group]) -> str:
+        return group.language if group is not None and group.language else self.language
 
     def to_snapshot(self) -> dict:
         return asdict(self)
@@ -229,6 +339,11 @@ def _build(values: Mapping[str, Any]) -> Settings:
     base.stop_policy = str(base.stop_policy or "").strip().lower()
     if base.stop_policy not in STOP_POLICIES:
         base.stop_policy = "known"
+    base.groups = [dict(g) for g in base.groups or [] if isinstance(g, Mapping)]
+    if not 1.0 <= base.send_timeout_s <= 120.0:  # a watcher pass must never hang in a send
+        base.send_timeout_s = Settings.send_timeout_s
+    if not base.send_timeout_s <= base.send_budget_s <= 300.0:
+        base.send_budget_s = max(base.send_timeout_s, Settings.send_budget_s)
     return base
 
 
