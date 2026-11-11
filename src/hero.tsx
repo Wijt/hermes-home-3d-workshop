@@ -24,6 +24,7 @@ import {
   slotLabel,
   stateLabel,
   stateTone,
+  waitingAfterPrint,
   waitingCommand
 } from './model.ts'
 import type { Overview, Waiting } from './types.ts'
@@ -255,7 +256,7 @@ function Approvals({ ov, rest, nowSec, action }: { ov: Overview; rest: Rest; now
         <div className="w-tabs" role="tablist" aria-label="Waiting for you">
           {ov.waiting.map((x, i) => (
             <button
-              key={x.id}
+              key={`${x.action}-${x.queue_item_id ?? 'x'}-${x.id}`}
               type="button"
               role="tab"
               className="w-tab"
@@ -267,7 +268,7 @@ function Approvals({ ov, rest, nowSec, action }: { ov: Overview; rest: Rest; now
           ))}
         </div>
       ) : null}
-      <ApprovalCard key={w.id} w={w} ov={ov} rest={rest} nowSec={nowSec} action={action} />
+      <ApprovalCard key={`${w.action}-${w.queue_item_id ?? 'x'}-${w.id}`} w={w} ov={ov} rest={rest} nowSec={nowSec} action={action} />
     </>
   )
 }
@@ -430,6 +431,7 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
     p.remaining_min !== null && p.state === 'printing'
       ? new Date((nowSec + p.remaining_min * 60) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : ''
+  const after = waitingAfterPrint(ov)
   const model = ov.now?.model
   const fallback = model ? (
     <PartViewer rest={rest} stl={model.stl} preview={model.preview} color={null} label={ov.now?.name || 'the part'} className="wide" />
@@ -484,6 +486,21 @@ function NowPrinting({ ov, rest, nowSec }: { ov: Overview; rest: Rest; nowSec: n
             </div>
           ) : null}
         </div>
+        {after.length ? (
+          <div className="w-banner t-accent" style={{ marginTop: 16, marginBottom: 0 }} data-workshop-after-print="">
+            <Icon name="hand" />
+            <span>
+              <b>Waiting for your OK after this print:</b>{' '}
+              {after.map((w, i) => (
+                <span key={`${w.action}-${w.queue_item_id ?? i}`}>
+                  {i ? ', ' : ''}
+                  {w.name || 'a job'}
+                  {w.asked_by.name ? <span className="muted"> for {personLabel(w.asked_by)}</span> : null}
+                </span>
+              ))}
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   )

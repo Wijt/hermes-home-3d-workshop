@@ -207,7 +207,7 @@ export const CSS = `
 .h3w .w-row.next .w-pos { background: var(--w-accent); color: var(--w-on-accent); border-color: var(--w-accent); }
 
 .h3w .w-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding-top: 12px; }
-.h3w .w-slot { border: 1px solid var(--w-line); border-radius: 12px; padding: 10px 11px; display: grid; gap: 6px; background: var(--w-card); }
+.h3w .w-slot { border: 1px solid var(--w-line); border-radius: 12px; padding: 10px 11px; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 6px; background: var(--w-card); }
 .h3w .w-slot.empty { border-style: dashed; background: transparent; color: var(--w-fg3); }
 .h3w .w-slot .top { display: flex; align-items: center; gap: 8px; }
 .h3w .w-slot .spool { width: 26px; height: 26px; border-radius: 50%; background: var(--sw); flex-shrink: 0;

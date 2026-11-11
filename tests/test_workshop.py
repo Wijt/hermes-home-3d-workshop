@@ -380,6 +380,20 @@ def test_upgrade_proposal_and_open_moments(shop):
     assert ov["needs_human"][0]["text"].startswith("Take a finished part off the plate")
 
 
+def test_names_read_the_way_people_say_them():
+    assert workshop.pretty_name("flower_box_v2.gcode.3mf") == "flower box v2"
+    assert workshop.pretty_name("mum-key-tag_v1") == "Mum key tag v1"
+    assert workshop.pretty_name("Cable clip") == "Cable clip"
+    assert workshop.pretty_name("T-Rex skull") == "T-Rex skull"
+
+
+def test_an_approval_wait_moment_shows_no_internal_tool_note(shop):
+    upgrades.log_moment(shop.store, "approve_start", "home3d_start start:5 waited for the owner's approval",
+                        source="gate")
+    h = shop.overview()["needs_human"][0]
+    assert h["kind"] == "approve_start" and "home3d_" not in h["text"] and ":" not in h["text"]
+
+
 # ---- file references ---------------------------------------------------------------------------------------------
 def test_file_refs_are_confined_to_designs_and_media(shop, data_dir, tmp_path):
     fake_design("rail-bracket", 1)

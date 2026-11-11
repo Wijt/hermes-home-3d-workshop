@@ -3,11 +3,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { cleanCommand, replyLooksRefused, runCommand } from '../../src/actions.ts'
+import { cleanCommand, replyLooksRefused, resetWorkshopSession, runCommand, WORKSHOP_SESSION_TITLE } from '../../src/actions.ts'
 import { callFacts, findVersion, isLeadPicture, readDesignCall } from '../../src/design-result.ts'
 import { createViewSlot } from '../../src/slot.ts'
 
-function fakeHost({ session = null, reply = { output: 'OK' }, seat = false, fail = null } = {}) {
+function fakeHost({ session = null, reply = { output: 'OK' }, seat = false, fail = null, own = null, execFail = null } = {}) {
+  resetWorkshopSession()
   const calls = []
   return {
     calls,
@@ -15,6 +16,11 @@ function fakeHost({ session = null, reply = { output: 'OK' }, seat = false, fail
     request: async (method, params) => {
       calls.push(['request', method, params])
       if (fail) throw new Error(fail)
+      if (method === 'session.create') {
+        if (!own) throw new Error('no model configured')
+        return { session_id: own, stored_session_id: own }
+      }
+      if (execFail) throw new Error(execFail)
       return reply
     },
     composer: {
@@ -42,10 +48,33 @@ test('a refusal from the plugin is shown as not done', async () => {
   assert.equal(replyLooksRefused('Started the print.'), false)
 })
 
-test('without a chat the command is seated in the message box for the person to send', async () => {
+test('without a chat the command runs in the screen\'s own hidden session, made once', async () => {
+  const host = fakeHost({ own: 'w1', reply: { output: 'Started #5 "Key tag".' } })
+  const r = await runCommand(host, 'home3d approve start 5')
+  assert.deepEqual(r, { kind: 'ran', ok: true, text: 'Started #5 "Key tag".' })
+  await runCommand(host, 'home3d pause')
+  assert.deepEqual(host.calls, [
+    ['request', 'session.create', { title: WORKSHOP_SESSION_TITLE, hidden: true }],
+    ['request', 'slash.exec', { session_id: 'w1', command: 'home3d approve start 5' }],
+    ['request', 'slash.exec', { session_id: 'w1', command: 'home3d pause' }]
+  ])
+})
+
+test('a lost hidden session is asked for again on the next press', async () => {
+  const host = fakeHost({ own: 'w1', execFail: 'unknown session', seat: true })
+  const r = await runCommand(host, 'home3d stop')
+  assert.equal(r.kind, 'seated')
+  await runCommand(host, 'home3d stop')
+  assert.equal(host.calls.filter(c => c[1] === 'session.create').length, 2)
+})
+
+test('without a chat or a hidden session the command is seated in the message box for the person to send', async () => {
   const host = fakeHost({ seat: true })
   const r = await runCommand(host, 'home3d stop')
-  assert.deepEqual(host.calls, [['insertText', null, '/home3d stop', { mode: 'prefix' }]])
+  assert.deepEqual(host.calls, [
+    ['request', 'session.create', { title: WORKSHOP_SESSION_TITLE, hidden: true }],
+    ['insertText', null, '/home3d stop', { mode: 'prefix' }]
+  ])
   assert.equal(r.kind, 'seated')
   assert.match(r.text, /Press Enter/)
 })

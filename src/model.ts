@@ -291,8 +291,24 @@ export const isActive = (state: PrinterState) => state === 'printing' || state =
 /** What the top band leads with. */
 export type HeroMode = 'approve' | 'running' | 'attention' | 'idle' | 'offline'
 
+/**
+ * Does an approval lead the top band? Yes when one can go now (or is about the print on the printer: resume,
+ * plate), or when nothing is printing. While a print runs, a start that has to wait for it does not cover the
+ * running print: the band shows the print and names what waits (`waitingAfterPrint`).
+ */
+export function approvalLeads(ov: Overview): boolean {
+  if (!ov.waiting.length) return false
+  if (!isActive(ov.printer.state)) return true
+  return ov.waiting.some(w => w.action !== 'start' || isReady(w))
+}
+
+/** Starts that wait for the running print to end (shown under the print, not over it). */
+export function waitingAfterPrint(ov: Overview): Waiting[] {
+  return approvalLeads(ov) ? [] : ov.waiting
+}
+
 export function heroMode(ov: Overview): HeroMode {
-  if (ov.waiting.length) return 'approve'
+  if (approvalLeads(ov)) return 'approve'
   if (isActive(ov.printer.state)) return 'running'
   if (ov.printer.state === 'offline') return 'offline'
   if (ov.printer.state === 'failed' || ov.printer.errors.length || ov.printer.awaiting_plate_clear) return 'attention'
@@ -308,12 +324,13 @@ export function nowFor(ov: Overview): string {
 export function chipText(ov: Overview): { text: string; tone: Tone } {
   const p = ov.printer
   const who = ov.now?.for?.name?.trim()
-  if (ov.waiting.length) return { text: `Waiting for you: ${ov.waiting.length}`, tone: 'accent' }
+  if (approvalLeads(ov)) return { text: `Waiting for you: ${ov.waiting.length}`, tone: 'accent' }
   if (p.state === 'printing') {
     const parts = [`Printing ${progressPct(p)}%`]
     if (who) parts.push(`for ${who}`)
     const left = fmtDuration(p.remaining_min)
     if (left) parts.push(left)
+    if (ov.waiting.length) parts.push(`${ov.waiting.length} waiting`)
     return { text: parts.join(' · '), tone: 'neutral' }
   }
   if (p.state === 'paused') return { text: `Paused ${progressPct(p)}%${who ? ` · for ${who}` : ''}`, tone: 'warn' }

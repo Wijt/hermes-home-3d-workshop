@@ -24,6 +24,7 @@ import {
   setupSummary,
   sortChecks,
   staleness,
+  waitingAfterPrint,
   waitingCommand,
   watcherLine
 } from '../../src/model.ts'
@@ -69,7 +70,12 @@ test('normalize survives an empty, partial or wrong answer', () => {
 
 test('the status-bar chip says the one thing that matters', () => {
   const ov = base()
+  ov.waiting[0].ready = false // the backend says it can only start after Mum's print
+  // the chip says the print, and that one job waits
+  assert.deepEqual(chipText(ov), { text: 'Printing 62% · for Mum · 41 min · 1 waiting', tone: 'neutral' })
+  ov.printer.state = 'idle'
   assert.deepEqual(chipText(ov), { text: 'Waiting for you: 1', tone: 'accent' })
+  ov.printer.state = 'printing'
   ov.waiting = []
   assert.equal(chipText(ov).text, 'Printing 62% · for Mum · 41 min')
   ov.printer.state = 'paused'
@@ -83,9 +89,21 @@ test('the status-bar chip says the one thing that matters', () => {
   assert.equal(chipText(ov).tone, 'bad')
 })
 
-test('the top band leads with the approval, then the running print', () => {
+test('the top band leads with an approval that can go now, else the running print', () => {
   const ov = base()
+  ov.waiting[0].ready = false // the backend says: printer busy, it waits for the print
+  assert.equal(heroMode(ov), 'running')
+  assert.deepEqual(waitingAfterPrint(ov), ov.waiting)
+  ov.waiting[0].ready = true
   assert.equal(heroMode(ov), 'approve')
+  assert.deepEqual(waitingAfterPrint(ov), [])
+  ov.waiting[0].ready = false
+  ov.waiting[0].action = 'resume' // about the print on the printer: always leads
+  assert.equal(heroMode(ov), 'approve')
+  ov.waiting[0].action = 'start'
+  ov.printer.state = 'idle' // nothing printing: the card leads, with its failing checks
+  assert.equal(heroMode(ov), 'approve')
+  ov.printer.state = 'printing'
   ov.waiting = []
   assert.equal(heroMode(ov), 'running')
   ov.printer.state = 'failed'

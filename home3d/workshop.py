@@ -32,6 +32,7 @@ import base64
 import importlib
 import json
 import os
+import re
 import shutil
 import time
 from pathlib import Path, PurePosixPath
@@ -110,8 +111,18 @@ def _stem(name: Any) -> str:
 
 
 def pretty_name(name: Any) -> str:
-    """``flower_box_v2.gcode.3mf`` -> ``flower box v2`` (what the household calls it)."""
-    return " ".join(_stem(name).replace("_", " ").split())
+    """``flower_box_v2.gcode.3mf`` -> ``flower box v2`` (what the household calls it). A design's file name
+    (``mum-key-tag_v1``, a slug) reads like its title in the Designs list: ``Mum key tag v1``."""
+    n = " ".join(_stem(name).replace("_", " ").split())
+    words = n.split(" ")
+    if words and _SLUG.fullmatch(words[0]) and "-" in words[0]:
+        words[0] = words[0].replace("-", " ").capitalize()
+        n = " ".join(words)
+    return n
+
+
+_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)+")
+_TOOL_TOKEN = re.compile(r"\bhome3d_[a-z_]+\b")
 
 
 def _same_job(a: Any, b: Any) -> bool:
@@ -811,6 +822,8 @@ def _needs_human(store: Any) -> list[dict]:
         kind = str(r.get("kind") or "other")
         label = upgrades.text_for(kind, "en")["label"]
         detail = upgrades.detail_text(r.get("detail"), "en")
+        if _TOOL_TOKEN.search(detail or ""):
+            detail = ""  # an internal note ("home3d_start start:5 waited ..."): the label and the job say it
         text = label[:1].upper() + label[1:] + (f": {detail}" if detail else "")
         out.append({"id": _int(r.get("id")), "kind": kind, "text": text, "ts": float(r.get("ts") or 0),
                     "open": not r.get("resolved"), "job": pretty_name(r.get("job_name")),
