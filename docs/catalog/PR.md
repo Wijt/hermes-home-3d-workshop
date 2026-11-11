@@ -22,7 +22,8 @@ team) shares one printer through one chat, where a Hermes agent lives; the perso
 default, and the name and the message language (`en` by default, or `tr`) are settings. People ask in
 plain words, often by voice note. The agent finds MakerWorld models through Bambuddy, scales one, or
 designs a part in OpenSCAD (it writes the code, renders it, looks at the preview pictures and keeps every
-version), slices it and queues it with manual start. The owner approves the start, typed, never by voice;
+version), slices it and queues it with manual start. The owner approves the start, typed, never by voice (or lets
+the people in the household list start their own jobs: `start_policy: known`, off by default);
 when someone else asks, the watcher passes the request to the owner with the exact command. A zero-token
 cron watcher follows the print. On a tilted printer the part is pushed off into a done box, and the person
 who asked is told with a photo, in the chat the request came from; the owner gets a technical note. Each
@@ -103,7 +104,10 @@ loop in about 10 seconds and sends nothing.
   safety gate fails, for unknown or non-owner senders, and when the ask came in as a voice note (a typed
   confirmation is asked for). A household member's blocked request is stored, and the watcher tells the
   owner once, with the command; an unknown sender's is not passed on. Only an owner session gets the
-  Hermes approve prompt. The handler also requires a single-use pass from that hook or from `/home3d
+  Hermes approve prompt. One opt-in exception: with `start_policy: known` (the default is `owner`) a person in
+  the household list may also start a job they asked for themselves, under the same rule (present, typed,
+  the full safety gate, the same prompt and single-use pass, never a queue jump); the owner is then told who
+  started what. Resume and plate-clear stay the owner's. The handler also requires a single-use pass from that hook or from `/home3d
   approve`, so a dispatch that skips `pre_tool_call` is refused; it checks the plate with the camera
   right before the action. `/home3d approve` runs the gate and the action at once and stores nothing for
   later. The owner is any id in `owner_ids`, plus, while `local_is_owner` is true (the default), any local
