@@ -10,7 +10,7 @@
 //   ~0:07 (source frame 210)  Start is pressed; 0:07-0:12 the card changes to printing / "Started".
 //   The film draws its own pointer and click ring at frame 210. If the real press lands at another moment,
 //   change `clicks` and the last pointer key to match, and put the Start button's pixel centre in
-//   `startButton` (capture pixels). The defaults below are GUESSES until the capture exists.
+//   `startButton` (capture pixels). The defaults below are measured on the current capture (press at frame 210).
 // A still (backroom.png) also works: the pointer and zoom still run on top of it.
 import { AbsoluteFill } from "raea";
 import { Caption, ScreenStage, has, s, sceneFrames, type PointerKey, type ZoomKey } from "../components";
@@ -42,8 +42,8 @@ export default function SceneBackroom({
   size = [1920, 1080],
   startFrom,
   endAt,
-  startButton = { x: 1500, y: 760 },
-  preview = { x: 600, y: 480 },
+  startButton = { x: 1187, y: 676 },
+  preview = { x: 785, y: 473 },
   pointer,
   clicks = [210],
   zoom,
