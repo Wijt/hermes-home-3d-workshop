@@ -5,7 +5,8 @@ Who asked is resolved from ``kwargs["session_id"]`` (the ``pre_llm_call`` hook m
 recorded in the store with every request / job. An unknown sender is never the owner.
 
 Safety: start, clear-plate confirm and resume need an approval PASS. The ``pre_tool_call`` hook issues one
-(bound to tool, target and session) only for an owner session whose gate passed, and ``/home3d approve``
+(bound to tool, target and session) only for an owner session whose gate passed (with ``start_policy: known`` also
+for a listed person starting their own job; the owner is then told, ``_tell_owner_start``), and ``/home3d approve``
 issues one for its own call. The handler uses it up FIRST (``store.consume_pass``) and refuses without it:
 Hermes' ``ctx.dispatch_tool`` / ``registry.dispatch`` skip ``pre_tool_call``, so another plugin could
 otherwise call these handlers directly. The handlers then re-check the pure gates. Stop and pause need no
@@ -24,10 +25,10 @@ from typing import Any, Callable, Optional
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
 from .config import norm_id, watch_script_path
-from .gates import (approval_refusal, clear_plate_gate, describe, printer_blocks, refusal, requester_name,
-                    resume_gate, same_person, start_gate, stop_refusal, write_refusal)
+from .gates import (clear_plate_gate, describe, printer_blocks, refusal, requester_name, resume_gate, same_person,
+                    start_gate, stop_refusal, write_refusal)
 from .gcode import assess_eject, inspect_gcode, material_family
-from .hooks import LIGHT_FLAG, acked_codes, approval_target, watcher_fresh, watcher_stale_s
+from .hooks import LIGHT_FLAG, acked_codes, approval_target, watcher_fresh, watcher_stale_s, who_may
 
 Tool = tuple[str, dict, Callable[..., str]]
 
@@ -190,13 +191,16 @@ def _own_item_ids(rt) -> set[int]:
 _NO_PASS_TR = "Bu işlem için sahibinin onayı gerekiyor (/home3d approve); onay bulunamadı, hiçbir şey yapılmadı."
 
 
-def _use_pass(rt, tool: str, target: str, kw: dict) -> Optional[dict]:
+def _use_pass(rt, tool: str, target: str, kw: dict, *, qid: Optional[int] = None,
+              jump: bool = False) -> Optional[dict]:
     """Use the approval pass for this call FIRST; a refusal envelope when there is none (fails closed)."""
-    return _take_pass(rt, tool, target, kw)[0]
+    return _take_pass(rt, tool, target, kw, qid=qid, jump=jump)[0]
 
 
-def _take_pass(rt, tool: str, target: str, kw: dict) -> tuple[Optional[dict], str]:
-    """(refusal envelope or None, the pass detail). Uses the pass once; fails closed."""
+def _take_pass(rt, tool: str, target: str, kw: dict, *, qid: Optional[int] = None,
+               jump: bool = False) -> tuple[Optional[dict], str]:
+    """(refusal envelope or None, the pass detail). Uses the pass once; fails closed. ``qid`` / ``jump``: the queue
+    item and the jump of a start, for the ``start_policy`` re-check (``hooks.who_may``)."""
     sid = str(kw.get("session_id") or "")
     granted = None
     try:
@@ -210,9 +214,10 @@ def _take_pass(rt, tool: str, target: str, kw: dict) -> tuple[Optional[dict], st
         granted = None
     if granted is not None:
         # the pass is used up either way; the handler still re-checks who is asking now (gates.approval_refusal:
-        # a person present, the owner, typed), so a pass can never carry a start into a run nobody watches
+        # a person present, the owner or under start_policy known the job's own requester, typed), so a pass can
+        # never carry a start into a run nobody watches
         try:
-            why = approval_refusal(rt.actor(sid))
+            why = who_may(rt, rt.actor(sid), "start" if tool == "home3d_start" else "", qid, jump)
         except Exception:
             why = "unattended"
         if not why:
@@ -960,18 +965,24 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
         ahead = [{"id": q.id, "name": q.name, "ours": q.id in own} for q in items[:idx] if not q.is_done]
     except BackendError:
         pass
+    nxt = (f"Starting needs the owner's approval: home3d_start queue_item_id={item.id} from the owner's "
+           f"chat, or the owner sends /home3d approve start {item.id} (never jump someone else's job).")
+    if rt.settings.start_policy == "known" and not _is_owner(rt, sender):
+        # the same rule the start will ask; "voice_message" = theirs to start once they type it
+        if who_may(rt, rt.actor(str(kw.get("session_id") or "")), "start", item.id) in ("", "voice_message"):
+            nxt = (f"start_policy known: {who} may start this job themselves. After their typed yes (never a voice "
+                   f"note): home3d_start queue_item_id={item.id}, without allow_jump; the safety gate still decides "
+                   f"and the owner is told. Anything else needs the owner: /home3d approve start {item.id}.")
     return {"ok": True, "queue_item_id": item.id, "name": item.name, "status": item.status, "manual_start": True,
             "ams_mapping": mapping, "eject_planned": planned, "requester": requester,
-            "request_id": req["id"] if req else None, "ahead": ahead, "warnings": warnings,
-            "next": (f"Starting needs the owner's approval: home3d_start queue_item_id={item.id} from the owner's "
-                     f"chat, or the owner sends /home3d approve start {item.id} (never jump someone else's job).")}
+            "request_id": req["id"] if req else None, "ahead": ahead, "warnings": warnings, "next": nxt}
 
 
 def _h_start(rt, a: dict, kw: dict) -> dict:
     s, be, store = rt.settings, rt.backend, rt.store
     qid = _int(a, "queue_item_id", required=True)
     jump = _bool(a, "allow_jump")
-    refused = _use_pass(rt, "home3d_start", approval_target("start", qid, jump), kw)
+    refused = _use_pass(rt, "home3d_start", approval_target("start", qid, jump), kw, qid=qid, jump=jump)
     if refused:
         return refused
     who, sender = _who(rt, kw)
@@ -1003,9 +1014,11 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
         store.update_request(req["id"], status="printing")
     _resolve_requests(store, "start", qid, f"started by {who or 'owner'}")
     job = store.get_job(qid) or {}
-    store.add_event("start_requested", item.name or job.get("name", ""),
-                    {"queue_item_id": qid, "who": who or "owner", "sender": sender})
+    event_id = store.add_event("start_requested", item.name or job.get("name", ""),
+                               {"queue_item_id": qid, "who": who or "owner", "sender": sender})
     watching = watcher_fresh(store, s)
+    if not _is_owner(rt, sender):  # start_policy known: a listed person started their own job, the owner hears of it
+        warnings += _tell_owner_start(rt, qid, who, item.name or job.get("name", ""), queue, job, event_id, watching)
     if not watching:
         warnings.append("the watcher is not running: nobody is told about the finish or the plate")
     return {"ok": True, "queue_item_id": qid, "status": item.status, "name": item.name or job.get("name", ""),
@@ -1014,6 +1027,35 @@ def _h_start(rt, a: dict, kw: dict) -> dict:
             "next": ("The watcher reports the finish and the plate state; no need to poll." if watching else
                      "The watcher is not running: nobody is told about the finish or the plate. Tell the owner: "
                      "hermes home3d setup, and `hermes gateway` must run. Check back with home3d_status.")}
+
+
+def _tell_owner_start(rt, qid: int, who: str, name: str, queue: list, job: dict, event_id: Optional[int],
+                      watching: bool) -> list[str]:
+    """``start_policy: known``: ``who`` (not the owner) started their own job, so the owner is told who, what and how
+    to stop it. One owner notice in the outbox (``notify.enqueue``): the watcher's next pass sends it, like its own
+    notices. Returns a warning for the agent when the owner will not hear of it (no owner chat, or the watcher is
+    off: ``watching``); never raises (the print runs)."""
+    from . import messages, notify
+    from .workshop import pretty_name
+
+    s, store = rt.settings, rt.store
+    try:
+        item = next((q for q in queue if q.id == qid), None)
+        meta = (store.kv_get(f"slice:{job['sliced_file_id']}") or {}) if job.get("sliced_file_id") else {}
+        minutes = item.print_time_s / 60.0 if item is not None and item.print_time_s else meta.get("print_time_min")
+        text = messages.render("started_by", "owner", s.language, who=who, job=pretty_name(name), queue_item_id=qid,
+                               duration_min=minutes)
+        clock = getattr(rt.backend, "now", None)  # the watcher's clock (the simulator has a virtual one)
+        d = notify.enqueue(s, store, audience="owner", target=s.owner_target, text=text, kinds=["started_by"],
+                           job_name=name, requester=who, event_ids=[event_id],
+                           now=float(clock()) if callable(clock) else None)
+    except Exception as e:
+        return [f"the owner could not be told about this start ({type(e).__name__}: {e}): tell the owner yourself"]
+    if d is not None and d.status == notify.NO_TARGET:
+        return ["no owner chat is set (owner_target): the owner is not told about this start, tell the owner yourself"]
+    if not watching:  # the notice waits in the outbox until a watcher pass sends it
+        return ["the owner is not told about this start while the watcher is off: tell the owner yourself"]
+    return []
 
 
 def _h_stop(rt, a: dict, kw: dict) -> dict:

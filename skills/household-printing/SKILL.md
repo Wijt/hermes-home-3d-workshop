@@ -142,6 +142,12 @@ Starting a print, confirming the plate clear (`home3d_clear_plate action=confirm
 - **A family member**: blocked. The block records the request. When the watcher runs, it tells the owner
   on its next pass, once, with the exact command. Tell the family member only what the block says will
   happen (see step 10). Never promise a start.
+- **A family member's own job, when the owner turned on `start_policy: known`** (off by default; your
+  context then has a line "Exception (start_policy known)" for that person): after their typed yes,
+  `home3d_start` is not blocked for a job they asked for themselves. Hermes asks them to approve, like the
+  owner, and the owner is told who started what. It is still refused by voice note, with `allow_jump`, for
+  somebody else's job, and when the safety gate fails; resume and plate clear stay with the owner. Without
+  that context line, nothing changes.
 - **Nobody known** (an unconfigured chat, a subagent without a known parent session): blocked, and nothing
   is passed on. Tell them to ask the owner directly.
 - **`/home3d approve start <id> [jump] | clear | resume [ack]`** (owner only, no model call) runs the same

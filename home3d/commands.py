@@ -1,7 +1,8 @@
 """``/home3d`` slash command (CLI, TUI and messaging gateway; no model call).
 
   /home3d status                        printer, queue, plate and watcher state
-  /home3d approve start <id> [jump]     owner: start queue item <id> now if the safety gate passes
+  /home3d approve start <id> [jump]     owner: start queue item <id> now if the safety gate passes (with
+                                        ``start_policy: known`` also a listed person, for their own job, no jump)
   /home3d approve clear                 owner: mark the plate clear now if the gate passes (also confirms the plate
                                         after a failed print)
   /home3d approve resume [ack]          owner: resume a paused print (``ack`` = resume despite a printer error)
@@ -11,7 +12,8 @@
   /home3d upgrades | moments            upgrade proposals / human-needed moments (last 30 days)
   /home3d help                          one line per subcommand, in the household language (``help_text``)
 
-``approve`` only counts for the owner: ``source.user_id`` equal (exactly, ``config.norm_id``) to an owner id, or a
+``approve`` only counts for the owner (and, for ``approve start`` under ``start_policy: known``, for the listed person
+whose own job it is: ``hooks.who_may``): ``source.user_id`` equal (exactly, ``config.norm_id``) to an owner id, or a
 local session when ``local_is_owner`` (no source = the classic CLI / TUI; a ``local`` platform source with a
 ``uid:<n>`` user = the gateway-hosted CLI). Hermes v0.22.5 also passes no source for slash commands typed in the
 TUI, Desktop and the web dashboard, so whoever can use those surfaces counts as the local owner while
@@ -47,8 +49,9 @@ import uuid
 from typing import Any, Callable, Optional
 
 from .config import LOCAL_SENDER, norm_id, scoped_sender
-from .gates import TYPED, VOICE, approval_refusal, refusal, stop_refusal
-from .hooks import TOOL_FOR_ACTION, absent_text, approve_command, evaluate, is_local_platform, watcher_fresh
+from .gates import MEMBER, TYPED, VOICE, refusal, stop_refusal
+from .hooks import (TOOL_FOR_ACTION, absent_text, approve_command, evaluate, is_local_platform, watcher_fresh,
+                    who_may)
 
 _LOCAL_UID = re.compile(r"^uid:\d+$")
 
@@ -93,6 +96,8 @@ _T = {
                 "Sadece sahibi onaylayabilir (komutu kimin gönderdiği bilinmiyor)."),
     "local_off": ("Only the owner can approve (local sessions are not the owner: local_is_owner is off).",
                   "Sadece sahibi onaylayabilir (yerel oturum sahibi sayılmıyor: local_is_owner kapalı)."),
+    "own_only": ("{who} can start only a print {who} asked for, and never with jump (start_policy: known).",
+                 "{who} yalnızca kendi istediği baskıyı başlatabilir, jump ile asla (start_policy: known)."),
     "usage_start": ("Usage: /home3d approve start <queue id> [jump]", "Kullanım: /home3d approve start <sıra no> [jump]"),
     "usage_approve": ("Usage: /home3d approve start <id> | clear | resume [ack]",
                       "Kullanım: /home3d approve start <no> | clear | resume [ack]"),
@@ -511,7 +516,7 @@ def perform(rt, action: str, *, sender: str, label: str = "", platform: str = ""
         return _result(False, "unattended", _t("not_done", lang, why=_sentence(
             refusal("unattended", lang, cmd=command) if lang == "tr" else absent)))
     actor = rt.actor_for(sender, VOICE if spoken else TYPED)
-    why = approval_refusal(actor)  # 2. the same rule as the agent path (hooks.pre_tool_call)
+    why = who_may(rt, actor, gated, qid, jump)  # 2. the same rule as the agent path (hooks.pre_tool_call)
     if why == "unattended":  # the presence answer changed meanwhile: still refused
         return _result(False, why, refusal(why, lang, cmd=command))
     if why in ("no_identity", "not_owner", "local_off"):
@@ -522,6 +527,8 @@ def perform(rt, action: str, *, sender: str, label: str = "", platform: str = ""
                                               (label or sender)))
         else:
             text = _t("not_owner", lang, who=label) if label else _t("no_user", lang)
+        if gated == "start" and s.start_policy == "known" and actor.role == MEMBER:
+            text += " " + _t("own_only", lang, who=actor.name)  # why this start is not theirs to make
         return _result(False, why, text)
     if why:  # voice_message, or a rule this code does not know: refused
         return _result(False, why, refusal(why, lang, cmd=command, who=actor.label(lang)))

@@ -17,8 +17,9 @@ needed now because the handler runs the authoritative one right before the actio
 
 Who may ask (also pure): ``who_is`` turns a recorded sender id into an ``Actor`` (owner / member / guest / nobody,
 how the message arrived, whether a person is present), and three rules decide from it: ``approval_refusal`` (start,
-resume, plate clear: the owner, present, not by voice), ``stop_refusal`` (stop, pause: ``stop_policy``) and
-``write_refusal`` (prepare a print: known people, or ``allow_guests``). Every surface asks these same functions.
+resume, plate clear: the owner, present, not by voice; with ``start_policy: known`` a listed person may also start
+the job they asked for themselves), ``stop_refusal`` (stop, pause: ``stop_policy``) and ``write_refusal`` (prepare a
+print: known people, or ``allow_guests``). Every surface asks these same functions.
 """
 
 from __future__ import annotations
@@ -161,13 +162,22 @@ def who_is(settings, sender: object, *, present: bool = True, channel: str = "")
     return Actor(sender=sid, name=name, role=role, channel=str(channel or ""), present=bool(present), local=local)
 
 
-def approval_refusal(actor: Actor) -> str:
+def approval_refusal(actor: Actor, *, start_policy: str = "owner", requester: object = None,
+                     override: bool = False) -> str:
     """Why ``actor`` may not start / resume / mark the plate clear ('' = may): ``unattended`` (nobody is present),
     ``no_identity`` / ``local_off`` / ``not_owner`` (not the owner), ``voice_message`` (the ask arrived as voice).
-    The same rule for the agent path (``pre_tool_call``) and the typed path (``/home3d approve``, a UI)."""
+    The same rule for the agent path (``pre_tool_call``) and the typed path (``/home3d approve``, a UI).
+
+    Resume and plate clear are the problem cases and always the owner's: their callers pass nothing more. A START
+    passes ``start_policy``, the ``requester`` the store recorded for the job (never a name the model gives) and
+    ``override`` (it asks for a queue jump). Under ``known`` a listed person may then start the job they asked for
+    themselves (``same_person``), without an override; presence and the voice rule hold for them as for the owner.
+    Any other policy value is ``owner``."""
     if not actor.present:
         return "unattended"
-    if not actor.is_owner:
+    own_start = (str(start_policy or "").strip().lower() == "known" and actor.role == MEMBER and not override
+                 and same_person(requester, actor.name))
+    if not actor.is_owner and not own_start:
         if actor.role == NOBODY:
             return "no_identity"
         return "local_off" if actor.local else "not_owner"

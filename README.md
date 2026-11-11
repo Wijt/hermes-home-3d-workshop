@@ -78,9 +78,9 @@ A skill can only ask the model to behave. This plugin puts the parts that must n
 | Need | With a skill only | In this plugin | Code |
 |---|---|---|---|
 | Safety gates | Rules in a prompt. The model can skip them. | Printer state, HMS errors, plate, queue order and "after a failure" are checked in code before a start, a resume or a plate clear. | [`gates.py`](home3d/gates.py) |
-| Owner approval | The model decides who may start. | One rule, used by the agent path (`pre_tool_call`), `/home3d` and the Workshop screen: start, resume and plate clear need the owner, present, typing. The tool refuses without a single-use pass bound to the tool, the target and the session. | [`gates.py`](home3d/gates.py), [`hooks.py`](home3d/hooks.py), [`commands.py`](home3d/commands.py) |
+| Owner approval | The model decides who may start. | One rule, used by the agent path (`pre_tool_call`), `/home3d` and the Workshop screen: start, resume and plate clear need the owner, present, typing. The tool refuses without a single-use pass bound to the tool, the target and the session. Opt-in (`start_policy: known`): a listed person may also start their own job, and the owner is told. | [`gates.py`](home3d/gates.py), [`hooks.py`](home3d/hooks.py), [`commands.py`](home3d/commands.py) |
 | Voice is for asking | The model hears "start it" and starts. | A start, resume or plate clear asked by voice note is refused; the owner is asked to type it. | [`hooks.py`](home3d/hooks.py), [`runtime.py`](home3d/runtime.py) |
-| Who may do what | Anyone the model believes. | Stop and pause follow `stop_policy`; unknown senders cannot prepare prints unless `allow_guests` is on. The person who really acted is recorded. | [`gates.py`](home3d/gates.py), [`tools.py`](home3d/tools.py) |
+| Who may do what | Anyone the model believes. | Stop and pause follow `stop_policy`, a start follows `start_policy`; unknown senders cannot prepare prints unless `allow_guests` is on. The person who really acted is recorded. | [`gates.py`](home3d/gates.py), [`tools.py`](home3d/tools.py) |
 | Watching a print | An agent cron job that spends tokens on every run. In the original setup, about 9 in 10 of 323 runs had nothing to say. | A `--no-agent` cron script. No model, zero tokens. It writes only when something happens. | [`watcher.py`](home3d/watcher.py) |
 | Telling people | A message the model may or may not send. | A saved outbox: every notice has a delivery state, failed sends are retried on later passes, and an event counts as told only after a real send. Notices go to the chat the request came from. | [`notify.py`](home3d/notify.py) |
 | Household memory | Chat history. | SQLite: who asked for what, in their own words, from which chat; jobs, failures, approval requests, moments and the done box. | [`store.py`](home3d/store.py) |
@@ -226,6 +226,26 @@ The rules are in code, not only in the prompt.
   member or an unknown sender is blocked before any printer call. The block message gives the owner's
   command, for example `/home3d approve start <id>`. This command runs the gate again and runs the action
   at once. Nothing is stored for later.
+- **Starting without the owner (opt-in).** `start_policy` is `owner` by default: everything above. With
+  `start_policy: known`, a person in `household` may also start a job they asked for themselves. Whose job
+  it is comes from the requester the store recorded when the job was queued (the same name the queue-jump
+  check and "remove your own item" use), compared with the sender the gateway verified for the start; a
+  name the model passes never counts. What it allows: the same start the owner would get, from the
+  agent (Hermes shows its approval prompt in that person's own session) or with a typed
+  `/home3d approve start <id>`. What it does not allow:
+  - a start whose safety gate does not pass in full; the gate is the same one, unchanged;
+  - `jump`, or any other override: a start that needs one still needs the owner;
+  - resume after a pause or an error, and "the plate is clear" (also the confirmation after a failed
+    print): the owner only;
+  - somebody else's job, a job queued outside the workshop, a job with nobody recorded;
+  - a sender who is not in `household` (also with `allow_guests`), an unknown sender, a run with nobody
+    present;
+  - a start asked by voice note: refused for everyone, the person types a short yes.
+
+  The owner is told each time: the start writes one notice to the outbox, for example
+  `Mum started "Mum key tag v1" (13 min). Stop it with /home3d stop.`, and the watcher sends it to
+  `owner_target` on its next pass. Without an owner chat, or while the watcher is off, the start still
+  happens and the tool result says that the owner was not told.
 - **Voice asks, typing starts.** A start, resume or plate clear asked by voice note is refused, also for
   the owner, and a typed confirmation is asked for: speech-to-text can hear another sentence. Hermes does
   not tell a tool or a later hook that a message was spoken, so the plugin finds out in three ways:
@@ -489,6 +509,7 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
 | `local_is_owner` | `true` | A local CLI, TUI or Desktop session, and slash commands from the TUI, Desktop, the web dashboard and the Workshop screen, count as the owner. Turn it off on a shared machine or a dashboard others can reach |
 | `household` | `[]` | People: `{id, name, address_as, role}` |
 | `stop_policy` | `known` | Who may stop or pause: `known`, `anyone` or `owner` |
+| `start_policy` | `owner` | Who may start a queued print: `owner`, or `known` (a listed person may also start their own job, typed, when the safety gate passes and nothing is jumped; the owner is told). Resume and plate clear stay with the owner |
 | `allow_guests` | `false` | Let senders who are in no list prepare prints |
 | `inject_context` | `auto` | Per-turn printing context: `auto`, `always` or `never` |
 | `owner_target` | `""` | `hermes send` target for the owner's technical notices |
@@ -517,7 +538,7 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
 | `home3d_design` | Design a part in OpenSCAD: render the agent's code to an STL with preview pictures, keep versions; upload for slicing | Render: everyone. Upload: known people (or `allow_guests`) |
 | `home3d_slice` | Slice with the right presets; auto-eject only when the part is safe to push | Known people (or `allow_guests`) |
 | `home3d_queue` | Add (always manual start), list, or remove your own waiting workshop item. Never another person's job, not even for the owner, and never a job queued outside the workshop | List: everyone. Add, remove: known people (or `allow_guests`) |
-| `home3d_start` | Start a queued print after the safety gate | **Owner approval** |
+| `home3d_start` | Start a queued print after the safety gate | **Owner approval**. With `start_policy: known` also a listed person, for their own job and without `allow_jump` |
 | `home3d_stop` | Stop or pause; resume | Stop, pause: `stop_policy`. Resume: **owner approval** |
 | `home3d_clear_plate` | Check the plate, or confirm that it is clear | Confirm: **owner approval** |
 | `home3d_household` | Who asked for what; remember facts and notes | Remember, note: known people (or `allow_guests`) |
@@ -580,7 +601,10 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
   buttons, reach the plugin without a sender, so whoever can use those surfaces counts as the owner for
   `/home3d approve`. Turn `local_is_owner` off if your dashboard is shared or reachable from outside. Runs
   with nobody present (cron, kanban workers, `chat -q`, `-z`, `--source tool`) are never treated as the
-  owner for a printer action.
+  owner for a printer action. With `start_policy: known` (off by default), a person in `household` gets
+  the same prompt for a start of their own job, and `yolo` or `approvals.mode: off` skips it for them too;
+  whose job it is, presence, the voice rule and the safety gate are blocks in the hook and are not skipped.
+  Whoever can add a name to `household` can then start prints, so keep that list as you keep `owner_ids`.
 - **Voice hook.** `pre_gateway_dispatch` reads each inbound gateway message's type and sender id, never its
   text. It keeps, in memory only, the kind and time of a sender's newest messages (at most 8, for 10
   minutes, for at most 500 senders), and only for senders who sent a voice note lately. It always returns
@@ -648,7 +672,7 @@ printer.
 | Workshop screen: overview, approval card in 3D, Start, Pause, Resume, Stop, "Picked up" | Not run | Run in an isolated Hermes 0.23.1 (headless gateway and Webapp) on the simulator, with the code of this release: each button was pressed on the screen and the simulated printer and the done box followed. Not run in the Hermes Desktop app |
 | Workshop routes (GET only, file checks) and the screen's command runner | Not run | Tests only (the route tests need FastAPI and are skipped in CI; the screen's tests run with Node, not in CI) |
 | Outbox: retries, time budget, "could not be delivered", groups and routing by origin chat, done box | Not run | Tests only |
-| Voice detection (`pre_gateway_dispatch`, transcript shape), `stop_policy`, `allow_guests`, one unattended rule | Not run | Tests only (event objects shaped like Hermes'; no real voice note) |
+| Voice detection (`pre_gateway_dispatch`, transcript shape), `stop_policy`, `start_policy`, `allow_guests`, one unattended rule | Not run | Tests only (event objects shaped like Hermes'; no real voice note; Hermes' approval prompt in a household member's messaging session was not seen) |
 | Setup check (`doctor --json`, `capabilities`, the new Bambuddy GETs) | Not run | Tests only |
 
 `hermes plugins validate . --install-deps` runs in CI against Hermes 0.22.5, and

@@ -12,7 +12,8 @@ The person who asked hears: ``started`` (one line), ``finished`` / ``finished_ej
 ``failed``, ``paused``, and what needs them (``plate_not_clear``: ready to collect from the plate,
 ``eject_unverified``). ``requester_not_told`` is the owner line for a job whose requester is in no group and
 not in the household (nobody else was told); ``delivery_failed`` tells the owner once about notices that
-could not be delivered (``failures``: list of {"to", "text", "error", "attempts"}).
+could not be delivered (``failures``: list of {"to", "text", "error", "attempts"}); ``started_by`` tells the owner
+that a listed person started their own job (``start_policy: known``; ``who``), with how to stop it.
 
 Family texts name the print by what the person asked for (``family_job``: the stored request text,
 shortened with ``short_text``) and fall back to ``job`` (the pretty file name); owner texts always use
@@ -46,10 +47,10 @@ from typing import Any, Callable, Optional
 KINDS = ("started", "finished", "finished_ejected", "plate_not_clear", "eject_unverified", "plate_clear",
          "failed", "paused", "hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "eject_skipped",
          "light_left_on", "approval_request", "start_failed", "stopped", "online", "requester_not_told",
-         "delivery_failed")
+         "delivery_failed", "started_by")
 OWNER_ONLY = frozenset({"hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "plate_clear",
                         "light_left_on", "approval_request", "start_failed", "stopped", "online",
-                        "requester_not_told", "delivery_failed"})
+                        "requester_not_told", "delivery_failed", "started_by"})
 _STATE_WORDS = {"PREPARE": ("preparing", "hazırlanıyor"), "RUNNING": ("printing", "baskıda"),
                 "PAUSE": ("paused", "duraklatıldı"), "FINISH": ("finished", "bitti"),
                 "FAILED": ("failed", "yarıda kaldı"), "IDLE": ("idle", "boşta"), "UNKNOWN": ("unknown", "bilinmiyor")}
@@ -472,6 +473,18 @@ def _o_started(c: dict, tr: bool) -> str:
                          _for(c, lang)]), _link(c))
 
 
+def _o_started_by(c: dict, tr: bool) -> str:
+    """A listed person started their own job without the owner (``start_policy: known``): who, what, how long, and
+    the one thing the owner may want to do about it."""
+    lang = "tr" if tr else "en"
+    who = _s(c.get("who")) or _s(c.get("requester")) or ("Biri" if tr else "Someone")
+    job = _quote(c.get("job")) or (f"#{_s(c.get('queue_item_id'))}" if _s(c.get("queue_item_id")) else _quote("", lang))
+    dur = duration(c.get("duration_min"), lang, short=True)
+    if tr:
+        return f"▶️ {who} kendi işini başlattı: {job}" + (f" ({dur})" if dur else "") + ". Durdurmak için: /home3d stop"
+    return f"▶️ {who} started {job}" + (f" ({dur})" if dur else "") + ". Stop it with /home3d stop."
+
+
 def _missed(c: dict, tr: bool) -> str:
     """The watcher did not see the print end (``missed_end``): what that means for the plate."""
     how = _s(c.get("missed_end"))
@@ -808,7 +821,7 @@ _OWNER: dict[str, Callable[[dict, bool], str]] = {
     "queue_foreign": _o_queue_foreign, "upgrade_proposed": _o_upgrade_proposed, "eject_skipped": _o_eject_skipped,
     "light_left_on": _o_light_left_on, "approval_request": _o_approval_request, "start_failed": _o_start_failed,
     "stopped": _o_stopped, "online": _o_online, "requester_not_told": _o_requester_not_told,
-    "delivery_failed": _o_delivery_failed,
+    "delivery_failed": _o_delivery_failed, "started_by": _o_started_by,
 }
 
 

@@ -1,6 +1,7 @@
 """Access rules: one definition of a run nobody is present for, used by the agent path and ``/home3d``;
 ``commands.perform`` (one code path for approve / stop / pause); who may stop or pause (``stop_policy``); unknown
-senders cannot prepare prints (``allow_guests``); voice is for asking, never for starting. Simulator only."""
+senders cannot prepare prints (``allow_guests``); voice is for asking, never for starting; who may start a queued
+print (``start_policy``: the owner, or opt-in a listed person for their own job). Simulator only."""
 
 from __future__ import annotations
 
@@ -496,3 +497,265 @@ def test_a_pass_alone_never_acts_for_someone_the_rule_refuses(monkeypatch, tool,
     out = r.call(tool, args, "s-local")
     assert out["ok"] is False and out["codes"] == ["unattended"]
     assert r.be.status().state == "IDLE"
+
+
+# ---- 7. start_policy: a listed person may start their own job (opt-in) --------------------------------------
+DAD = "dad-id@s.whatsapp.net"
+OWNER_CHAT = "whatsapp:<owner-chat>@g.us"
+
+
+def _known(ctx=None, **over) -> Rig:
+    """A rig with ``start_policy: known``, a second listed person (Dad) and an owner chat."""
+    base = dict(start_policy="known", owner_target=OWNER_CHAT,
+                household=[{"id": MUM, "name": "Mum"}, {"id": DAD, "name": "Dad"}])
+    base.update(over)
+    r = Rig(ctx, **base)
+    r.store.remember_sender("s-dad", DAD, "whatsapp")
+    return r
+
+
+def _started_notices(store) -> list[dict]:
+    return [o for o in store.outbox() if "started_by" in (o.get("kinds") or [])]
+
+
+def test_start_policy_default_is_owner_and_a_known_person_is_still_refused():
+    assert Settings().start_policy == "owner"
+    r = Rig()
+    qid = r.queue_job("Mum")  # her own job
+    r.turn("s-mum", MUM, "yes, start it")
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert d["action"] == "block" and hooks.APPROVAL_MARKER in d["message"] and "Mum is not the owner" in d["message"]
+    assert "start_policy" not in d["message"] and not r.store.peek_pass("home3d_start", str(qid), "s-mum")
+    out = commands.perform(r.rt, "start", sender=MUM, qid=qid)
+    assert out["ok"] is False and out["code"] == "not_owner"
+    assert out["message"] == "Only the owner can approve (Mum is not in owner_ids)."
+    r.store.issue_pass("home3d_start", str(qid), "s-mum")  # even holding a pass
+    assert r.call("home3d_start", {"queue_item_id": qid}, "s-mum")["codes"] == ["not_owner"]
+    assert r.be.status().state == "IDLE" and not _started_notices(r.store)
+    assert "Exception" not in r.turn("s-mum", MUM, "3d print status")["context"]
+
+
+def test_known_the_requester_starts_their_own_job_and_the_owner_is_told():
+    r = _known()
+    qid = r.queue_job("Mum")
+    r.store.kv_set("watcher", {"state": "IDLE"})  # the watcher ran a moment ago
+    r.turn("s-mum", MUM, "yes, start it")
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert d["action"] == "approve" and f"#{qid}" in d["message"]  # the same prompt and pass as the owner's
+    assert r.store.peek_pass("home3d_start", str(qid), "s-mum")
+    out = r.call("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert out["ok"] and out["started_by"] == "Mum" and r.be.status().state != "IDLE", out
+    assert out["watcher_running"] and not any("owner" in w for w in out["warnings"])
+    (note,) = _started_notices(r.store)  # one owner notice, in the outbox the watcher sends from
+    assert note["audience"] == "owner" and note["target"] == OWNER_CHAT and note["status"] == "pending"
+    assert note["text"].startswith('▶️ Mum started "') and note["text"].endswith("Stop it with /home3d stop.")
+    assert " min)" in note["text"] and note["requester"] == "Mum"
+
+
+def test_known_the_typed_command_starts_the_requesters_own_job(monkeypatch):
+    from home3d_ws.home3d import notify, watcher
+
+    r = _known(language="tr")
+    qid = r.queue_job("Mum")
+    reply = r.slash(f"approve start {qid}", MUM)
+    assert reply.startswith("▶️") and reply.endswith("[home3d:ok]") and r.be.status().state != "IDLE"
+    (note,) = _started_notices(r.store)
+    assert note["text"].startswith('▶️ Mum kendi işini başlattı: "') and "Durdurmak için: /home3d stop" in note["text"]
+    # the watcher's next pass sends it to the owner chat, and only then does the start count as told
+    sent = []
+
+    def send(settings, target, text, media=None, *, audience="", dry_run=False, **kw):
+        if dry_run or not target:
+            return notify.Delivery(target=target, ok=True, dry_run=True, audience=audience, status=notify.DRY_RUN)
+        sent.append((target, text))
+        return notify.Delivery(target=target, ok=True, audience=audience, status=notify.SENT)
+
+    monkeypatch.delenv(notify.DRY_RUN_ENV, raising=False)
+    monkeypatch.setattr(notify, "send", send)
+    assert r.store.events(kind="start_requested")[0]["owner_notified"] == 0
+    watcher.run_once(r.rt.settings, r.be, r.store, deliver=True)
+    assert (OWNER_CHAT, note["text"]) in sent
+    assert r.store.events(kind="start_requested")[0]["owner_notified"] == 1
+
+
+def test_known_the_owners_own_start_is_not_announced_and_an_owner_who_is_not_told_is_said():
+    r = _known()
+    qid = r.queue_job("Mum")
+    assert commands.perform(r.rt, "start", sender=OWNER, qid=qid)["ok"]
+    assert not _started_notices(r.store)
+    r = _known(owner_target="")
+    qid = r.queue_job("Mum")
+    out = commands.perform(r.rt, "start", sender=MUM, qid=qid)
+    assert out["ok"], out
+    assert any("no owner chat is set" in w for w in out["result"]["warnings"])
+    assert [n["status"] for n in _started_notices(r.store)] == ["no_target"]  # recorded, never "told"
+    r = _known()  # an owner chat, but the watcher that sends the notice never ran
+    qid = r.queue_job("Mum")
+    out = commands.perform(r.rt, "start", sender=MUM, qid=qid)
+    assert out["ok"] and any("while the watcher is off" in w for w in out["result"]["warnings"])
+    # the rigs of one test share the store: the newest notice is this start's, and it goes out when the watcher runs
+    assert [n["status"] for n in _started_notices(r.store)] == ["pending", "no_target"]
+
+
+def test_known_another_known_person_a_guest_and_nobody_are_refused():
+    r = _known(allow_guests=True)
+    qid = r.queue_job("Mum")
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-dad")  # a listed person, but it is Mum's job
+    assert d["action"] == "block" and "Dad is not the owner" in d["message"]
+    assert "start only a job recorded as their own" in d["message"] and f"/home3d approve start {qid}" in d["message"]
+    out = commands.perform(r.rt, "start", sender=DAD, qid=qid)
+    assert out["ok"] is False and out["code"] == "not_owner"
+    assert "Dad can start only a print Dad asked for" in out["message"]
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-stranger")
+    assert d["action"] == "block" and "unknown sender" in d["message"]
+    for sender, code in ((STRANGER, "not_owner"), ("", "no_identity")):
+        assert commands.perform(r.rt, "start", sender=sender, qid=qid)["code"] == code
+    for session, code in (("s-dad", "not_owner"), ("s-stranger", "not_owner"), ("s-nobody", "no_identity")):
+        r.store.issue_pass("home3d_start", str(qid), session)  # a pass alone never helps
+        assert r.call("home3d_start", {"queue_item_id": qid}, session)["codes"] == [code], session
+    # a guest's own job (allow_guests) is still not theirs to start, and a job nobody is recorded for is nobody's
+    sl = r.call("home3d_slice", {"library_file_id": 1}, "s-stranger")
+    guest_job = r.call("home3d_queue", {"action": "add", "sliced_file_id": sl["sliced_file_id"]}, "s-stranger")
+    assert "owner's approval" in guest_job["next"]
+    assert commands.perform(r.rt, "start", sender=STRANGER, qid=guest_job["queue_item_id"])["code"] == "not_owner"
+    nobodys = r.queue_job(requester="")
+    assert commands.perform(r.rt, "start", sender=MUM, qid=nobodys)["code"] == "not_owner"
+    foreign = r.be.queue_add(r.be.slice(1, SliceOptions(printer_preset="sim-autoeject")).library_file_id,
+                             manual_start=True)  # queued outside the workshop: no stored requester
+    assert commands.perform(r.rt, "start", sender=MUM, qid=foreign.id)["code"] == "not_owner"
+    assert r.be.status().state == "IDLE" and not _started_notices(r.store)
+
+
+def test_known_a_start_by_voice_is_refused_for_everyone():
+    r = _known()
+    qid = r.queue_job("Mum")
+    r.h["pre_gateway_dispatch"](event=_event(MUM, "voice"), gateway=None, session_store=None)
+    r.turn("s-mum", MUM, "start my key tag")
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")
+    assert d["action"] == "block" and "voice message: Mum's last message" in d["message"]
+    assert not r.store.peek_pass("home3d_start", str(qid), "s-mum")
+    r.store.issue_pass("home3d_start", str(qid), "s-mum")
+    assert r.call("home3d_start", {"queue_item_id": qid}, "s-mum")["codes"] == ["voice_message"]
+    r.h["pre_gateway_dispatch"](event=_event(MUM, "voice"), gateway=None, session_store=None)
+    reply = r.slash(f"approve start {qid}", MUM)  # a slash command right after a voice note counts as spoken
+    assert "voice message" in reply and reply.endswith("[home3d:not_done:voice_message]")
+    assert r.be.status().state == "IDLE" and not _started_notices(r.store)
+    r.h["pre_gateway_dispatch"](event=_event(MUM, "text"), gateway=None, session_store=None)
+    r.turn("s-mum", MUM, "yes")  # the person types a short yes
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")["action"] == "approve"
+
+
+@pytest.mark.parametrize("marker", ["cron_ctx", "kanban", "single_query"])
+def test_known_a_run_nobody_watches_never_starts(monkeypatch, marker):
+    r = _known(_set_marker(monkeypatch, marker))
+    qid = r.queue_job("Mum")
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")["action"] == "block"
+    assert commands.perform(r.rt, "start", sender=MUM, qid=qid)["code"] == "unattended"
+    r.store.issue_pass("home3d_start", str(qid), "s-mum")
+    assert r.call("home3d_start", {"queue_item_id": qid}, "s-mum")["codes"] == ["unattended"]
+    assert r.be.status().state == "IDLE" and not _started_notices(r.store)
+
+
+def test_known_resume_and_plate_clear_stay_with_the_owner():
+    r = _known()
+    qid = r.queue_job("Mum")
+    assert commands.perform(r.rt, "start", sender=MUM, qid=qid)["ok"]
+    r.be.advance(2)
+    assert r.call("home3d_stop", {"action": "pause"}, "s-mum")["ok"]  # stop_policy: she may pause her print
+    d = r.pre("home3d_stop", {"action": "resume"}, "s-mum")
+    assert d["action"] == "block" and "/home3d approve resume" in d["message"]
+    assert "Mum is not the owner" in d["message"] and "start_policy" not in d["message"]
+    out = commands.perform(r.rt, "resume", sender=MUM)
+    assert out["code"] == "not_owner" and "start_policy" not in out["message"]
+    r.store.issue_pass("home3d_stop", "", "s-mum")
+    assert r.call("home3d_stop", {"action": "resume"}, "s-mum")["codes"] == ["not_owner"]
+    assert r.be.status().state == "PAUSE"
+    d = r.pre("home3d_clear_plate", {"action": "confirm"}, "s-mum")
+    assert d["action"] == "block" and "/home3d approve clear" in d["message"]
+    assert commands.perform(r.rt, "clear", sender=MUM)["code"] == "not_owner"
+    r.store.issue_pass("home3d_clear_plate", "", "s-mum")
+    assert r.call("home3d_clear_plate", {"action": "confirm"}, "s-mum")["codes"] == ["not_owner"]
+    assert commands.perform(r.rt, "resume", sender=OWNER)["ok"]  # the owner still can
+
+
+def test_known_a_start_that_needs_a_jump_needs_the_owner():
+    r = _known()
+    dads, mums = r.queue_job("Dad"), r.queue_job("Mum")  # Dad's job waits ahead of Mum's
+    r.turn("s-mum", MUM, "start mine")
+    d = r.pre("home3d_start", {"queue_item_id": mums}, "s-mum")
+    assert d["action"] == "block" and "for Dad" in d["message"] and "waiting ahead" in d["message"]  # the gate
+    out = commands.perform(r.rt, "start", sender=MUM, qid=mums)
+    assert out["ok"] is False and out["code"] == "gate"
+    d = r.pre("home3d_start", {"queue_item_id": mums, "allow_jump": True}, "s-mum")  # the override is the owner's
+    assert d["action"] == "block" and "Mum is not the owner" in d["message"]
+    assert f"/home3d approve start {mums} jump" in d["message"] and "never with allow_jump" in d["message"]
+    out = commands.perform(r.rt, "start", sender=MUM, qid=mums, jump=True)
+    assert out["ok"] is False and out["code"] == "not_owner" and "never with jump" in out["message"]
+    r.store.issue_pass("home3d_start", f"{mums}+jump", "s-mum")
+    assert r.call("home3d_start", {"queue_item_id": mums, "allow_jump": True}, "s-mum")["codes"] == ["not_owner"]
+    assert not any(r.store.peek_pass("home3d_start", t, "s-mum") for t in (str(mums), f"{mums}+jump"))
+    assert r.be.status().state == "IDLE" and not _started_notices(r.store)
+    assert r.pre("home3d_start", {"queue_item_id": mums, "allow_jump": True}, "s-owner")["action"] == "approve"
+    assert commands.perform(r.rt, "start", sender=DAD, qid=dads)["ok"]  # Dad's own job, first in the queue
+
+
+def test_known_after_a_failed_print_the_owner_confirms_the_plate_first():
+    r = _known()
+    first, mums = r.queue_job("Dad"), r.queue_job("Mum")
+    r.be.set_scenario("fail")
+    r.be.start(first)
+    r.be.advance(600)
+    assert r.be.status().state == "FAILED"
+    r.be.human_clears_plate()  # the camera says empty, which is never enough after a failure
+    r.turn("s-mum", MUM, "start mine")
+    d = r.pre("home3d_start", {"queue_item_id": mums}, "s-mum")
+    assert d["action"] == "block" and "approve clear" in d["message"]
+    assert commands.perform(r.rt, "start", sender=MUM, qid=mums)["code"] == "gate"
+    assert commands.perform(r.rt, "clear", sender=MUM)["code"] == "not_owner"  # that acknowledgement is the owner's
+    assert commands.perform(r.rt, "clear", sender=OWNER)["ok"]
+    assert commands.perform(r.rt, "start", sender=MUM, qid=mums)["ok"]
+
+
+def test_known_tells_the_agent_what_the_person_may_do():
+    r = _known()
+    assert "Exception (start_policy known): Mum may start a job they asked for themselves" in \
+        r.turn("s-mum", MUM, "3d print status")["context"]
+    assert "Exception" not in r.turn("s-owner", OWNER, "3d print status")["context"]
+    sl = r.call("home3d_slice", {"library_file_id": 1}, "s-mum")
+    q = r.call("home3d_queue", {"action": "add", "sliced_file_id": sl["sliced_file_id"]}, "s-mum")
+    assert q["requester"] == "Mum" and "Mum may start this job themselves" in q["next"]
+    q = r.call("home3d_queue", {"action": "add", "sliced_file_id": sl["sliced_file_id"]}, "s-dad")
+    assert q["requester"] == "Mum" and "owner's approval" in q["next"]  # Dad queued Mum's file: not his to start
+    r = Rig()
+    sl = r.call("home3d_slice", {"library_file_id": 1}, "s-mum")
+    q = r.call("home3d_queue", {"action": "add", "sliced_file_id": sl["sliced_file_id"]}, "s-mum")
+    assert "owner's approval" in q["next"] and "start_policy" not in q["next"]
+
+
+def test_start_policy_rule_is_pure_and_an_unreadable_value_is_owner():
+    from home3d_ws.home3d.config import START_POLICIES, load_settings
+
+    assert START_POLICIES == ("owner", "known")
+    assert load_settings(overrides={"start_policy": " Known "}).start_policy == "known"
+    for bad in ("everyone", "anyone", "", 7, "yes"):
+        assert load_settings(overrides={"start_policy": bad}).start_policy == "owner", bad
+    s = Settings(owner_ids=[OWNER], household=[{"id": MUM, "name": "Mum"}])
+    mum = who_is(s, MUM)
+    assert approval_refusal(mum, start_policy="known", requester="Mum") == ""
+    assert approval_refusal(mum, start_policy="known", requester="mum ") == ""  # the name the store recorded
+    assert approval_refusal(mum) == "not_owner"  # resume, plate clear and the default: the owner only
+    for policy in ("owner", "sometimes", "", None, "anyone"):
+        assert approval_refusal(mum, start_policy=policy, requester="Mum") == "not_owner", policy
+    for requester in ("Dad", "Owner", "", None):
+        assert approval_refusal(mum, start_policy="known", requester=requester) == "not_owner", requester
+    assert approval_refusal(mum, start_policy="known", requester="Mum", override=True) == "not_owner"
+    assert approval_refusal(who_is(s, MUM, channel="voice"), start_policy="known", requester="Mum") == "voice_message"
+    assert approval_refusal(who_is(s, MUM, present=False), start_policy="known", requester="Mum") == "unattended"
+    guest = who_is(s, STRANGER)
+    assert approval_refusal(guest, start_policy="known", requester=guest.name) == "not_owner"
+    assert approval_refusal(who_is(s, ""), start_policy="known", requester="") == "no_identity"
+    assert approval_refusal(who_is(s, OWNER), start_policy="known", requester="Mum", override=True) == ""
+    r = Rig(start_policy="everyone")  # a value that reached the rule unread still means owner
+    qid = r.queue_job("Mum")
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-mum")["action"] == "block"
+    assert commands.perform(r.rt, "start", sender=MUM, qid=qid)["code"] == "not_owner"

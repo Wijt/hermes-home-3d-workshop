@@ -9,7 +9,10 @@
                     owner); never when the owner's message came in as a VOICE note (a typed confirmation is asked
                     for); never when the safety gate fails; only an owner session (a local CLI/TUI session counts
                     when ``local_is_owner``) gets Hermes' human-approval prompt, plus a single-use handler pass
-                    bound to (tool, target, session). Stored approvals never authorise an agent call. Hermes
+                    bound to (tool, target, session). With ``start_policy: known`` a listed person starting the job
+                    they asked for themselves is treated like the owner for that start (``who_may``): the same
+                    order, the same prompt in their own session, the same pass. Stored approvals never authorise an
+                    agent call. Hermes
                     answers that prompt by itself when the owner runs with ``--yolo`` or ``approvals.mode: off``
                     (tools/approval.py, v0.22.5), which is why the unattended, identity and voice rules are BLOCKS
                     decided here and never left to the prompt.
@@ -269,6 +272,23 @@ def _interval_text(interval: Any) -> str:
     return f"{m.group(1)} {unit}"
 
 
+def who_may(rt, actor, action: str, qid: Optional[int] = None, jump: bool = False) -> str:
+    """``gates.approval_refusal`` for one gated action ('' = may): the one call the hook, the tool handlers and
+    ``/home3d approve`` make, so all three decide alike. Resume and plate clear: the owner only. A start adds what
+    ``start_policy`` needs: who the store says asked for the job (an active workshop job; never the model's word),
+    and a jump as an override. With the default policy the store is not read: exactly the owner-only rule."""
+    if action != "start":
+        return approval_refusal(actor)
+    policy = getattr(rt.settings, "start_policy", "owner")
+    requester = None
+    if policy != "owner" and qid is not None:
+        try:
+            requester = rt.store.active_job_requesters().get(int(qid))
+        except Exception:  # a store we cannot read makes the job nobody's: the owner still may
+            requester = None
+    return approval_refusal(actor, start_policy=policy, requester=requester, override=bool(jump))
+
+
 # ---- the shared gate (hook and /home3d approve) --------------------------------------------------------
 @dataclass
 class Evaluation:
@@ -472,11 +492,12 @@ class _Hooks:
         s = rt.settings
         owner = s.owner_name or "the owner"
         qid = _qid(args.get("queue_item_id")) if action == "start" else None
-        cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
+        jump = action == "start" and _truthy(args.get("allow_jump"))
+        cmd = approve_command(action, qid, jump, ack=_truthy(args.get("ack_hms")))
         actor = rt.actor(session_id)  # who asks, how the message arrived, is a person present
         sender = actor.sender
         person = s.person_for(sender) if sender else None
-        why = approval_refusal(actor)  # the same rule /home3d approve uses (commands.perform)
+        why = who_may(rt, actor, action, qid, jump)  # the same rule /home3d approve uses (commands.perform)
         if why == "unattended":  # 1. cron, kanban worker, chat -q, -z, --source tool: nobody can answer a prompt
             return _block("BLOCKED: " + (absent_text(rt, tool, cmd) or f"{tool} needs a person present."))
         if why in ("no_identity", "not_owner", "local_off"):
@@ -486,9 +507,10 @@ class _Hooks:
         if why == "voice_message":
             # 3. voice is for asking, never for starting: speech-to-text can hear another sentence. A block, not an
             # approval prompt: Hermes answers its prompt by itself under --yolo / approvals.mode off.
-            return _block(f"BLOCKED: voice message: {owner}'s last message came in as a voice note, and a voice "
+            asker = owner if actor.is_owner else actor.label("en")  # start_policy known: the requester's own start
+            return _block(f"BLOCKED: voice message: {asker}'s last message came in as a voice note, and a voice "
                           "note never starts or resumes a print or marks the plate clear (speech can be heard "
-                          f"wrong). Ask {owner} to confirm in writing: a typed message here, or `{cmd}` (runs it "
+                          f"wrong). Ask {asker} to confirm in writing: a typed message here, or `{cmd}` (runs it "
                           "right away). Do not call this again before a typed message arrives.")
         if why:  # a rule this hook does not know: fail closed
             return _block(f"BLOCKED: {tool} was not run ({why}). {owner} sends `{cmd}`.")
@@ -496,11 +518,12 @@ class _Hooks:
         if not ev.ok:
             return _block(f"BLOCKED: {ev.reason}")
         cmd = approve_command(action, ev.qid, ev.jump, ack=bool(ev.hms))
-        if approval_refusal(rt.actor(session_id)):  # defensive: the answer changed while the gate ran
+        if who_may(rt, rt.actor(session_id), action, ev.qid, ev.jump):  # defensive: it changed while the gate ran
             return self._refuse(person, sender, cmd, owner)
-        # 5. the owner, present, typing: Hermes asks them BEFORE the handler runs (it answers by itself under their
-        # own --yolo / approvals.mode off, verified in tools/approval.py v0.22.5); the handler then needs this
-        # single-use pass, so nothing but this very call can use it.
+        # 5. the owner (or, under start_policy known, the job's own requester), present, typing: Hermes asks them
+        # BEFORE the handler runs (it answers by itself under --yolo / approvals.mode off, verified in
+        # tools/approval.py v0.22.5); the handler then needs this single-use pass, so nothing but this very call
+        # can use it.
         rt.store.issue_pass(tool, ev.target, session_id, ttl_s=PASS_TTL_S, detail=ev.pass_detail)
         # unique per call: an "always" answer in Hermes' prompt can never pre-approve a later printer action (it
         # only adds an allowlist entry nothing will match again), so the prompt says to approve once
@@ -546,6 +569,9 @@ class _Hooks:
                           f"person has to ask {owner} directly.")
         # 2b. a household member who is not the owner: the ask becomes an approval request the watcher passes on
         hint = "" if s.owner_ids else " (no owner_ids are configured yet)"
+        if action == "start" and s.start_policy == "known":  # why this start is not theirs to make
+            hint += (f" (start_policy known lets {person.name} start only a job recorded as their own, and never "
+                     "with allow_jump)")
         relay = self._relay(person.name, owner, action, qid, session_id, sender)
         return _block(f"BLOCKED: {APPROVAL_MARKER}: {person.name} is not the owner{hint}. {owner} sends "
                       f"`{cmd}` (runs it right away, nothing is stored). {relay} Do not promise a start.")
@@ -664,6 +690,9 @@ class _Hooks:
             lines.append(mine)
         lines.append(f"For a printing request load skill {SKILL_REF} first. Starting a print or clearing "
                      "the plate needs the owner's approval: never promise a start.")
+        if s.start_policy == "known" and person is not None and person.role != "owner":
+            lines.append(f"Exception (start_policy known): {person.name} may start a job they asked for themselves, "
+                         "after a typed yes.")
         text = "\n".join(lines)
         return text if len(text) <= CONTEXT_MAX else text[: CONTEXT_MAX - 1].rstrip() + "…"
 
@@ -773,7 +802,7 @@ def make_hooks(rt) -> dict[str, Callable]:
 
 
 __all__ = ["make_hooks", "gated_action", "approve_command", "approval_target", "evaluate", "Evaluation",
-           "absent_text",
+           "absent_text", "who_may",
            "hms_ack_detail", "acked_codes", "HMS_ACK_PREFIX", "bounded_backend", "watcher_fresh",
            "watcher_stale_s", "interval_seconds",
            "HOOK_DEADLINE_S", "HOOK_REQUEST_TIMEOUT_S", "HOOK_PLATE_MAX_AGE_S", "HOOK_TIMEOUT_SHARE",

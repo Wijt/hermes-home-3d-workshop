@@ -97,6 +97,12 @@ config_schema:
     default: known
     label: Who may stop or pause a print
     description: "known: the owner and the people in the household list (default). anyone: every sender, also unknown ones and runs with nobody present. owner: the owner only. The owner can always type /home3d stop or /home3d pause. Who stopped a print is recorded and named in the owner notice."
+  start_policy:
+    type: str
+    choices: [owner, known]
+    default: owner
+    label: Who may start a queued print
+    description: "owner: the owner only (default). known: a person in the household list may also start a job they asked for themselves, typed (never by voice note), with a person present, when the safety gate passes and nothing is jumped; the owner is told who started what (owner_target, sent by the watcher). Somebody else's job, a start that needs jump, resume and marking the plate clear stay with the owner, and unknown senders never start anything."
   allow_guests:
     type: bool
     default: false

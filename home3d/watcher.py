@@ -538,7 +538,8 @@ class _Pass:
                 self.w["prev_photo"] = {"job": job, "path": self.w.get("photo_path") or ""}
                 self.w["photo_for_job"] = ""
             ctx, family = self._ctx(job, jobrow, st) if jobrow and not first else ({}, False)
-            if family:  # the person who asked hears one short line; the owner started it and is not told again
+            if family:  # the person who asked hears one short line; the owner started it (or the start itself told
+                # them: start_policy known, tools._tell_owner_start) and is not told again
                 ctx.update(one_line=True, duration_min=st.remaining_min)
                 self._note("started", job, ctx, family=True, owner=False,
                            queue_item_id=(jobrow or {}).get("queue_item_id"))

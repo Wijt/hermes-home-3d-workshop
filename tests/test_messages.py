@@ -287,3 +287,15 @@ def test_r3_new_owner_texts(lang):
     assert "approve resume" not in ask and ("bitti" if tr else "finished") in ask
     ready = M.render("ready_next", "owner", lang, next_job="Hook", next_id=8, camera_said=True, plate_diff=1.8)
     assert ("Kameraya" not in ready) if tr else ("camera" not in ready)
+
+
+def test_started_by_tells_the_owner_who_started_what_and_how_to_stop_it():
+    """start_policy known: a listed person started their own job, so the owner gets one line."""
+    ctx = dict(who="Mum", job="Mum key tag v1", queue_item_id=7, duration_min=13)
+    assert M.render("started_by", "owner", "en", **ctx) == \
+        '▶️ Mum started "Mum key tag v1" (13 min). Stop it with /home3d stop.'
+    assert M.render("started_by", "owner", "tr", **ctx) == \
+        '▶️ Mum kendi işini başlattı: "Mum key tag v1" (13 dk). Durdurmak için: /home3d stop'
+    assert M.render("started_by", "owner", "en", who="Mum", queue_item_id=7) == \
+        "▶️ Mum started #7. Stop it with /home3d stop."
+    assert M.render("started_by", "family", "en", **ctx) == "" and M.render("started_by", "team", "tr", **ctx) == ""

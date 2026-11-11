@@ -406,7 +406,11 @@ the demo hid too much. These decisions supersede the "approval" paragraphs above
   `hooks.evaluate()` and, on success, issues a pass for its own one-off session and calls the handler directly;
   on any failure nothing is kept and the owner sends the command again. No stored approval authorises a later
   call any more. Resume with a blocking HMS needs the owner's acknowledgement (`resume ack` / `ack_hms=true` from
-  an owner session).
+  an owner session). Opt-in `start_policy: known` (default `owner`): `gates.approval_refusal` also lets a listed
+  person start the job the store recorded as theirs (`hooks.who_may` reads the requester; never with `jump`,
+  never by voice, never unattended); the hook, the handler re-check and `/home3d approve start` all call
+  `who_may`, resume and plate clear stay owner-only, and the start writes one owner notice (`started_by`) to the
+  outbox, which the watcher's next pass sends.
 - **Plate truth (D5, `gates`, `backends`).** Status parsing fails closed (missing/unknown state = `UNKNOWN`,
   `connected` must be literally true, string/int HMS codes are parsed). A light warning or a failed lit re-check
   makes the plate *uncertain* (blocks); the chamber light is restored to its previous state. After a FAILED print

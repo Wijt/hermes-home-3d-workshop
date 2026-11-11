@@ -18,6 +18,10 @@ What it never does:
 Every section is built on its own: a section that fails comes back empty and its error is listed in
 ``problems`` (the screen stays usable when, say, the printer manager is down).
 
+The screen's buttons run ``/home3d`` as the local user, so who may act is decided by the same rule as a typed command
+(``hooks.who_may``): the local owner while ``local_is_owner`` is on. ``start_policy: known`` changes nothing here: it
+lets a listed person start their own job from their chat, and the owner's notice about it shows under notices.
+
 People and groups come from the ``groups`` setting and ``notify.route_for``; notices from the store's outbox; the
 done box from ``Store.done_box``; open human-needed moments from ``Store.open_human_needed``; the setup list from
 ``home3d.checks``.
@@ -531,7 +535,10 @@ def _waiting_entry(rt, settings: Any, status: Any, queue: list, trays: list, *, 
 
 def _waiting(rt, settings: Any, status: Any, queue: Optional[list]) -> list[dict]:
     """Open family approval requests (``resolved_ts`` NULL, announced or not) that still make sense, then the
-    workshop's own manual-start jobs nobody has asked about yet: each one waits for the owner's click."""
+    workshop's own manual-start jobs nobody has asked about yet: each one waits for the owner's click. With
+    ``start_policy: known`` the person who asked for a job may also start it from their own chat (typed, no jump,
+    the same gate); its card stays here until then, and the owner's click works as before. Resume and plate clear
+    cards are the owner's alone."""
     store = rt.store
     queue = queue or []
     trays = list(status.trays) if status is not None else []
