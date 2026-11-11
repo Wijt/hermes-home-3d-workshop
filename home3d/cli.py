@@ -82,6 +82,8 @@ def setup_parser(subparser: argparse.ArgumentParser) -> None:
     p["status"].add_argument("--json", action="store_true", help="raw home3d_status JSON")
     p["doctor"].add_argument("--plate", action="store_true",
                              help="also run a camera plate check (may switch the chamber light)")
+    p["doctor"].add_argument("--json", action="store_true",
+                             help="print the rows, the setup checks and the capabilities as JSON")
     sim = p["simulate"].add_subparsers(dest="sim_command")
     sc = sim.add_parser("scenario", help="next/current job behaviour")
     sc.add_argument("name", choices=SCENARIOS)
@@ -183,12 +185,12 @@ def watcher_cron_jobs(text: str) -> list[dict]:
             if j["name"] == CRON_NAME or (j["script"] and Path(j["script"]).name == SCRIPT_NAME)]
 
 
-def _cron_list(binary: str, all_jobs: bool = True) -> Optional[str]:
+def _cron_list(binary: str, all_jobs: bool = True, timeout: float = 60) -> Optional[str]:
     """stdout of ``hermes cron list [--all]`` (``--all``: disabled and completed jobs too), or None when it could
     not run."""
     cmd = [binary, "cron", "list"] + (["--all"] if all_jobs else [])
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
                               env={**os.environ, "NO_COLOR": "1"})
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -366,19 +368,14 @@ def _cmd_doctor(rt, args) -> int:
     s = rt.settings
     add("ok", "backend", s.backend + (f" ({s.bambuddy_url}, printer {s.printer_id})" if s.backend == "bambuddy" else ""))
     add("ok", "persona", f"{s.persona_name} · language {s.language}")
+    _doctor_owner_ids(s, add)
     local = getattr(s, "local_is_owner", True)
-    add("ok" if s.owner_ids or local else "FAIL", "owner_ids",
-        f"{len(s.owner_ids)} id(s), compared exactly (check with /home3d whoami)" if s.owner_ids else
-        ("empty: nobody can approve from a chat (only a local CLI/TUI session)" if local
-         else "empty and local_is_owner is off: nobody can approve anything"))
     add("ok", "local sessions", "count as the owner (local_is_owner)" if local
         else "are not the owner (local_is_owner: false)")
     add("ok", "inject_context", str(getattr(s, "inject_context", "auto")))
     add("ok" if s.household else "warn", "household",
         f"{len(s.household)} person(s)" if s.household else "empty: family members are not recognised by name")
-    add("ok" if s.owner_target else "warn", "owner_target", s.owner_target or "empty: owner notices stay in the outbox")
-    add("ok" if s.family_target else "warn", "family_target",
-        s.family_target or "empty: family notices stay in the outbox")
+    _doctor_targets(s, add)
     try:
         d = data_dir()
         probe = d / ".doctor"
@@ -394,15 +391,11 @@ def _cmd_doctor(rt, args) -> int:
 
     try:
         be = rt.backend
-        st = be.status()
-        add("ok" if st.connected and st.state != "OFFLINE" else "FAIL", "printer",
-            f"{st.state}" + (f" · {st.job_name}" if st.job_name else "") + (f" · {st.printer_name}" if st.printer_name else ""))
-        if st.blocking_hms:
-            add("warn", "HMS", ", ".join(h.code for h in st.blocking_hms))
-        add("ok", "queue", f"{len(be.queue())} active item(s)")
     except BackendError as e:
         be = None
         add("FAIL", "printer", str(e))
+    if be is not None and not _doctor_printer(be, add):
+        be = None
     if be is not None:
         _doctor_presets(rt, be, add)
         _doctor_plate_clear_setting(rt, be, add)
@@ -421,12 +414,56 @@ def _cmd_doctor(rt, args) -> int:
     for i, (name, path, _desc) in enumerate(SKILLS):
         add("ok" if path.is_file() else "FAIL", "skill" if i == 0 else f"skill {name}", str(path))
 
+    fails = sum(1 for r in rows if r[0] == "FAIL")
+    if getattr(args, "json", False):
+        from .checks import capabilities, run_checks
+
+        checks = run_checks(rt)
+        print(json.dumps({"ok": not fails,
+                          "rows": [{"status": DOCTOR_STATUS.get(lv, lv), "label": lb, "detail": dt}
+                                   for lv, lb, dt in rows],
+                          "checks": checks, "capabilities": capabilities(checks)}, ensure_ascii=False, indent=1))
+        return 1 if fails else 0
     width = max(len(r[1]) for r in rows)
     for level, label, detail in rows:
-        print(f"[{level:>4}] {label:<{width}}  {detail}")
-    fails = sum(1 for r in rows if r[0] == "FAIL")
+        print(f"[{'warn' if level == 'missing' else level:>4}] {label:<{width}}  {detail}")
     print("ready." if not fails else f"{fails} problem(s) to fix.")
     return 1 if fails else 0
+
+
+DOCTOR_STATUS = {"ok": "ok", "warn": "warn", "missing": "missing", "FAIL": "error"}  # row level -> check status
+
+
+def _doctor_owner_ids(s, add) -> None:
+    """Who can approve: the owner_ids, else only local sessions (local_is_owner), else nobody."""
+    if s.owner_ids:
+        add("ok", "owner_ids", f"{len(s.owner_ids)} id(s), compared exactly (check with /home3d whoami)")
+    elif getattr(s, "local_is_owner", True):
+        add("ok", "owner_ids", "empty: nobody can approve from a chat (only a local CLI/TUI session)")
+    else:
+        add("FAIL", "owner_ids", "empty and local_is_owner is off: nobody can approve anything")
+
+
+def _doctor_targets(s, add) -> None:
+    add("ok" if s.owner_target else "missing", "owner_target",
+        s.owner_target or "empty: owner notices stay in the outbox")
+    add("ok" if s.family_target else "missing", "family_target",
+        s.family_target or "empty: family notices stay in the outbox")
+
+
+def _doctor_printer(be, add) -> bool:
+    """Printer state, blocking HMS errors and the queue length; False when the printer manager did not answer."""
+    try:
+        st = be.status()
+        add("ok" if st.connected and st.state != "OFFLINE" else "FAIL", "printer",
+            f"{st.state}" + (f" · {st.job_name}" if st.job_name else "") + (f" · {st.printer_name}" if st.printer_name else ""))
+        if st.blocking_hms:
+            add("warn", "HMS", ", ".join(h.code for h in st.blocking_hms))
+        add("ok", "queue", f"{len(be.queue())} active item(s)")
+    except BackendError as e:
+        add("FAIL", "printer", str(e))
+        return False
+    return True
 
 
 OPENSCAD_MISSING = "not found: the agent cannot design new parts (install openscad, and xvfb for previews)"
@@ -442,7 +479,7 @@ def _doctor_openscad(add) -> None:
         add("warn", "openscad", f"cannot check: {e}")
         return
     if not st["openscad"]:
-        add("warn", "openscad", OPENSCAD_MISSING)
+        add("missing", "openscad", OPENSCAD_MISSING)
         return
     version = st["version"] or "unknown version"
     if st["previews"]:
@@ -457,23 +494,24 @@ SCHEDULER_DOWN = ("installed, but the Hermes scheduler is not running: start `he
                   "(check `hermes cron status`)")
 
 
-def _doctor_watcher(rt, binary: Optional[str], add) -> None:
+def _doctor_watcher(rt, binary: Optional[str], add, timeout: Optional[float] = None) -> None:
     """The cron job, the script and the last pass. A job (or script) without any pass means no scheduler runs it."""
     script = hermes_home() / "scripts" / SCRIPT_NAME
     jobs: Optional[list[dict]] = None
     if binary:
-        listing = _cron_list(binary, all_jobs=False)
+        listing = (_cron_list(binary, all_jobs=False) if timeout is None
+                   else _cron_list(binary, all_jobs=False, timeout=timeout))
         jobs = watcher_cron_jobs(listing) if listing is not None else None
     if jobs is None:
         add("warn", "cron job", "unknown (hermes cron list did not run)" if binary else "unknown (no hermes binary)")
     elif not jobs:
-        add("warn", "cron job", f"none named {CRON_NAME}: hermes home3d setup")
+        add("missing", "cron job", f"none named {CRON_NAME}: hermes home3d setup")
     elif len(jobs) > 1:
         add("warn", "cron job", f"{len(jobs)} watcher jobs ({', '.join(j['id'] for j in jobs)}): remove the extra "
                                 "one with hermes cron remove <id>")
     else:
         add("ok", "cron job", f"{jobs[0]['id']} ({jobs[0]['name'] or jobs[0]['script']})")
-    add("ok" if script.is_file() else "warn", "cron script", str(script) if script.is_file() else "not installed")
+    add("ok" if script.is_file() else "missing", "cron script", str(script) if script.is_file() else "not installed")
     installed = bool(jobs) or (jobs is None and script.is_file())
     w = rt.store.kv_get("watcher") or {}
     upd = w.get("updated") if isinstance(w, dict) else None
@@ -488,7 +526,7 @@ def _doctor_watcher(rt, binary: Optional[str], add) -> None:
                 + ("is the Hermes scheduler running? start `hermes gateway` (check `hermes cron status`)"
                    if installed else "hermes home3d setup"))
     else:
-        add("warn", "watcher", SCHEDULER_DOWN if installed else "never ran: hermes home3d setup")
+        add("warn" if installed else "missing", "watcher", SCHEDULER_DOWN if installed else "never ran: hermes home3d setup")
 
 
 def _doctor_watcher_settings(s, add) -> None:
@@ -589,7 +627,7 @@ def _doctor_presets(rt, be, add) -> None:
     for label, pid, want in (("auto-eject preset", s.autoeject_printer_preset, True),
                              ("standard preset", s.standard_printer_preset, False)):
         if not pid:
-            add("warn" if want else "ok", label, "not set" + (": parts are never pushed off" if want else ""))
+            add("missing" if want else "ok", label, "not set" + (": parts are never pushed off" if want else ""))
             continue
         if known and str(pid) not in known:
             add("FAIL", label, f"{pid} not found in Bambuddy presets")
