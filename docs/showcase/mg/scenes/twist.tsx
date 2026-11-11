@@ -1,10 +1,11 @@
-// twist (330 frames): it printed its own upgrade. Four pictures, cut on motion: a real photo from six weeks of
+// twist (370 frames): it printed its own upgrade. Four pictures, cut on motion: a real photo from six weeks of
 // printing, the plugin's real screen (the same hand-off three times, then the upgrade it proposed), a real photo of
-// that upgrade printed, and the real bed, tilted and empty, with the owner's one line.
-import { AbsoluteFill, Sequence, useCurrentFrame } from "raea";
-import { Bubble, F, FONTS, INOUT, Label, OUT, P, Photo, Screen, Words, ramp } from "../kit";
+// that upgrade printed, and real footage of the printer pushing parts off its plate into the box, with the owner's
+// one line.
+import { AbsoluteFill, Sequence, Video, interpolate, staticFile, useCurrentFrame } from "raea";
+import { Bubble, F, FONTS, INOUT, Label, OUT, P, Photo, Screen, Words, clamp, ramp } from "../kit";
 
-export const DURATION = 330;
+export const DURATION = 370;
 
 // the four parts (scene frames); inside each part frames are local
 const T_WEEKS = 0;
@@ -125,19 +126,41 @@ function Printed() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// 4. "it fell in by itself": the owner's line over the bed, tilted and empty
+// 4. "it fell in by itself": real footage of the printer at home. The head pushes the cooled parts forward on the
+//    tilted plate; then the box under the shelf, with the parts in it. The owner's line is the picture's title.
 // ---------------------------------------------------------------------------------------------------------------
-const T_BUBBLE = 12; // the empty bed is seen first, then the owner's line lands on it
+const T_BUBBLE = 12; // the footage is seen first, then the owner's line lands beside it
+const T_BOX = 72; // the footage cuts from the push to the box
+const PANEL = { left: 1262, top: 66, width: 526, height: 948 }; // the footage is a phone's upright frame (480 x 864)
+
+function Clip({ file, startFrom, frames, zoom, origin }: { file: string; startFrom: number; frames: number; zoom: [number, number]; origin: string }) {
+  const f = useCurrentFrame();
+  // a slow push-in inside the panel, so the cut joins motion to motion
+  const k = interpolate(f, [0, frames], zoom, clamp);
+  return <Video src={staticFile(file)} muted startFrom={startFrom} style={{ position: "absolute", left: 0, top: 0, width: PANEL.width, height: PANEL.height, objectFit: "cover", transform: `scale(${k})`, transformOrigin: origin }} />;
+}
 
 function Fell() {
+  const f = useCurrentFrame();
+  const inn = ramp(f, 0, 12, OUT);
   return (
-    <AbsoluteFill>
-      <Photo file="real/empty-bed-after-push.jpg" focus={[0.7, 0.7]} from={1.06} to={1.16} frames={80} dim={0.2} />
-      <Shade deg={135} a={0.62} reach={52} />
-      <div style={{ position: "absolute", left: 150, top: 196 }}>
-        <Bubble text="it fell in by itself" who="The owner" color={P.blue} at={T_BUBBLE} size={116} width={1400} />
+    <AbsoluteFill style={{ background: P.ink }}>
+      <div style={{ position: "absolute", left: PANEL.left, top: PANEL.top + (1 - inn) * 40, width: PANEL.width, height: PANEL.height, borderRadius: 30, overflow: "hidden", background: "#000", opacity: inn }}>
+        <Sequence from={0} durationInFrames={T_BOX} layout="none">
+          {/* closer on the bed and the box under it: the parts are small */}
+          <Clip file="footage/real-push.mp4" startFrom={58} frames={T_BOX} zoom={[1.45, 1.58]} origin="40% 40%" />
+        </Sequence>
+        <Sequence from={T_BOX} layout="none">
+          <Clip file="footage/real-box.mp4" startFrom={14} frames={DURATION - T_EMPTY - T_BOX} zoom={[1.03, 1.1]} origin="50% 55%" />
+        </Sequence>
       </div>
-      <Label kind="photo" style={TOP_RIGHT} />
+      <div style={{ position: "absolute", left: 150, top: 300 }}>
+        <Bubble text="it fell in by itself" who="The owner" color={P.blue} at={T_BUBBLE} size={104} width={1060} />
+      </div>
+      <div style={{ position: "absolute", left: 150, top: 610, width: 1040 }}>
+        <Words text="Now it clears its own plate." at={T_BOX + 2} each={3} size={96} />
+      </div>
+      <Label kind="footage" style={TOP_LEFT} />
     </AbsoluteFill>
   );
 }

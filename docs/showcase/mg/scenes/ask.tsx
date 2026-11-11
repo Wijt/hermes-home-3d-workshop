@@ -6,7 +6,7 @@ import { Bubble, IN, INOUT, Label, OUT, P, Stage, Wipe, clamp, ramp } from "../k
 export const DURATION = 195;
 
 const MUM = "Mıstık, can you make me a key tag with MUM on it? Red please.";
-const REPLY = "On it. I'll ask the owner to approve the print.";
+const REPLY = "On it. I'll find a few and show you.";
 
 // Where things rest once the reply is in (frame px, camera at rest).
 const MUM_AT = { left: 150, top: 150, width: 1150, size: 84 };

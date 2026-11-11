@@ -293,6 +293,7 @@ export const LABELS = {
   chat: "Re-created from real chats. Names changed.",
   photo: "Real photo from the printer's camera",
   screen: "The plugin's real screen, on its simulated printer",
+  footage: "Real footage of the printer at home",
 } as const;
 
 export function Label({ kind, at = 0, out, tone = "dark", style }: { kind: keyof typeof LABELS; at?: number; out?: number; tone?: "dark" | "light"; style?: CSSProperties }) {

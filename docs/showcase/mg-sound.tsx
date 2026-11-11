@@ -2,13 +2,15 @@
 // sounds on the picture's physical moments (a bubble landing, the press of Start, the part dropping into the box).
 // It draws nothing, so it renders in seconds at a tiny size; tools/build_film.sh muxes its sound under the picture.
 //
-// Every time below is in seconds of the film (mg/BOARD.md: ask 0, title 6.5, make 11, approve 18.5, print 29.5,
-// box 39.5, twist 49, groups 60, close 69, end 79). The tempo is 120: a beat is 0.5 s, so every cut is on a beat.
+// The film's scenes start at (seconds): ask 0, title 6.5, make 11, approve 22.5, print 33.5, box 43.5, twist 53,
+// groups 65.33, close 74.33, end 84.33. The tempo is 120: a beat is 0.5 s, so every cut up to the twist is on a beat.
+// The arrangement was first written for a shorter cut (make ended at 18.5, the twist's last beat was 1.33 s
+// shorter); those times are kept and moved onto the film's clock by `re` below, so read the bars as that cut's.
 // Samples: the Versilian Community Sample Library (CC0), fetched with `raea sounds get` (see README).
 import { AbsoluteFill, Composition, Mix, registerRoot, staticFile } from "raea";
 import * as Tone from "raea/tone";
 
-export const FILM_SECONDS = 79;
+export const FILM_FRAMES = 2530;
 const BEAT = 0.5;
 const BAR = 2;
 
@@ -131,10 +133,7 @@ bar(10.5, 2, { ...FULL, clap: true }, 1); // one beat, then the cut to make
 bar(11, 2, GROOVE, 3);
 bar(12.5, 3, GROOVE);
 bar(14.5, 0, FULL);
-bar(16.5, 1, { ...FULL, clap: true });
-// the layers lift apart at 13.8 and close at 15.4: a run up, a run down
-for (const [i, n] of ["C5", "D5", "E5", "G5", "A5", "C6"].entries()) mar.push({ t: 13.8 + i * 0.11, n, d: 0.5, v: 0.55 + i * 0.05 });
-for (const [i, n] of ["C6", "A5", "G5", "E5"].entries()) mar.push({ t: 15.4 + i * 0.12, n, d: 0.5, v: 0.7 - i * 0.05 });
+bar(16.5, 3, { ...FULL, clap: true }); // the bar before approve (20.5 on the film's clock)
 // approve (18.5 to 29.5): the band steps back while a person decides
 bar(18.5, 2, THIN);
 bar(20.5, 3, THIN);
@@ -176,18 +175,46 @@ low.push({ t: 76, n: "C2", d: 2.0, v: 0.9 });
 for (const [i, n] of ["C4", "E4", "G4", "C5", "E5", "G5", "C6"].entries()) mar.push({ t: 76 + i * 0.125, n, d: 1.2, v: 0.5 + i * 0.05 });
 
 // ---------------------------------------------------------------------------------------------------------------
-// Sounds on the picture (seconds of the film)
+// Onto the film's clock. make is two bars (4 s) longer than in the first cut and the twist's last beat 1.33 s longer.
+// ---------------------------------------------------------------------------------------------------------------
+const re = (t: number) => (t < 16.5 ? t : t < 58.9 ? t + 4 : t + 16 / 3);
+for (const e of [...mar, ...low, ...pads]) e.t = re(e.t);
+for (const d of drums) d.t = re(d.t);
+// from here on, times are the film's own
+// make's two new bars
+bar(16.5, 1, GROOVE);
+bar(18.5, 2, FULL);
+// the three options arrive
+for (const [t, n] of [[11.53, "E5"], [11.7, "G5"], [11.87, "A5"]] as Array<[number, string]>) mar.push({ t, n, d: 0.4, v: 0.5 });
+// the layers lift apart at 16.9 and close at 18.5: a run up, a run down
+for (const [i, n] of ["C5", "D5", "E5", "G5", "A5", "C6"].entries()) mar.push({ t: 16.93 + i * 0.11, n, d: 0.5, v: 0.55 + i * 0.05 });
+for (const [i, n] of ["C6", "A5", "G5", "E5"].entries()) mar.push({ t: 18.47 + i * 0.12, n, d: 0.5, v: 0.7 - i * 0.05 });
+// the twist's last beat (real footage): the C chord holds, three more notes
+pads.push({ t: 62.9, n: ["C3", "G3", "C4", "E4"], d: 1.3, v: 0.75 });
+low.push({ t: 62.9, n: "C3", d: 1.3, v: 0.5 });
+for (const [t, n] of [[63.0, "E5"], [63.5, "G5"], [63.85, "C6"]] as Array<[number, string]>) mar.push({ t, n, d: 0.7, v: 0.8 });
+for (const a of [mar, low, pads]) a.sort((x, y) => x.t - y.t);
+drums.sort((x, y) => x.t - y.t);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Sounds on the picture (seconds of the film; the ones passed through `re` were timed on the first cut)
 // ---------------------------------------------------------------------------------------------------------------
 /** a bubble landing */
-const POPS: Array<[number, string]> = [[0.3, "E5"], [3.25, "A4"], [43.45, "A4"], [57.75, "E5"], [60.12, "E5"], [61.02, "A4"], [65.35, "C5"]];
-/** a small thing arriving: a tool chip, a cut inside a scene, a counted number */
-const TICKS = [11.2, 13.6, 16.1, 51.87, 52.03, 52.2, 64.35, 64.62, 64.88, 70.67];
+const POPS: Array<[number, string]> = [
+  ...([[0.3, "E5"], [3.25, "A4"], [43.45, "A4"], [60.12, "E5"], [61.02, "A4"], [65.35, "C5"]] as Array<[number, string]>).map(([t, n]) => [re(t), n] as [number, string]),
+  [12.8, "E5"], // Mum picks the second one
+  [19.9, "A4"], // the blue note
+  [61.73, "E5"], // the owner's line
+];
+POPS.sort((x, y) => x[0] - y[0]);
+/** a small thing arriving: a tool's name, a mark, a counted number */
+const TICKS = [...[51.87, 52.03, 52.2, 64.35, 64.62, 64.88, 70.67].map(re), 11.2, 13.2, 14.2, 16.67, 19.5].sort((x, y) => x - y);
 /** air before a colour takes the frame: [start, length] */
-const AIRS: Array<[number, number]> = [[5.85, 0.6], [10.5, 0.45], [18.0, 0.45], [32.7, 0.45], [59.4, 0.55]];
-const PRESS = 25.5;
-const FINISHED = 37.85;
-const SLIDE: [number, number] = [41.4, 1.2];
-const THUNK = 42.8;
+const AIRS: Array<[number, number]> = ([[5.85, 0.6], [10.5, 0.45], [18.0, 0.45], [32.7, 0.45], [59.4, 0.55]] as Array<[number, number]>).map(([t, d]) => [re(t), d] as [number, number]);
+const PRESS = re(25.5);
+const FINISHED = re(37.85);
+const SLIDE: [number, number] = [re(41.4), 1.2];
+const THUNK = re(42.8);
 
 new Tone.Part((t, e: Note) => marimba.triggerAttackRelease(e.n, e.d, t, e.v), mar.map((e) => [e.t, e] as [number, Note])).start(0);
 new Tone.Part((t, e: Note) => bass.triggerAttackRelease(e.n as string, e.d, t, e.v), low.map((e) => [e.t, e] as [number, Note])).start(0);
@@ -201,7 +228,7 @@ Tone.getTransport().schedule((t) => marimba.triggerAttackRelease(["G5", "C6"], 1
 Tone.getTransport().schedule((t) => slide.triggerAttackRelease(SLIDE[1], t), SLIDE[0]);
 Tone.getTransport().schedule((t) => { thunkWood.start(t); thunkLow.triggerAttackRelease("C2", 0.3, t); }, THUNK);
 // the last chord rings out
-Tone.buses.music.volume.rampTo(-40, 1.6, 77.3);
+Tone.buses.music.volume.rampTo(-40, 1.6, re(77.3));
 Tone.getTransport().bpm.value = 120;
 Tone.getTransport().start();
 
@@ -213,4 +240,4 @@ function Sound() {
   );
 }
 
-registerRoot(() => <Composition id="sound" component={Sound} width={320} height={180} fps={30} durationInFrames={FILM_SECONDS * 30} />);
+registerRoot(() => <Composition id="sound" component={Sound} width={320} height={180} fps={30} durationInFrames={FILM_FRAMES} />);

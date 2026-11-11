@@ -187,7 +187,7 @@ export default function Print() {
             <Words text="while it prints." at={T_WORDS + 7} each={3} out={T_PUSH + 2} size={104} />
             <Line at={T_LINE} out={T_PUSH + 4} size={T.body} weight={500} color={P.mist} style={{ marginTop: 30, marginLeft: 4 }}>
               <span style={{ display: "block", whiteSpace: "nowrap" }}>A scheduled job checks the printer.</span>
-              <span style={{ display: "block", whiteSpace: "nowrap" }}>No tokens spent.</span>
+              <span style={{ display: "block", whiteSpace: "nowrap" }}>If something is off, it tells the owner.</span>
             </Line>
           </div>
 

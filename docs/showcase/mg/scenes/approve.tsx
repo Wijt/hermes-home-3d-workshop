@@ -127,8 +127,8 @@ export default function Approve() {
       <Screen file="screen/backroom.mp4" cam={[{ at: 0, x: c.x, y: c.y, scale: c.scale }]} ptr={[{ at: PTR_IN, x: px, y: py }]} ptrOut={PTR_OUT} clicks={[T_PRESS]} />
       {/* when the card turns to "Printing" its Pause and Stop sit where the label was: the label steps down onto the banner's empty end */}
       <Label kind="screen" at={8} tone="dark" style={{ left: "auto", right: 64, bottom: "auto", top: 124 + 62 * ramp(f, 272, 294, INOUT) }} />
-      <Bar text="The agent prepares everything." at={24} out={150} />
-      <Bar text="A person presses Start." at={160} out={T_FLIP + 8} />
+      <Bar text="The owner sees the part in 3D." at={24} out={150} />
+      <Bar text="One tap starts the print." at={160} out={T_FLIP + 8} />
     </AbsoluteFill>
   );
 }

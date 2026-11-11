@@ -1,12 +1,13 @@
 # Showcase film
 
-Two cuts live here. **The one to post is the motion-graphics film** (79 s, 1920 x 1080, 30 fps, with sound),
+Two cuts live here. **The one to post is the motion-graphics film** (84 s, 1920 x 1080, 30 fps, with sound),
 built with raea. The first cut (photos and captions, silent) is kept below it.
 Read `~/.claude/skills/raea/SKILL.md` and `raea guide craft` before editing a composition.
 
 ## The motion-graphics film
 
-It follows one request, Mum's key tag, from a chat message to the done box. The drawn scenes use the plugin's
+It follows one request, Mum's key tag, from a chat message to the done box: the agent finds models, she picks
+one, it makes it hers and prepares the print, the owner taps Start, and the part ends up in the box. The drawn scenes use the plugin's
 own look (its dark studio, its bronze build plate, a chat bubble in the group's colour); the plugin itself is
 shown as real captures of the Workshop screen, full frame, where a person presses Start.
 
@@ -26,16 +27,19 @@ shown as real captures of the Workshop screen, full frame, where a person presse
 tools/fetch_assets.sh                                   # once
 raea render mg-approve.tsx --at 0,60,210,300 -o stills/mg/approve/   # stills of one scene
 raea render mg-film.tsx --at 100,700,1300,2300 -o stills/mg/film/     # stills of the film
-FFMPEG=/path/to/ffmpeg tools/build_film.sh              # the film (about 10 minutes here)
+FFMPEG=/path/to/ffmpeg tools/build_film.sh              # the film (about 12 minutes here)
 tools/build_film.sh sound                               # only the sound again, under the same picture
 ```
 
-The captures in `media/screen/` (`backroom.mp4`, `watch.mp4`, `twist.png`) and the photos in `media/real/` are
-git-ignored, as for the first cut. The film needs them; it does not need `media/manifest.json`.
+The captures in `media/screen/` (`backroom.mp4`, `watch.mp4`, `twist.png`), the photos in `media/real/` and the
+two clips of real footage in `media/footage/` (`real-push.mp4`, `real-box.mp4`: 480 x 864, 30 fps, encoded
+without B-frames, which raea needs) are git-ignored, as for the first cut. The film needs them; it does not need
+`media/manifest.json`.
 
 What is real and what is drawn: the chat is re-created and labelled; the key tag, the plate and the box are
-drawings; the Workshop screen is a real capture of the plugin on its simulated printer and is labelled; the
-photos are from the real printer's camera and are labelled. The numbers on screen are read off the capture
+drawings, and so are the three model cards; the Workshop screen is a real capture of the plugin on its simulated
+printer and is labelled; the photos are from the real printer's camera and the footage was filmed at home, and
+both are labelled. The numbers on screen are read off the capture
 (58 x 24 x 4.2 mm, 21 layers, 13 minutes, 4 g of PLA) or off the plugin (14 tools, 4 hooks, 0 model calls in the
 watcher). The line "it fell in by itself" is the owner's own, from the story in the main README.
 

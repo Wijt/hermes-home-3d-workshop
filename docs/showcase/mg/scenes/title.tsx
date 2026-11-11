@@ -63,7 +63,7 @@ export default function Title() {
               </div>
             </div>
             <Line at={T_LINE} size={60} weight={500} color={P.bone} style={{ marginTop: 84, marginLeft: 6 }}>
-              home-3d-workshop, a plugin for Hermes Agent
+              Anyone in the chat can ask. Nobody opens a slicer.
             </Line>
           </div>
         </AbsoluteFill>

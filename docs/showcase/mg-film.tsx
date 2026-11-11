@@ -1,4 +1,4 @@
-// The motion-graphics film: nine scenes cut together, 79 s at 1920 x 1080, 30 fps. The board is mg/BOARD.md.
+// The motion-graphics film: nine scenes cut together, 84 s at 1920 x 1080, 30 fps. The board is mg/BOARD.md.
 // Each scene draws the whole frame and knows its own length; scenes are cut with no crossfade (each one ends on
 // the picture the next one starts on, or on a move).
 import { AbsoluteFill, Composition, Series, registerRoot } from "raea";

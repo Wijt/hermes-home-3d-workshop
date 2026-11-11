@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the film from its two compositions:
-#   mg-film.tsx   the picture (79 s, 1920 x 1080, 30 fps)
+#   mg-film.tsx   the picture (84 s, 1920 x 1080, 30 fps)
 #   mg-sound.tsx  the sound (drawn at a tiny size, so it renders in seconds)
 # and writes, in out/:
 #   home-3d-workshop-film.mp4          picture and sound, H.264 High and AAC (the file to post)

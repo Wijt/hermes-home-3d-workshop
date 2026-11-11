@@ -1,4 +1,4 @@
-# The film, scene by scene (79 s, 1920 x 1080, 30 fps, no sound needed to follow it)
+# The film, scene by scene (84 s, 1920 x 1080, 30 fps, no sound needed to follow it)
 
 One belief: **ask the group chat for an object, and it is in the box.** The film follows one request (Mum's key
 tag) from a chat message to a box, shows the plugin's real screen where a person presses Start, then the twist (the
@@ -158,3 +158,12 @@ Everything is on screen by frame 100 and holds to the end.
   numbers step down across the frame instead of sitting in a row.
 - **Ground.** The studio's light has a fine grain over it (`media/grain/grain.png`), so video does not draw the
   gradient as rings.
+- **Second cut (the owner's notes).** The film now says what the plugin is for the people who ask: plain words in,
+  and the agent finds models, shows the options, customises and prepares. `make` is 345 frames with four tools
+  (`home3d_find_models`, `home3d_customize`, `home3d_slice`, `home3d_queue`), three drawn model cards and Mum's
+  "The second one."; the reply in `ask` is "On it. I'll find a few and show you."; the second line of `title` is
+  "Anyone in the chat can ask. Nobody opens a slicer."; the bars in `approve` are "The owner sees the part in 3D."
+  and "One tap starts the print."; the small line in `print` ends "If something is off, it tells the owner."
+- **Real footage.** The last beat of `twist` (now 120 frames; the scene is 370) is a phone clip of the printer at
+  home pushing parts off its plate, then the box with the parts in it, beside the owner's line and "Now it clears
+  its own plate." The scene table's frame counts above are the first cut's: `make` 345, `twist` 370, film 2530.
