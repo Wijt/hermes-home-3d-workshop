@@ -2,14 +2,23 @@
 
 It resolves settings lazily on each access (so Desktop/config edits apply without a restart) and, inside Hermes,
 rewrites the watcher's fallback snapshot whenever they changed; it owns the store, creates the backend on demand,
-answers "who is talking" / "are we inside cron", and remembers the last plate check: a confident "empty" is reused
-by the next check (one camera check per start), and any recent result is what the ``pre_tool_call`` hook sees
-(the hook never runs the camera itself, see hooks.py).
+answers "who is talking" / "is a person present" / "did this arrive as a voice message", and remembers the last
+plate check: a confident "empty" is reused by the next check (one camera check per start), and any recent result is
+what the ``pre_tool_call`` hook sees (the hook never runs the camera itself, see hooks.py).
+
+One definition of "nobody is present" (``Runtime.absent_reason`` / ``nobody_present``): a scheduled (cron) run, a
+kanban worker, ``chat -q``, ``-z`` and ``--source tool``. The agent path, ``/home3d``, the tool handlers and the pure
+gates all ask it, and it fails closed.
+
+Voice (``note_inbound`` / ``note_turn`` / ``session_channel``), in memory only: the ``pre_gateway_dispatch`` hook
+notes which sender just sent a voice message, the ``pre_llm_call`` hook turns that into "this session's turn came in
+as voice", and the approval rule (``gates.approval_refusal``) refuses a start / resume / plate clear asked that way.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -17,7 +26,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .backends import Backend, make_backend
-from .config import Person, Settings, data_dir, load_settings, settings_hash, sync_snapshot
+from .config import Person, Settings, data_dir, load_settings, norm_id, settings_hash, sync_snapshot
+from .gates import TYPED, VOICE, Actor, who_is
 from .store import Store
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -28,6 +38,14 @@ SOURCE_ENV = "HERMES_SESSION_SOURCE"
 UNATTENDED_SOURCES = frozenset({"kanban", "tool"})
 LIGHT_FLAG = "light_left_on"
 LIGHT_PENDING_KEY = "light_left_on:pending"  # a hook/handler plate check left the light on: the watcher tells the owner
+ABSENT_CRON, ABSENT_UNATTENDED = "cron", "unattended"  # ``Runtime.absent_reason``
+VOICE_MARK_TTL_S = 10 * 60.0  # a noted voice message counts for the sender's next turn this long (STT, a busy agent)
+VOICE_COMMAND_S = 60.0  # a slash command counts as spoken when the sender's newest message is a voice note this fresh
+INBOUND_MAX_SENDERS = 500  # senders whose voice notes are remembered per process (the oldest is dropped)
+CHANNEL_MAX_SESSIONS = 2000  # per-session "how did the last turn arrive" records (the oldest is dropped)
+# what Hermes v0.22.5 hands the agent for a voice message it could not turn into words (gateway STT notes)
+_VOICE_NOTES = ("[voice message could not be transcribed", "[the user sent a voice message")
+_LEADING_BRACKET = re.compile(r"^\s*\[[^\]\n]{0,400}\]\s*")
 
 
 def _truthy(value: Any) -> bool:
@@ -110,6 +128,36 @@ def unattended_markers() -> bool:
     return False
 
 
+def message_text(msg: Any) -> str:
+    """The text of a ``pre_llm_call`` ``user_message`` (a string, or the text parts of a multimodal turn)."""
+    if isinstance(msg, str):
+        return msg[:2000]
+    if isinstance(msg, list):
+        parts = [p.get("text", "") for p in msg if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        return " ".join(parts)[:2000]
+    return ""
+
+
+def looks_like_voice(user_message: Any) -> bool:
+    """The turn text has the shape Hermes v0.22.5 gives a voice message: the transcript as one quoted line
+    (``"start my friend"``, after an optional ``[Name]`` / ``[Replying to: ...]`` prefix), or one of its "could not
+    be transcribed" notes. A second signal beside ``note_inbound``. A typed message that is entirely one quoted
+    line is taken for voice too (the safe direction: the person is asked to type it again)."""
+    text = message_text(user_message).strip()
+    if not text:
+        return False
+    low = text.lower()
+    if any(mark in low for mark in _VOICE_NOTES):
+        return True
+    for _ in range(4):  # "[Name] ", "[Replying to: ...]" and similar prefixes Hermes puts before the text
+        m = _LEADING_BRACKET.match(text)
+        if not m:
+            break
+        text = text[m.end():]
+    first = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0].strip()  # a caption may follow the transcript
+    return len(first) > 2 and first[0] == '"' and first[-1] == '"' and '"' not in first[1:-1]
+
+
 class Runtime:
     def __init__(self, ctx: Any = None, *, settings: Optional[Settings] = None,
                  store: Optional[Store] = None, backend: Optional[Backend] = None):
@@ -123,6 +171,9 @@ class Runtime:
         self._plate_last: Optional[tuple[tuple, float, Any]] = None  # (key, ts, PlateCheck): the last result, any
         self._snap_lock = threading.Lock()
         self._snap_hash: Optional[str] = None
+        self._voice_lock = threading.Lock()
+        self._inbound: dict[str, list[tuple[float, bool]]] = {}  # sender id -> [(ts, voice)], newest last
+        self._channels: dict[str, tuple[str, float]] = {}  # session id -> (VOICE | TYPED, ts)
 
     # ---- settings / store / backend --------------------------------------------------------
     @property
@@ -268,6 +319,94 @@ class Runtime:
             return unattended_markers()
         except Exception:
             return True
+
+    def absent_reason(self) -> str:
+        """Why nobody is present in this run: ``"cron"`` (a scheduled job), ``"unattended"`` (a kanban worker,
+        ``chat -q``, ``-z``, ``--source tool``) or '' (a person may be there). THE definition every path uses: the
+        ``pre_tool_call`` hook, ``/home3d``, the tool handlers and the gates. Fails closed."""
+        try:
+            if self.in_cron():
+                return ABSENT_CRON
+            return ABSENT_UNATTENDED if self.unattended() else ""
+        except Exception:
+            return ABSENT_UNATTENDED
+
+    def nobody_present(self) -> bool:
+        """True in a run nobody watches (``absent_reason``): it never starts, resumes or clears anything."""
+        return bool(self.absent_reason())
+
+    def actor_for(self, sender: Any, channel: str = "") -> Actor:
+        """Who a recorded sender id is (``gates.who_is``), with whether a person is present in this run."""
+        return who_is(self.settings, sender, present=not self.nobody_present(), channel=channel)
+
+    def actor(self, session_id: Optional[str]) -> Actor:
+        """Who is talking in ``session_id`` and how their last message arrived. No session: nobody."""
+        sid = str(session_id or "")
+        return self.actor_for(self.sender_id(sid) if sid else "", self.session_channel(sid))
+
+    # ---- voice: how did the message that asks arrive ---------------------------------------------
+    def note_inbound(self, user_id: Any, voice: bool) -> None:
+        """A message from ``user_id`` just reached the gateway (``pre_gateway_dispatch``); ``voice``: it is a voice
+        note. Kept in memory only, per sender id (``config.norm_id``; the platform is left out on purpose, so a
+        platform that names itself differently at the gateway and in the agent still matches): the kind and the
+        time of the newest few messages, and nothing at all for a sender who has sent no voice note lately."""
+        key = norm_id(user_id)
+        if not key:
+            return
+        now = time.time()
+        with self._voice_lock:
+            if not voice and key not in self._inbound:
+                return  # typed messages matter only after a voice note (to tell which of the two is newer)
+            events = [e for e in self._inbound.pop(key, []) if now - e[0] <= VOICE_MARK_TTL_S][-7:]
+            self._inbound[key] = events + [(now, bool(voice))]  # re-inserted: ordered by last activity
+            while len(self._inbound) > INBOUND_MAX_SENDERS:
+                self._inbound.pop(next(iter(self._inbound)))
+
+    def take_voice(self, user_id: Any) -> bool:
+        """True when ``user_id`` sent a voice note (within ``VOICE_MARK_TTL_S``) that no turn has accounted for
+        yet. The sender's noted messages are used up by this call: one turn each."""
+        key = norm_id(user_id)
+        if not key:
+            return False
+        now = time.time()
+        with self._voice_lock:
+            events = self._inbound.pop(key, [])
+        return any(voice and now - ts <= VOICE_MARK_TTL_S for ts, voice in events)
+
+    def spoken_command(self, user_id: Any) -> bool:
+        """The sender's newest message is a voice note at most ``VOICE_COMMAND_S`` old: a slash command arriving
+        now was spoken, not typed (Hermes' voice-channel mode hands a transcript on as message text)."""
+        key = norm_id(user_id)
+        if not key:
+            return False
+        with self._voice_lock:
+            events = self._inbound.get(key) or []
+            last = events[-1] if events else None
+        return bool(last and last[1] and time.time() - last[0] <= VOICE_COMMAND_S)
+
+    def note_turn(self, session_id: str, user_id: Any = "", user_message: Any = None, parent: str = "") -> str:
+        """Record how this turn's message arrived and return it: ``VOICE`` when the sender's voice note was noted
+        at the gateway, the text has the shape of a transcript (``looks_like_voice``), or this is a delegated
+        child of a voice turn; else ``TYPED``. Called once per turn by ``pre_llm_call``."""
+        voice = self.take_voice(user_id) or looks_like_voice(user_message)
+        if not voice and parent and parent != session_id:
+            voice = self.session_channel(parent) == VOICE
+        channel = VOICE if voice else TYPED
+        if session_id:
+            with self._voice_lock:
+                self._channels.pop(session_id, None)
+                self._channels[session_id] = (channel, time.time())
+                while len(self._channels) > CHANNEL_MAX_SESSIONS:
+                    self._channels.pop(next(iter(self._channels)))
+        return channel
+
+    def session_channel(self, session_id: Optional[str]) -> str:
+        """``VOICE`` / ``TYPED`` for the last turn of ``session_id`` in this process, '' when no turn was seen."""
+        if not session_id:
+            return ""
+        with self._voice_lock:
+            rec = self._channels.get(str(session_id))
+        return rec[0] if rec else ""
 
     @staticmethod
     def now() -> float:

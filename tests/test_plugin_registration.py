@@ -85,7 +85,8 @@ def test_tools_match_manifest(ctx):
 
 def test_hooks_match_manifest(ctx):
     declared = manifest_list("provides_hooks")
-    assert sorted(h for h, _ in ctx.hooks) == sorted(declared) == ["post_tool_call", "pre_llm_call", "pre_tool_call"]
+    assert sorted(h for h, _ in ctx.hooks) == sorted(declared) == ["post_tool_call", "pre_gateway_dispatch", "pre_llm_call",
+                                                                        "pre_tool_call"]
     assert all(callable(cb) for _, cb in ctx.hooks)
 
 

@@ -32,6 +32,7 @@ provides_hooks:
   - pre_tool_call
   - post_tool_call
   - pre_llm_call
+  - pre_gateway_dispatch
 config_schema:
   backend:
     type: str
@@ -87,6 +88,17 @@ config_schema:
     default: []
     label: Household members
     description: 'List of {"id": "<sender id>", "name": "Mum", "address_as": "Anneciğim", "role": "family"}.'
+  stop_policy:
+    type: str
+    choices: [known, anyone, owner]
+    default: known
+    label: Who may stop or pause a print
+    description: "known: the owner and the people in the household list (default). anyone: every sender, also unknown ones and runs with nobody present. owner: the owner only. The owner can always type /home3d stop or /home3d pause. Who stopped a print is recorded and named in the owner notice."
+  allow_guests:
+    type: bool
+    default: false
+    label: Let unknown senders prepare prints
+    description: "Off (default): a sender who is not the owner and not in the household list can only read the status; import, customize, design upload, slice and queue add / remove are refused. On: such a sender may prepare prints, recorded under a guest name; starting, resuming and marking the plate clear stay with the owner."
   inject_context:
     type: str
     choices: [auto, always, never]

@@ -689,3 +689,63 @@ def render(kind: str, audience: str, lang: str, **ctx: Any) -> str:
         job = _job_ref(ctx)
         return f"ℹ️ {kind}" + (f": {job}" if job else "")
     return fn(ctx, tr).strip()
+
+
+# ---- access refusals: who may make the printer act or change anything (gates.approval_refusal / stop_refusal /
+# write_refusal codes). Whole sentences; ``{cmd}`` = what the owner types, ``{who}`` = who asked.
+UNKNOWN_SENDER = ("an unknown sender", "tanınmayan biri")
+ACCESS_TEXT: dict[str, tuple[str, str]] = {
+    "unattended": ("Nobody is present in this run (a scheduled job, a kanban worker, a single-query or tool run), so "
+                   "the printer was not touched. The owner sends {cmd} from a chat or a terminal.",
+                   "Bu çalışmanın başında kimse yok (zamanlanmış görev, kanban işçisi, tek soruluk ya da araç "
+                   "çalışması), bu yüzden yazıcıya dokunulmadı. Sahibi sohbetten ya da terminalden {cmd} yazsın."),
+    "voice_message": ("This came in as a voice message, and a voice message never starts or resumes a print or "
+                      "marks the plate clear (speech can be heard wrong). Type it instead, or the owner sends {cmd}.",
+                      "Bu sesli mesaj olarak geldi; sesli mesajla baskı başlatılmaz, devam ettirilmez, tabla boş "
+                      "işaretlenmez (ses yanlış anlaşılabilir). Yazarak gönder ya da sahibi {cmd} yazsın."),
+    "not_owner": ("Only the owner can do this ({who} is not the owner). The owner sends {cmd}.",
+                  "Bunu yalnızca sahibi yapabilir ({who} sahibi değil). Sahibi {cmd} yazsın."),
+    "no_identity": ("Only the owner can do this (this session has no known sender). The owner sends {cmd}.",
+                    "Bunu yalnızca sahibi yapabilir (bu oturumda kimin yazdığı bilinmiyor). Sahibi {cmd} yazsın."),
+    "local_off": ("Only the owner can do this (local sessions are not the owner: local_is_owner is off). The owner "
+                  "sends {cmd} from a chat.",
+                  "Bunu yalnızca sahibi yapabilir (yerel oturum sahibi sayılmıyor: local_is_owner kapalı). Sahibi "
+                  "sohbetten {cmd} yazsın."),
+    "stop_unknown": ("Only the owner and the people in the list can stop or pause a print ({who} is not known), so "
+                     "nothing was sent to the printer. The owner sends {cmd}, or someone presses stop on the "
+                     "printer itself.",
+                     "Baskıyı yalnızca sahibi ve listedeki kişiler durdurabilir ya da duraklatabilir ({who} "
+                     "tanınmıyor); yazıcıya komut gönderilmedi. Sahibi {cmd} yazsın ya da biri yazıcının kendi "
+                     "durdurma düğmesine bassın."),
+    "stop_owner_only": ("Only the owner can stop or pause a print here (stop_policy: owner; {who} is not the "
+                        "owner), so nothing was sent to the printer. The owner sends {cmd}, or someone presses stop "
+                        "on the printer itself.",
+                        "Burada baskıyı yalnızca sahibi durdurabilir ya da duraklatabilir (stop_policy: owner; {who} "
+                        "sahibi değil); yazıcıya komut gönderilmedi. Sahibi {cmd} yazsın ya da biri yazıcının kendi "
+                        "durdurma düğmesine bassın."),
+    "stop_unattended": ("Nobody is present in this run, so it cannot stop or pause a print (stop_policy: anyone "
+                        "would allow it). The owner sends {cmd}, or someone presses stop on the printer itself.",
+                        "Bu çalışmanın başında kimse yok, bu yüzden baskıyı durduramaz ya da duraklatamaz "
+                        "(stop_policy: anyone buna izin verir). Sahibi {cmd} yazsın ya da biri yazıcının kendi "
+                        "durdurma düğmesine bassın."),
+    "guest": ("Only the owner and the people in the list can do this ({who} is not known), so nothing was changed. "
+              "Reading the status is open to everyone. The owner can add this sender to the household list (the id "
+              "is shown by /home3d whoami) or switch on allow_guests.",
+              "Bunu yalnızca sahibi ve listedeki kişiler yapabilir ({who} tanınmıyor); hiçbir şey değiştirilmedi. "
+              "Durumu herkes sorabilir. Sahibi bu göndereni ev listesine ekleyebilir (kimlik /home3d whoami ile "
+              "görünür) ya da allow_guests ayarını açabilir."),
+}
+
+
+def access_text(code: str, lang: str, **params: Any) -> str:
+    """The refusal sentence for access ``code`` in ``lang``; an unknown code still refuses, in plain words."""
+    tr = lang == "tr"
+    params.setdefault("cmd", "/home3d")
+    params.setdefault("who", UNKNOWN_SENDER[1 if tr else 0])
+    pair = ACCESS_TEXT.get(code)
+    if pair is None:
+        return (f"Bu yapılamadı ({code})." if tr else f"Not allowed ({code}).")
+    try:
+        return pair[1 if tr else 0].format(**params)
+    except (KeyError, IndexError, ValueError):
+        return pair[1 if tr else 0]

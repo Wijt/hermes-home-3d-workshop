@@ -441,6 +441,7 @@ def test_slice_without_autoeject_preset_and_fallbacks(be, tmp_path):
     rt = Runtime(settings=settings(autoeject_printer_preset="", standard_printer_preset="",
                                    filament_presets={}, process_presets={"draft": "my draft"}),
                  store=Store(tmp_path / "x.db"), backend=be)
+    rt.store.remember_sender("s-mum", MUM, "whatsapp")  # slicing needs a known person (allow_guests is off)
     out = sliced(rt, 1, quality="draft", colour="#00ff00")
     assert out["eject"]["planned"] is False and out["eject"]["reasons"] == ["no auto-eject printer preset configured"]
     assert out["presets"] == {"printer": tools_mod.DEFAULT_PRINTER_PRESET, "process": "my draft",
@@ -668,6 +669,7 @@ def test_jump_check_ignores_old_workshop_ids(rt, be):
 def test_start_blocked_in_cron(be, tmp_path):
     rt = Runtime(CronCtx(), settings=settings(), store=Store(tmp_path / "c.db"), backend=be)
     rt.store.remember_sender("s-owner", OWNER, "whatsapp")
+    rt.store.remember_sender("s-mum", MUM, "whatsapp")
     _, q = queued(rt)
     out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})
     assert out["ok"] is False and "in_cron" in out["codes"] and not be.called("start")
@@ -675,6 +677,7 @@ def test_start_blocked_in_cron(be, tmp_path):
 
 def test_start_message_in_household_language(be, tmp_path):
     rt = Runtime(settings=settings(language="tr"), store=Store(tmp_path / "t.db"), backend=be)
+    rt.store.remember_sender("s-mum", MUM, "whatsapp")
     be.plate = PlateCheck(is_empty=False, difference_pct=60.0)
     _, q = queued(rt)
     out = gated(rt, "home3d_start", {"queue_item_id": q["queue_item_id"]})

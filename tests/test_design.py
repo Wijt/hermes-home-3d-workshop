@@ -246,7 +246,8 @@ def fake(tmp_path, monkeypatch):
 
 
 def sim_rt(tmp_path) -> Runtime:
-    s = Settings(backend="simulator", language="en", owner_name="Owner", owner_ids=["owner@demo"])
+    s = Settings(backend="simulator", language="en", owner_name="Owner", owner_ids=["owner@demo"],
+                 household=[{"id": "mum@demo", "name": "Mum"}, {"id": "dad@demo", "name": "Dad"}])
     store = Store(tmp_path / "w.db")
     store.remember_sender("s-mum", "mum@demo", "whatsapp")
     return Runtime(settings=s, store=store, backend=SimulatorBackend(tmp_path / "sim.json"))

@@ -14,6 +14,11 @@ check, a check that could not run and a missing calibration are never overruled.
 ``plate_deferred`` (the ``pre_tool_call`` hook, which must stay fast and never runs the camera): no plate check is
 needed now because the handler runs the authoritative one right before the action. A plate check that IS passed in
 (a recent one the process remembers) still decides as usual, so a fresh "occupied" or "unsure" blocks at once.
+
+Who may ask (also pure): ``who_is`` turns a recorded sender id into an ``Actor`` (owner / member / guest / nobody,
+how the message arrived, whether a person is present), and three rules decide from it: ``approval_refusal`` (start,
+resume, plate clear: the owner, present, not by voice), ``stop_refusal`` (stop, pause: ``stop_policy``) and
+``write_refusal`` (prepare a print: known people, or ``allow_guests``). Every surface asks these same functions.
 """
 
 from __future__ import annotations
@@ -23,11 +28,12 @@ from typing import Iterable, Mapping, Optional
 
 from .backends.base import (ACTIVE_STATES, FAILED, FINISH, IDLE, OFFLINE, PAUSE, PlateCheck, PrinterStatus,
                             QueueItem)
+from .config import LOCAL_SENDER, norm_id
 
 # code -> (en, tr); ``{x}`` placeholders are filled from the item params
 _TEXT: dict[str, tuple[str, str]] = {
-    "in_cron": ("never from a scheduled job, a person must be present",
-                "zamanlanmış görevden asla, başında biri olmalı"),
+    "in_cron": ("never from a scheduled job or another run nobody watches, a person must be present",
+                "zamanlanmış görevden ya da başında kimsenin olmadığı çalışmadan asla, başında biri olmalı"),
     "offline": ("the printer is offline", "yazıcıya ulaşılamıyor"),
     "busy": ("the printer is busy ({state}{job_sfx})", "yazıcı şu an meşgul ({state}{job_sfx})"),
     "state_unknown": ("the printer state is not idle ({state})", "yazıcının durumu boşta değil ({state})"),
@@ -88,6 +94,120 @@ _TEXT: dict[str, tuple[str, str]] = {
                              "kamera tabla boş işaretlenmeden hemen önce bakacak"),
 }
 
+# ---- who is asking --------------------------------------------------------------------------------------
+OWNER, MEMBER, GUEST, NOBODY = "owner", "member", "guest", "nobody"
+VOICE, TYPED = "voice", "typed"
+GUEST_NAME = "Guest"
+UNKNOWN_LABEL = ("an unknown sender", "tanınmayan biri")
+APPROVAL_ACTIONS = ("start", "clear_plate", "resume")
+STOP_ACTIONS = ("stop", "pause")
+
+
+@dataclass(frozen=True)
+class Actor:
+    """Whoever asks for something, as far as the plugin knows it. Built by ``who_is`` (pure) from the sender id the
+    ``pre_llm_call`` hook recorded for a session, or from the ``source`` of a slash command.
+
+    ``role``: ``owner`` (an ``owner_ids`` entry, or a local session while ``local_is_owner``), ``member`` (another
+    person in the household list), ``guest`` (a sender id that is in no list, or a local session that is not the
+    owner) or ``nobody`` (no sender id at all). ``name`` is never empty for an owner, member or guest, so a request
+    or a job is never stored without a requester. ``channel``: how the message that asks arrived (``voice`` /
+    ``typed`` / '' unknown). ``present``: False in a run nobody watches (cron, kanban worker, ``chat -q``, ``-z``,
+    ``--source tool``): such a run is never the owner for a printer action."""
+    sender: str = ""
+    name: str = ""
+    role: str = NOBODY
+    channel: str = ""
+    present: bool = True
+    local: bool = False
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == OWNER
+
+    @property
+    def known(self) -> bool:
+        return self.role in (OWNER, MEMBER)
+
+    def label(self, lang: str = "en") -> str:
+        """The name, or "an unknown sender" in ``lang`` when there is none."""
+        return self.name or UNKNOWN_LABEL[1 if lang == "tr" else 0]
+
+
+def guest_name(sender: object) -> str:
+    """The requester name of a sender who is in no list: ``Guest (…1234)`` (the last characters of the id keep two
+    guests apart), ``Guest (local)`` for a local session, ``Guest`` without an id."""
+    sid = norm_id(sender)
+    if not sid:
+        return GUEST_NAME
+    if sid == LOCAL_SENDER:
+        return f"{GUEST_NAME} (local)"
+    tail = "".join(ch for ch in sid.split("@", 1)[0] if ch.isalnum())[-4:]
+    return f"{GUEST_NAME} (…{tail})" if tail else GUEST_NAME
+
+
+def who_is(settings, sender: object, *, present: bool = True, channel: str = "") -> Actor:
+    """The ``Actor`` for a recorded sender id ('' = unknown, ``config.LOCAL_SENDER`` = a local session). Pure."""
+    sid = str(sender if sender is not None else "").strip()
+    local = norm_id(sid) == LOCAL_SENDER
+    person = settings.person_for(sid) if sid else None
+    if person is not None:
+        role = OWNER if person.role == "owner" else MEMBER
+        name = str(person.name or "").strip() or ("Owner" if role == OWNER else guest_name(sid))
+    elif sid:
+        role, name = GUEST, guest_name(sid)
+    else:
+        role, name = NOBODY, ""
+    return Actor(sender=sid, name=name, role=role, channel=str(channel or ""), present=bool(present), local=local)
+
+
+def approval_refusal(actor: Actor) -> str:
+    """Why ``actor`` may not start / resume / mark the plate clear ('' = may): ``unattended`` (nobody is present),
+    ``no_identity`` / ``local_off`` / ``not_owner`` (not the owner), ``voice_message`` (the ask arrived as voice).
+    The same rule for the agent path (``pre_tool_call``) and the typed path (``/home3d approve``, a UI)."""
+    if not actor.present:
+        return "unattended"
+    if not actor.is_owner:
+        if actor.role == NOBODY:
+            return "no_identity"
+        return "local_off" if actor.local else "not_owner"
+    if actor.channel == VOICE:
+        return "voice_message"
+    return ""
+
+
+def stop_refusal(actor: Actor, policy: str) -> str:
+    """Why ``actor`` may not stop or pause ('' = may) under ``stop_policy``: ``anyone`` never refuses; ``known``
+    (default; also any unreadable value) wants the owner or a listed person; ``owner`` wants the owner. A run with
+    nobody present is nobody (``stop_unattended``). A voice message may stop: stopping is the safe direction."""
+    policy = str(policy or "").strip().lower()
+    if policy == "anyone":
+        return ""
+    if not actor.present:
+        return "stop_unattended"
+    if policy == "owner":
+        return "" if actor.is_owner else "stop_owner_only"
+    return "" if actor.known else "stop_unknown"
+
+
+def write_refusal(actor: Actor, allow_guests: bool) -> str:
+    """Why ``actor`` may not prepare a print or change anything ('' = may): ``guest`` unless they are the owner, a
+    listed person, or ``allow_guests`` is on."""
+    return "" if actor.known or bool(allow_guests) else "guest"
+
+
+def requester_name(actor: Actor) -> str:
+    """The name a request or job of ``actor`` is recorded under: never empty (``Guest`` without any identity)."""
+    return actor.name or GUEST_NAME
+
+
+def refusal(code: str, lang: str, **params) -> str:
+    """The refusal sentence for an access ``code`` in ``lang`` (``messages.access_text``)."""
+    from .messages import access_text
+
+    return access_text(code, lang, **params)
+
+
 _OK_TEXT = {
     "start": ("Start possible (owner approval still needed).", "Başlatılabilir (sahibinin onayı gerekli)."),
     "clear_plate": ("The plate can be marked clear.", "Tabla boş olarak işaretlenebilir."),
@@ -144,7 +264,7 @@ def _render(code: str, params: dict, lang: str) -> str:
     if code in ("jump", "jump_allowed"):  # another person's workshop job ("who") or a job queued elsewhere
         who = str(p.get("who") or "").strip()
         p["for_who"] = f", for {who}" if who else ""
-        p["for_who_tr"] = f", isteyen: {who}" if who else ""
+        p["for_who_tr"] = f", isteyen: {UNKNOWN_LABEL[1] if who == UNKNOWN_LABEL[0] else who}" if who else ""
         p["whose"] = "someone else's" if who else "not ours"
     if "pct" in p or "msg" in p:
         pct = p.get("pct")
@@ -248,10 +368,12 @@ def printer_blocks(status: PrinterStatus, action: str = "start") -> bool:
 
 
 def same_person(a: object, b: object, owner_name: str = "") -> bool:
-    """Two requester names mean the same person (case-insensitive); an empty name is the owner's (``owner_name``)."""
-    def key(x: object) -> str:
-        return (str(x or "").strip() or str(owner_name or "").strip()).casefold()
-    return key(a) == key(b)
+    """Two requester names mean the same person (case-insensitive). An empty name is NOBODY's: it never equals
+    another name, not even another empty one, so a job recorded without a requester (an unknown sender, before
+    requesters were required) is never taken for the owner's or for the asking person's own. ``owner_name`` is
+    accepted for older callers and no longer used."""
+    ka, kb = str(a or "").strip().casefold(), str(b or "").strip().casefold()
+    return bool(ka) and ka == kb
 
 
 def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, plate: Optional[PlateCheck],
@@ -262,10 +384,10 @@ def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, p
     """May queue item ``item_id`` be started now? Approval is still required (``needs_owner``).
 
     ``own_item_ids``: queue ids of the workshop's ACTIVE jobs (queued or printing). ``requesters``: who asked for
-    each of those jobs (queue id -> name; an empty name is the owner, ``owner_name``). With it, a workshop job waits
-    ahead "as ours" only when the SAME person asked for it: another household member's workshop job ahead blocks
-    (``jump``, naming them) like a job queued elsewhere, unless ``allow_jump``. Without it (None) every workshop
-    job counts as ours (older callers). ``plate_confirmed``: a
+    each of those jobs (queue id -> name; an empty name is nobody's, see ``same_person``). With it, a workshop job
+    waits ahead "as ours" only when the SAME person asked for it: another household member's workshop job ahead
+    blocks (``jump``, naming them) like a job queued elsewhere, unless ``allow_jump``. Without it (None) every
+    workshop job counts as ours (older callers). ``plate_confirmed``: a
     person (the owner) confirmed the plate of the last job (``status.job_name``) is clear; after a FAILED
     job the camera alone is never enough. ``after_failure``: the store knows of a failed print nobody has
     confirmed since (``Store.unconfirmed_failure``): it blocks even when the printer no longer says FAILED
@@ -315,7 +437,7 @@ def start_gate(status: PrinterStatus, queue: list[QueueItem], item_id: int, *, p
             if other.id in own:
                 if requesters is None or same_person(who_map.get(other.id, ""), mine, owner_name):
                     continue  # the same person's own earlier job (or no requester info: the workshop's)
-                who = who_map.get(other.id, "").strip() or str(owner_name or "").strip() or "the owner"
+                who = who_map.get(other.id, "").strip() or UNKNOWN_LABEL[0]
             if _ahead(order[other.id], order[item.id]):
                 name = other.name or f"#{other.id}"
                 if allow_jump:

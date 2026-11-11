@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from home3d_ws.home3d import gates as gates_mod
 from home3d_ws.home3d.backends.base import UNKNOWN, HMSError, PlateCheck, PrinterStatus, QueueItem
 from home3d_ws.home3d.gates import Gate, clear_plate_gate, describe, resume_gate, start_gate
 
@@ -400,9 +401,13 @@ def test_r3_another_persons_workshop_job_ahead_blocks_like_a_foreign_one():
     assert "isteyen: Mum" in describe(g, "tr")
     g = gate(queue=queue, item=2, own={1, 2}, requesters=who, owner_name="Owner", allow_jump=True)
     assert g.ok and any("for Mum" in w for w in g.warnings)
-    # the same person's earlier job is theirs to overtake; an empty requester is the owner
+    # the same person's earlier job is theirs to overtake; an empty requester is NOBODY's, never the owner's (an
+    # unknown sender's old job must not pass for the owner's own and let the owner's start skip it silently)
     assert gate(queue=queue, item=2, own={1, 2}, requesters={1: "sam", 2: "Sam"}).ok
-    assert gate(queue=queue, item=2, own={1, 2}, requesters={1: "", 2: "Owner"}, owner_name="Owner").ok
+    g = gate(queue=queue, item=2, own={1, 2}, requesters={1: "", 2: "Owner"}, owner_name="Owner")
+    assert not g.ok and g.codes == ["jump"] and "an unknown sender" in g.reasons[0]
+    assert "tanınmayan biri" in describe(g, "tr")
+    assert not gates_mod.same_person("", "") and not gates_mod.same_person("", "Owner", "Owner")
     assert "jump" in gate(queue=queue, item=2, own={1, 2}, requesters={1: "", 2: "Mum"}, owner_name="Owner").codes
     # without requester info (older callers) every workshop job is still "ours"
     assert gate(queue=queue, item=2, own={1, 2}).ok

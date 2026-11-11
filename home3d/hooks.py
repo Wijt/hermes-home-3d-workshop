@@ -1,13 +1,18 @@
 """Hermes hooks: safety + approvals before printer actions, "who is speaking" context, and an audit trail.
 
 ``pre_tool_call``   gates ``home3d_start``, ``home3d_clear_plate`` (confirm) and ``home3d_stop`` (resume), in this
-                    order: never from cron, and never from a run nobody is present for (kanban worker, ``chat -q``,
-                    ``-z``, ``--source tool``); an unknown sender (no household identity, e.g. a subagent whose
+                    order (``gates.approval_refusal``, the same rule ``/home3d approve`` uses): never from a run
+                    nobody is present for (cron, kanban worker, ``chat -q``, ``-z``, ``--source tool``:
+                    ``Runtime.absent_reason``); an unknown sender (no household identity, e.g. a subagent whose
                     parent had none) and a non-owner are blocked with the owner's ``/home3d approve ...`` command
                     (a household member's ask is recorded as an approval request the watcher passes on to the
-                    owner); never when the safety gate fails; only an owner session (a local CLI/TUI session counts
+                    owner); never when the owner's message came in as a VOICE note (a typed confirmation is asked
+                    for); never when the safety gate fails; only an owner session (a local CLI/TUI session counts
                     when ``local_is_owner``) gets Hermes' human-approval prompt, plus a single-use handler pass
-                    bound to (tool, target, session). Stored approvals never authorise an agent call.
+                    bound to (tool, target, session). Stored approvals never authorise an agent call. Hermes
+                    answers that prompt by itself when the owner runs with ``--yolo`` or ``approvals.mode: off``
+                    (tools/approval.py, v0.22.5), which is why the unattended, identity and voice rules are BLOCKS
+                    decided here and never left to the prompt.
                     BOUNDED: Hermes runs hook callbacks with a 30 s timeout and a timed-out ``pre_tool_call`` blocks
                     EVERY tool call of the process for 60 s (stop included). So the hook never runs the camera or
                     switches the chamber light: it reads status + queue only (each request capped at
@@ -17,7 +22,13 @@
                     authoritative check) and by ``/home3d approve``; a recent plate check of this process that said
                     occupied / unsure still blocks here.
 ``pre_llm_call``    remembers session -> sender (local sessions as ``LOCAL_SENDER``, delegated children inherit the
-                    parent's sender) and injects a short context for household / printing turns only. No network.
+                    parent's sender) and how the turn's message arrived (voice or typed, ``Runtime.note_turn``), and
+                    injects a short context for household / printing turns only. No network.
+``pre_gateway_dispatch``  notes, in memory, that a sender's inbound message is a voice note: it reads the message
+                    type and the sender id of the event and nothing else (never the text), stores nothing on disk,
+                    and always returns None, so dispatch is never changed (Hermes fires it once per inbound message
+                    at the gateway, before auth; never for local CLI/TUI/Desktop turns). Hermes tells no other hook
+                    or tool that a message was spoken: ``pre_llm_call`` only gets the transcript as text.
 ``post_tool_call``  audits every ``home3d_*`` call, drops a pass the handler did not use (denied or vetoed call)
                     and logs approval friction as a human-needed moment.
 
@@ -38,7 +49,9 @@ from typing import Any, Callable, Optional
 
 from .backends.base import BackendError
 from .config import LOCAL_SENDER, norm_id, scoped_sender
-from .gates import Gate, clear_plate_gate, describe, person_can_overrule, printer_blocks, resume_gate, start_gate
+from .gates import (VOICE, Gate, approval_refusal, clear_plate_gate, describe, person_can_overrule, printer_blocks,
+                    resume_gate, start_gate)
+from .runtime import ABSENT_CRON, message_text
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +277,7 @@ class Evaluation:
     tool: str
     reason: str = ""  # English, why it is blocked ("" when ok)
     message: str = ""  # the same in the household language
+    code: str = ""  # why it is blocked, for programs: bad_request | unattended | printer_unreachable | gate
     summary: str = ""  # approval prompt text when ok
     qid: Optional[int] = None
     jump: bool = False
@@ -278,9 +292,22 @@ class Evaluation:
         return hms_ack_detail(self.hms) if self.action == "resume" and self.ack else ""
 
 
+def absent_text(rt, tool: str, cmd: str = "") -> str:
+    """Why ``tool`` does not run now, when nobody is present in this run (``Runtime.absent_reason``); '' when a
+    person may be there. English, for the agent and logs."""
+    why = rt.absent_reason()
+    if not why:
+        return ""
+    if why == ABSENT_CRON:
+        return f"{tool} never runs from a scheduled (cron) job; a person must be present."
+    return (f"{tool} needs a person present, and nobody is in this run (kanban worker, single-query `chat -q`, "
+            f"`-z` or a tool integration)." + (f" The owner sends `{cmd}` from a chat or terminal." if cmd else ""))
+
+
 def evaluate(rt, action: str, args: Any, *, in_hook: bool = False) -> Evaluation:
-    """Cron check + safety gate for one gated action. Used by ``pre_tool_call`` (``in_hook``) and ``/home3d approve``
-    so both decide the same way. Raises only on internal errors (callers fail closed); a backend error is a block.
+    """Presence check + safety gate for one gated action. Used by ``pre_tool_call`` (``in_hook``) and
+    ``commands.perform`` (``/home3d approve``, a UI) so both decide the same way. Raises only on internal errors
+    (callers fail closed); a backend error is a block.
 
     ``in_hook``: bounded, for Hermes' hook budget: printer requests capped at ``HOOK_REQUEST_TIMEOUT_S`` and NO
     camera / chamber light: the plate check is deferred to the handler (only a recent remembered check counts).
@@ -292,22 +319,27 @@ def evaluate(rt, action: str, args: Any, *, in_hook: bool = False) -> Evaluation
     if action == "start":
         ev.qid = _qid(a.get("queue_item_id"))
         if ev.qid is None:
+            ev.code = "bad_request"
             ev.reason = ev.message = "home3d_start needs a numeric queue_item_id (see home3d_queue action=list)."
             return ev
         ev.jump = _truthy(a.get("allow_jump"))
     if action == "resume":
         ev.ack = _truthy(a.get("ack_hms"))
     ev.target = approval_target(action, ev.qid, ev.jump)
-    if rt.in_cron():
-        ev.reason = ev.message = f"{tool} never runs from a scheduled (cron) job; a person must be present."
+    absent = absent_text(rt, tool, approve_command(action, ev.qid, ev.jump, ack=ev.ack))
+    if absent:  # cron, kanban worker, chat -q, -z, --source tool: the one definition, on every path
+        ev.code = "unattended"
+        ev.reason = ev.message = absent
         return ev
     try:
         _gate(rt, ev, in_hook=in_hook)
     except BackendError as e:
         ev.ok, ev.summary = False, ""
+        ev.code = "printer_unreachable"
         ev.reason = ev.message = f"printer not reachable, {tool} was not run: {e}"
         return ev
     if ev.gate is not None and not ev.gate.ok:
+        ev.code = "gate"
         ev.reason, ev.message = describe(ev.gate, "en"), describe(ev.gate, lang)
     return ev
 
@@ -328,7 +360,7 @@ def _gate(rt, ev: Evaluation, *, in_hook: bool = False) -> None:
     if in_hook:
         be = bounded_backend(be)
     status = be.status()
-    in_cron = rt.in_cron()
+    in_cron = rt.nobody_present()  # cron and every other run nobody watches (evaluate blocked those already)
     if ev.action == "resume":
         gate = resume_gate(status, in_cron=in_cron, hms_acknowledged=ev.ack)
         ev.gate, ev.ok = gate, gate.ok
@@ -437,30 +469,38 @@ class _Hooks:
 
     def _decide(self, action: str, tool: str, args: dict, session_id: str) -> dict:
         rt = self.rt
-        if not rt.in_cron() and rt.unattended():  # 1b. like cron: nobody is present to answer a prompt
-            qid = _qid(args.get("queue_item_id")) if action == "start" else None
-            cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
-            return _block(f"BLOCKED: {tool} needs a person present, and nobody is in this run (kanban worker, "
-                          f"single-query `chat -q`, `-z` or a tool integration). The owner sends `{cmd}` from a chat "
-                          "or terminal.")
         s = rt.settings
         owner = s.owner_name or "the owner"
-        sender = rt.sender_id(session_id) if session_id else ""
+        qid = _qid(args.get("queue_item_id")) if action == "start" else None
+        cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
+        actor = rt.actor(session_id)  # who asks, how the message arrived, is a person present
+        sender = actor.sender
         person = s.person_for(sender) if sender else None
-        if (person is None or not s.is_owner(sender)) and not rt.in_cron():
+        why = approval_refusal(actor)  # the same rule /home3d approve uses (commands.perform)
+        if why == "unattended":  # 1. cron, kanban worker, chat -q, -z, --source tool: nobody can answer a prompt
+            return _block("BLOCKED: " + (absent_text(rt, tool, cmd) or f"{tool} needs a person present."))
+        if why in ("no_identity", "not_owner", "local_off"):
             # 2. who asks, before the safety gate: a family member or a stranger is refused without any printer
             # call on their behalf (the owner's command runs the gate itself)
-            qid = _qid(args.get("queue_item_id")) if action == "start" else None
-            cmd = approve_command(action, qid, _truthy(args.get("allow_jump")), ack=_truthy(args.get("ack_hms")))
             return self._refuse(person, sender, cmd, owner, action=action, qid=qid, session_id=session_id)
-        ev = self._evaluate_bounded(action, args)  # 1. cron, 3. safety gate (bounded, no camera)
+        if why == "voice_message":
+            # 3. voice is for asking, never for starting: speech-to-text can hear another sentence. A block, not an
+            # approval prompt: Hermes answers its prompt by itself under --yolo / approvals.mode off.
+            return _block(f"BLOCKED: voice message: {owner}'s last message came in as a voice note, and a voice "
+                          "note never starts or resumes a print or marks the plate clear (speech can be heard "
+                          f"wrong). Ask {owner} to confirm in writing: a typed message here, or `{cmd}` (runs it "
+                          "right away). Do not call this again before a typed message arrives.")
+        if why:  # a rule this hook does not know: fail closed
+            return _block(f"BLOCKED: {tool} was not run ({why}). {owner} sends `{cmd}`.")
+        ev = self._evaluate_bounded(action, args)  # 4. presence again + the safety gate (bounded, no camera)
         if not ev.ok:
             return _block(f"BLOCKED: {ev.reason}")
         cmd = approve_command(action, ev.qid, ev.jump, ack=bool(ev.hms))
-        if person is None or not s.is_owner(sender):  # defensive: reached only if in_cron changed meanwhile
+        if approval_refusal(rt.actor(session_id)):  # defensive: the answer changed while the gate ran
             return self._refuse(person, sender, cmd, owner)
-        # 4. the owner: Hermes asks them (or auto-approves under their own yolo/smart settings) BEFORE the handler
-        # runs; the handler then needs this single-use pass, so nothing but this very call can use it.
+        # 5. the owner, present, typing: Hermes asks them BEFORE the handler runs (it answers by itself under their
+        # own --yolo / approvals.mode off, verified in tools/approval.py v0.22.5); the handler then needs this
+        # single-use pass, so nothing but this very call can use it.
         rt.store.issue_pass(tool, ev.target, session_id, ttl_s=PASS_TTL_S, detail=ev.pass_detail)
         # unique per call: an "always" answer in Hermes' prompt can never pre-approve a later printer action (it
         # only adds an allowlist entry nothing will match again), so the prompt says to approve once
@@ -535,6 +575,22 @@ class _Hooks:
         return (f"The watcher is off, so {owner} is not told automatically: {who} should ask {owner} directly "
                 "(the watcher is started with `hermes home3d setup` and needs `hermes gateway` running).")
 
+    # -- pre_gateway_dispatch --
+    def pre_gateway_dispatch(self, event: Any = None, **kw: Any) -> None:
+        """Note that a sender's inbound message is (or is not) a voice note. Reads ``event.message_type`` and
+        ``event.source.user_id`` only, keeps it in memory (``Runtime.note_inbound``) and ALWAYS returns None: the
+        message is dispatched exactly as without this plugin. Never raises."""
+        try:
+            source = getattr(event, "source", None)
+            user = getattr(source, "user_id", None) or getattr(event, "user_id", None)
+            if user:
+                kind = getattr(event, "message_type", None)
+                kind = str(getattr(kind, "value", kind) or "").strip().lower()
+                self.rt.note_inbound(user, kind == VOICE)
+        except Exception as e:
+            logger.debug("home3d pre_gateway_dispatch failed: %s", e)
+        return None
+
     # -- pre_llm_call --
     def pre_llm_call(self, session_id: Any = "", user_message: Any = None, platform: Any = "", sender_id: Any = "",
                      is_first_turn: Any = False, parent_session_id: Any = "", **kw: Any) -> Optional[dict]:
@@ -563,6 +619,7 @@ class _Hooks:
         rt = self.rt
         s, store = rt.settings, rt.store
         who = self._record_sender(session_id, sender, platform, parent)
+        spoken = rt.note_turn(session_id, sender, user_message, parent) == VOICE  # before any early return
         mode = s.inject_context
         if mode == "never":
             return ""
@@ -577,6 +634,9 @@ class _Hooks:
             speaker = "Speaking: someone not in the household list (no approvals; ask who they are if needed)."
         else:
             speaker = "Speaking: unknown sender (no approvals)."
+        if spoken:
+            speaker += (" This message came in as a voice note: it can ask for anything, but starting, resuming or "
+                        "marking the plate clear needs a typed message.")
         printer, state_key = self._printer_state(store, watcher_stale_s(s))
         key = session_id or "-"
         changed = self._printer_line.get(key) != state_key
@@ -697,22 +757,19 @@ class _Hooks:
                                 who=who, source="agent")
 
 
-def _message_text(msg: Any) -> str:
-    if isinstance(msg, str):
-        return msg[:2000]
-    if isinstance(msg, list):  # multimodal turn: text parts only
-        parts = [p.get("text", "") for p in msg if isinstance(p, dict) and isinstance(p.get("text"), str)]
-        return " ".join(parts)[:2000]
-    return ""
+_message_text = message_text  # multimodal turn: text parts only (runtime.message_text)
 
 
 def make_hooks(rt) -> dict[str, Callable]:
-    """``{"pre_tool_call", "post_tool_call", "pre_llm_call"}`` bound to the shared Runtime."""
+    """``{"pre_tool_call", "post_tool_call", "pre_llm_call", "pre_gateway_dispatch"}`` bound to the shared
+    Runtime (exactly the hooks ``plugin.yaml`` declares)."""
     h = _Hooks(rt)
-    return {"pre_tool_call": h.pre_tool_call, "post_tool_call": h.post_tool_call, "pre_llm_call": h.pre_llm_call}
+    return {"pre_tool_call": h.pre_tool_call, "post_tool_call": h.post_tool_call, "pre_llm_call": h.pre_llm_call,
+            "pre_gateway_dispatch": h.pre_gateway_dispatch}
 
 
 __all__ = ["make_hooks", "gated_action", "approve_command", "approval_target", "evaluate", "Evaluation",
+           "absent_text",
            "hms_ack_detail", "acked_codes", "HMS_ACK_PREFIX", "bounded_backend", "watcher_fresh",
            "watcher_stale_s", "interval_seconds",
            "HOOK_DEADLINE_S", "HOOK_REQUEST_TIMEOUT_S", "HOOK_PLATE_MAX_AGE_S", "HOOK_TIMEOUT_SHARE",

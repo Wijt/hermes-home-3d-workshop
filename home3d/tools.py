@@ -24,7 +24,8 @@ from typing import Any, Callable, Optional
 from . import customize
 from .backends.base import PAUSE, BackendError, SliceOptions, to_jsonable
 from .config import watch_script_path
-from .gates import clear_plate_gate, describe, printer_blocks, resume_gate, same_person, start_gate
+from .gates import (clear_plate_gate, describe, printer_blocks, refusal, requester_name, resume_gate, same_person,
+                    start_gate, stop_refusal, write_refusal)
 from .gcode import assess_eject, inspect_gcode, material_family
 from .hooks import LIGHT_FLAG, acked_codes, approval_target, watcher_fresh, watcher_stale_s
 
@@ -122,11 +123,44 @@ def _choice(a: dict, key: str, choices: tuple, default: Optional[str] = None) ->
 
 
 def _who(rt, kw: dict, explicit: str = "") -> tuple[str, str]:
-    """(requester name, sender id) of the person talking in this session."""
-    sid = kw.get("session_id") or ""
-    sender = rt.sender_id(sid) if sid else ""
-    name = (explicit or "").strip() or (rt.requester_name(sid, "") if sid else "")
-    return name, sender
+    """(requester name, sender id) of the person talking in this session. The name is never empty: a sender in no
+    list is recorded as ``Guest (…1234)`` and a session without any sender as ``Guest`` (``gates.requester_name``),
+    so no request or job is ever stored with an empty requester that could pass for the owner's."""
+    sid = str(kw.get("session_id") or "")
+    actor = rt.actor(sid)
+    name = (explicit or "").strip() or requester_name(actor)
+    return name, actor.sender
+
+
+# Who may use which tool action (checked in ``_wrap`` for every caller: the agent, ``/home3d``, the CLI demo).
+# WRITE: prepares a print or changes the queue; the owner and known people only, unless ``allow_guests``.
+# STOP: stop / pause, under ``stop_policy``. Everything else (status, find, camera, lists) is open to everyone; the
+# approval actions (start, resume, plate confirm) are gated by the pre_tool_call hook and the handler pass.
+WRITE_ACTIONS: dict[str, Optional[frozenset]] = {
+    "home3d_import": None, "home3d_customize": None, "home3d_slice": None,  # None = every call
+    "home3d_design": frozenset({"upload"}), "home3d_queue": frozenset({"add", "remove"})}
+STOP_TOOL_ACTIONS = {"home3d_stop": frozenset({"stop", "pause"})}
+_DEFAULT_ACTION = {"home3d_queue": "list", "home3d_stop": "stop"}
+
+
+def access_refusal(rt, name: str, args: dict, kw: dict) -> Optional[dict]:
+    """The refusal of ``name`` with ``args`` for the actor of this session, or None when they may. Pure reads (the
+    session's recorded sender, the settings); never touches the printer."""
+    action = str(args.get("action") or _DEFAULT_ACTION.get(name, "")).strip().lower()
+    stop_set = STOP_TOOL_ACTIONS.get(name)
+    is_write = name in WRITE_ACTIONS and (WRITE_ACTIONS[name] is None or action in WRITE_ACTIONS[name])
+    if not is_write and not (stop_set and action in stop_set):
+        return None
+    s = rt.settings
+    actor = rt.actor(str(kw.get("session_id") or ""))
+    if is_write:
+        why, cmd = write_refusal(actor, s.allow_guests), "/home3d"
+    else:
+        why, cmd = stop_refusal(actor, s.stop_policy), f"/home3d {action}"
+    if not why:
+        return None
+    return {"ok": False, "code": why, "refused": True, "error": refusal(why, "en", cmd=cmd, who=actor.label("en")),
+            "message": refusal(why, s.language, cmd=cmd, who=actor.label(s.language))}
 
 
 def _is_owner(rt, sender: str) -> bool:
@@ -445,7 +479,7 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
     err = store.kv_get("watcher_error")
     if err:
         out["watcher"]["error"] = str(err)[:200]
-    me, _ = _who(rt, kw)
+    me = rt.actor(str(kw.get("session_id") or "")).name  # '' when the session has no sender
     if me:
         out["speaking"] = me
     return out
@@ -798,7 +832,8 @@ def _h_queue(rt, a: dict, kw: dict) -> dict:
                     "error": f"queue item {qid} was not queued through the workshop; remove it in Bambuddy yourself "
                              "(the workshop never removes, postpones or reorders other people's jobs)"}
         requester = str(job.get("requester") or "")
-        mine = bool(who) and same_person(requester, who, rt.settings.owner_name)
+        # a session without any sender is nobody: it never owns a job, not even another anonymous one
+        mine = bool(sender) and bool(who) and same_person(requester, who)
         if not mine:
             # another person's job: never from here, not even for the owner (it would postpone their job and let a
             # later start pass the jump check). The person who asked removes it, or the owner does it in Bambuddy.
@@ -941,8 +976,9 @@ def _h_stop(rt, a: dict, kw: dict) -> dict:
         if refused:
             return refused
     reason = _str(a, "reason")
-    who, sender = _who(rt, kw)
-    by = who or "owner"
+    actor = rt.actor(str(kw.get("session_id") or ""))
+    sender = actor.sender
+    by = actor.label("en")  # who really did it: never "owner" by default
     try:
         st = be.status()
     except BackendError as e:
@@ -955,7 +991,7 @@ def _h_stop(rt, a: dict, kw: dict) -> dict:
                "progress": round(st.progress or 0, 1), "layer": st.layer}
     if action in ("stop", "pause"):
         if not st.is_active:
-            return {"ok": False, "error": f"nothing is printing (state {st.state}): no command sent",
+            return {"ok": False, "code": "nothing_printing", "error": f"nothing is printing (state {st.state}): no command sent",
                     "state": st.state}
         if action == "pause" and st.state == PAUSE:
             return {"ok": True, "action": "pause", "note": "already paused", "state": st.state}
@@ -1471,7 +1507,8 @@ SPECS: list[tuple[str, str, dict, list, Callable]] = [
 def _wrap(rt, name: str, fn: Callable) -> Callable[..., str]:
     def handler(args: dict, **kwargs) -> str:
         try:
-            out = fn(rt, args if isinstance(args, dict) else {}, kwargs)
+            a = args if isinstance(args, dict) else {}
+            out = access_refusal(rt, name, a, kwargs) or fn(rt, a, kwargs)
             if isinstance(out, dict):
                 out.setdefault("ok", True)
         except ArgError as e:
