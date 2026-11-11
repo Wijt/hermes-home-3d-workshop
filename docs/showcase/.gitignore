@@ -10,3 +10,8 @@ stills/
 node_modules/
 # written by raea render
 styles.gen.ts
+# Fetched by tools/fetch_assets.sh (fonts: OFL; sounds: CC0), not carried in the repository
+media/fonts/
+media/sounds/
+# written by tools/make_grain.py
+media/grain/

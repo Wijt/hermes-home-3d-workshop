@@ -61,9 +61,11 @@ the two strings there (the original line and its English) so the subtitle is wha
 4. The film with her voice has sound. X expects AAC audio; the README gives the one conversion command
    (it needs `ffmpeg`).
 
-No time to shoot? Post the rendered fallback film, `out/fallback-final.mp4` (86 seconds, 1920x1080, no
-sound). It uses real photos from the printer's camera, re-created chats and captures of the plugin on its
-simulated printer, each labelled as such.
+No time to shoot? Post the motion-graphics film, `out/home-3d-workshop-film.mp4` (79 seconds, 1920x1080,
+with sound, AAC, ready for X; `out/home-3d-workshop-film-silent.mp4` is the same picture with no sound). It
+needs no new footage: drawn scenes, real captures of the plugin on its simulated printer and real photos
+from the printer's camera, each labelled as such. [README.md](README.md) says how it is built. The earlier
+cut is `out/fallback-final.mp4`.
 
 ## Post and submit
 

@@ -1,7 +1,47 @@
 # Showcase film
 
-An 88 s film (1920 x 1080, 30 fps, silent) for the `home-3d-workshop` Hermes Agent plugin, built with raea.
+Two cuts live here. **The one to post is the motion-graphics film** (79 s, 1920 x 1080, 30 fps, with sound),
+built with raea. The first cut (photos and captions, silent) is kept below it.
 Read `~/.claude/skills/raea/SKILL.md` and `raea guide craft` before editing a composition.
+
+## The motion-graphics film
+
+It follows one request, Mum's key tag, from a chat message to the done box. The drawn scenes use the plugin's
+own look (its dark studio, its bronze build plate, a chat bubble in the group's colour); the plugin itself is
+shown as real captures of the Workshop screen, full frame, where a person presses Start.
+
+| Path | What |
+|---|---|
+| `mg/BOARD.md` | the film scene by scene, the words on screen, and the rules every scene keeps |
+| `mg/kit.tsx` | the palette, the type and every shared part: `Stage`, `Words`, `Bubble`, `Chip`, `Label`, `Wipe`, `Screen` (a real capture with a camera and a pointer), `Iso` (the build plate drawn in layers: plate, key tag, print head, done box), `Photo` |
+| `mg/scenes/<id>.tsx` | the nine scenes: `ask`, `title`, `make`, `approve`, `print`, `box`, `twist`, `groups`, `close` |
+| `mg-<id>.tsx` | a preview root per scene |
+| `mg-film.tsx` | the picture: the nine scenes cut together |
+| `mg-sound.tsx` | the sound, written as notes: a marimba bed with hand percussion, and a few sounds on the picture |
+| `mg-look.tsx` | a test frame of the kit |
+| `tools/fetch_assets.sh` | fetches the fonts (Bricolage Grotesque, OFL) and the samples (Versilian Community Sample Library, CC0) into `media/fonts/` and `media/sounds/`; neither is in the repository |
+| `tools/build_film.sh` | renders the picture and the sound and writes `out/home-3d-workshop-film.mp4` (H.264 and AAC) and a silent copy |
+
+```sh
+tools/fetch_assets.sh                                   # once
+raea render mg-approve.tsx --at 0,60,210,300 -o stills/mg/approve/   # stills of one scene
+raea render mg-film.tsx --at 100,700,1300,2300 -o stills/mg/film/     # stills of the film
+FFMPEG=/path/to/ffmpeg tools/build_film.sh              # the film (about 10 minutes here)
+tools/build_film.sh sound                               # only the sound again, under the same picture
+```
+
+The captures in `media/screen/` (`backroom.mp4`, `watch.mp4`, `twist.png`) and the photos in `media/real/` are
+git-ignored, as for the first cut. The film needs them; it does not need `media/manifest.json`.
+
+What is real and what is drawn: the chat is re-created and labelled; the key tag, the plate and the box are
+drawings; the Workshop screen is a real capture of the plugin on its simulated printer and is labelled; the
+photos are from the real printer's camera and are labelled. The numbers on screen are read off the capture
+(58 x 24 x 4.2 mm, 21 layers, 13 minutes, 4 g of PLA) or off the plugin (14 tools, 4 hooks, 0 model calls in the
+watcher). The line "it fell in by itself" is the owner's own, from the story in the main README.
+
+## The first cut
+
+An 86 s film (silent): real photos, re-created chats and Workshop captures on paper, with burned-in captions.
 
 ## Layout
 

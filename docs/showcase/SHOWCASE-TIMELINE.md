@@ -1,63 +1,68 @@
-# Showcase timeline (86 seconds)
+# Showcase timeline (79 seconds)
 
-The film makes one argument: **the interface to the machine is a member of the group chat. Ask, and it
-is in the box.** It follows one request from a voice note to an object in a box, then shows that the
-agent improved its own printer and that a second group now uses the same plugin.
+The film makes one argument: **ask the group chat for an object, and it is in the box.** It follows one
+request, Mum's key tag, from a chat message to the done box, shows the plugin's own screen where a person
+presses Start, then the twist (the printer printed its own upgrade), then what the plugin is.
+
+It is a motion-graphics film. The drawn scenes take their look from the plugin: the dark studio and the
+bronze build plate of the Workshop screen, the red of the filament, the blue of the Start button, and a chat
+bubble in the group's colour. The plugin itself is never redrawn: it appears as real captures of the Workshop
+screen, full frame.
 
 Rules the film keeps:
 
-- Under 90 seconds (hackathon rule). This cut is 86 s.
-- It works with the sound off. Every beat has its words burned in.
-- It shows the plugin working. Captures of the Workshop screen are real captures, never redrawn.
-- Nothing is invented. See "Labels" at the end.
+- Under 90 seconds (hackathon rule). This cut is 79 s.
+- It works with the sound off: every beat has its words on screen. The sound is a marimba bed and a few
+  sounds on physical moments (a message landing, the press of Start, the part dropping into the box).
+- Nothing is invented. See "What is real" at the end.
 
 ## Second by second
 
-| # | Time | Picture | Words on screen | Clip that replaces the picture |
+| # | Time | Scene | Picture | Words on screen |
 |---|---|---|---|---|
-| 1 | 0:00–0:05.5 | **Hook.** Real photo of the rose box on the printer bed, slow push-in. With footage: the finished part slides off the tilted bed into the box, nobody in frame. | "My mother has never opened a slicer." then "She asked a group chat for this." | `01_hook_drop.mp4` |
-| 2 | 0:05.5–0:18.5 | **The ask.** The family chat: Mum's voice note with its transcript, Mıstık's reply with a picture of the part, her "Yes!", then "I've asked the owner to approve it." With footage: Mum recording the voice note. | Transcript: "Mıstık, can you make me a rose box?" (original line small above it). Captions: "Mıstık is an agent in the family chat." then "It runs the 3D printer. No app, no slicer." | `02_mum_voice_note.mp4` (keeps its sound) |
-| 3 | 0:18.5–0:29.5 | **The back room.** The Workshop screen in Hermes: the card waiting for the owner, the part turning in 3D, the checklist. The pointer presses Start. | "The agent prepares everything." then "A person presses Start." | `03_screen_start.mp4` |
-| 4 | 0:29.5–0:37.5 | **The watch.** The Workshop screen: printing, progress rising, the camera frame. With footage: a timelapse of the print. | "Watched by the plugin." then "Zero model calls." | `04_printing_timelapse.mp4` |
-| 5 | 0:37.5–0:50.5 | **The delivery.** Real photos: the part on the tilted bed, then the empty bed after the push. Then the chat: Mıstık tells Mum it is ready, with the photo. With footage: the push, then her phone and her hand at the box. | "Printed. Nobody touched the printer." then "Pushed into the done box." then "The person who asked is told." | `05_push_into_box.mp4`, `06_mum_gets_message.mp4` |
-| 6 | 0:50.5–1:06 | **The twist.** Real photo of the tilted-base parts on the bed. Then the Workshop screen's list of moments that needed a human, and the upgrade it proposed. | "It kept needing a human to clear the plate." then "So it proposed a tilted base. The printer printed its own upgrade." | `07_tilted_base.mp4` (the photo half only) |
-| 7 | 1:06–1:16 | **A second group.** Words on paper. With footage: a real exchange in the lab's chat, if there is one and the lab agrees. | "Same plugin. A second group." then "My manager asked for one for an R&D lab." | `08_lab_chat.mp4` |
-| 8 | 1:16–1:26 | **Close.** With footage: the real objects on a table for 2.5 s. Then the end card. | "Ask. It's in the box." then "home-3d-workshop, a Hermes Agent plugin" and "github.com/Wijt/hermes-home-3d-workshop" | `09_objects.mp4` |
+| 1 | 0:00 to 0:06.5 | `ask` | Mum's message types itself into a red bubble; Mıstık answers from the right. Mum's red then grows until it fills the frame. | "Mıstık, can you make me a key tag with MUM on it? Red please." and "On it. I'll ask the owner to approve the print." |
+| 2 | 0:06.5 to 0:11 | `title` | Red ground, big words. | "A 3D printer in the group chat." and "home-3d-workshop, a plugin for Hermes Agent" |
+| 3 | 0:11 to 0:18.5 | `make` | Three of the plugin's tools, one at a time. On a tile of the build plate the key tag rises out of the sheet, its 21 layers lift apart, and it waits under a blue note. | `home3d_design` "Designs the part. 58 × 24 × 4.2 mm", `home3d_slice` "21 layers, 13 minutes, 4 g of PLA", `home3d_queue` "Queues it. It cannot start a print by itself.", note "Waiting for the owner's OK" |
+| 4 | 0:18.5 to 0:29.5 | `approve` | The real Workshop screen, full frame: the approval card with the part turning in 3D and the six checks. The camera moves in; the pointer presses Start; the card changes to Printing. | "The agent prepares everything." then "A person presses Start." |
+| 5 | 0:29.5 to 0:39.5 | `print` | The real screen while the percent rises, then the drawn plate: the tag printed layer by layer under the print head, a giant percent counting to 100. | "Then the plugin watches the print.", "0 model calls while it prints." and "A scheduled job checks the printer. No tokens spent." |
+| 6 | 0:39.5 to 0:49 | `box` | The print head pushes the finished tag off the plate; it drops into the done box. Mıstık tells Mum. | "Mum, your key tag is in the box." then "Ask. It's in the box." |
+| 7 | 0:49 to 1:00 | `twist` | A real photo of prints on the real bed; the real screen's list of moments that needed a person and the upgrade it proposed; a real photo of the tilted-base parts; a real photo of the empty tilted bed with the owner's message. | "Six weeks on a real printer at home.", "It kept needing a person to clear the plate.", "So it proposed an upgrade.", "A tilted base. The printer printed it." and the owner: "it fell in by itself" |
+| 8 | 1:00 to 1:09 | `groups` | A red message from Family and a blue one from Lab; then four numbers. | "One printer. Every group chat.", then 14 tools, 4 hooks, 1 screen in Hermes Desktop, 0 model calls to watch a print |
+| 9 | 1:09 to 1:19 | `close` | The end card, with the finished tag turning on its plate. | "Ask. It's in the box.", `hermes plugins install Wijt/hermes-home-3d-workshop`, "home-3d-workshop, a plugin for Hermes Agent", "github.com/Wijt/hermes-home-3d-workshop" |
+
+The exact frames and the rules every scene keeps are in [mg/BOARD.md](mg/BOARD.md).
 
 ## Why this order
 
-1. **The result first.** A part in a box with nobody near the printer is the picture no other entry has.
-   The first two seconds are never a logo or a title.
-2. **One person, one request.** The film follows Mum's request and nothing else until it is done.
-3. **The owner's screen is the proof of the plugin.** Beats 3 and 4 are where a judge sees what a prompt
-   or a skill could not be: a rule that waits for a person, and a watcher that needs no model.
-4. **The twist earns the second half.** The machine printed the part that lets it deliver.
-5. **The second group makes it useful beyond one home.** One line, then stop.
+1. **One person, one request.** The film opens on Mum's message and follows it until the part is in the box.
+2. **The owner's screen is the proof of the plugin.** Scenes 4 and 5 are where a judge sees what a prompt or a
+   skill could not be: a rule that waits for a person, and a watcher that needs no model.
+3. **The twist earns the second half.** The machine printed the part that lets it deliver.
+4. **The second group makes it useful beyond one home.** One line, four numbers, then the end card.
 
-## Labels
+## What is real
 
-Each kind of picture that is not live footage carries a small label on screen:
+| Picture | What it is | Label on screen |
+|---|---|---|
+| The chat bubbles | Re-created from real chats, names changed | "Re-created from real chats. Names changed." |
+| The Workshop screen (scenes 4, 5 and 7) | Real captures of the plugin in Hermes on its built-in simulated printer | "The plugin's real screen, on its simulated printer" |
+| The photos (scene 7) | From the real printer's camera | "Real photo from the printer's camera" |
+| The key tag, the plate, the print head, the box | Drawings | none |
 
-| Picture | Label |
-|---|---|
-| A chat that was typed again for the film | "Re-created from real chats. Names changed." |
-| A photo from the printer's camera archive | "Real photo from the printer's camera" |
-| The Workshop screen on the simulator | "Plugin running on its built-in simulated printer" |
+The numbers are read off the capture (58 × 24 × 4.2 mm, 21 layers, 13 minutes, 4 g of PLA) or off the plugin
+(14 tools, 4 hooks, the watcher's 0 model calls). "it fell in by itself" is the owner's own line, from the story
+in the main README.
 
 What the film must not say:
 
-- That the plugin's own start, stop or auto-eject was verified on the real printer, until it has been.
-  The real photos come from six weeks of the same agent running this printer with scripts and skills,
-  which the plugin packages.
+- That the plugin's own start, stop or auto-eject was verified on the real printer, until it has been. The
+  real photos come from six weeks of the same agent running this printer with scripts and skills, which the
+  plugin packages. The push into the box is a drawing.
 - Any number that was not measured.
 - Any real name, phone number or group name.
 
-## Two versions
+## The first cut
 
-- **`fallback.tsx`** needs no new footage: real photos, re-created chats and simulator captures. It is the
-  film to post if there is no time to shoot.
-- **`final.tsx`** is the same film. Each beat uses the clip named in the table when that file is in
-  `media/footage/`, and the fallback picture when it is not. So one good clip already improves the film,
-  and a missing clip never breaks it.
-
-The exact render commands are in [README.md](README.md). What to shoot is in [SHOOT-LIST.md](SHOOT-LIST.md).
+The earlier film (86 s, silent: photos and captions on paper) is still here as `fallback.tsx`, and
+`final.tsx` is that cut with slots for shot footage ([SHOOT-LIST.md](SHOOT-LIST.md)). Its timeline is in this
+file's history.
