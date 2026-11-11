@@ -1,5 +1,10 @@
 # Demo video plan (under 90 seconds)
 
+> **This plan is the earlier one.** The current film, its second-by-second timeline, the shoot list and
+> the project that renders it are in [`showcase/`](showcase/): see
+> [SHOWCASE-TIMELINE.md](showcase/SHOWCASE-TIMELINE.md) and [SHOOT-LIST.md](showcase/SHOOT-LIST.md).
+> The honesty rules below still apply.
+
 Goal: show the plugin working, in a real home, in 86 seconds. Real footage beats animation. The audio is
 Turkish (the household language) with English subtitles. Subtitle files:
 
