@@ -303,3 +303,16 @@ def test_a_person_confirming_the_plate_marks_waiting_parts_taken_off():
     store.record_done_part(8, photo="")  # an update never erases what is known
     part = next(p for p in store.done_box() if p["queue_item_id"] == 8)
     assert part["requester"] == "Alex" and part["left_plate"] == "taken_off"
+
+
+def test_team_wording_has_no_family_forms_of_address():
+    from home3d_ws.home3d import messages as M
+
+    ctx = dict(requester="Mum", address_as="Mum dear", family_job='"sensor bracket"', job="bracket", progress=40,
+               owner="Sam")
+    for lang in ("en", "tr"):
+        for kind in ("started", "finished", "finished_ejected", "plate_not_clear", "failed", "paused"):
+            text = M.render(kind, "team", lang, **ctx)
+            assert text and "Mum dear" not in text and "Mum" in text, (kind, lang, text)
+        assert "Mum dear" in M.render("finished", "family", lang, **ctx)  # family keeps today's wording
+    assert M.render("hms", "team", "en", **ctx) == ""  # owner-only kinds stay owner-only
