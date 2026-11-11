@@ -61,8 +61,9 @@ the two strings there (the original line and its English) so the subtitle is wha
 4. The film with her voice has sound. X expects AAC audio; the README gives the one conversion command
    (it needs `ffmpeg`).
 
-No time to shoot? Post the rendered fallback film from `out/`. It uses real photos from the printer's
-camera, re-created chats and captures of the plugin on its simulated printer, each labelled as such.
+No time to shoot? Post the rendered fallback film, `out/fallback-final.mp4` (86 seconds, 1920x1080, no
+sound). It uses real photos from the printer's camera, re-created chats and captures of the plugin on its
+simulated printer, each labelled as such.
 
 ## Post and submit
 
@@ -75,5 +76,18 @@ camera, re-created chats and captures of the plugin on its simulated printer, ea
 
 2. **Submit the form**: https://form.typeform.com/to/FwJLvOln. It asks for the plugin title, a
    description, your email, your Discord username, the X post link and the pull request link.
-   The pull request is https://github.com/NousResearch/hermes-agent/pull/153024.
+
+   - Plugin title: `Home 3D Workshop (home-3d-workshop)`
+   - Pull request: https://github.com/NousResearch/hermes-agent/pull/153024
+   - A description that fits (it says only what the README's status table supports):
+
+     > Ask. It's in the box. The plugin makes a 3D printer a member of the group chat. People in a family
+     > or team chat ask in plain words, often by voice note. The agent finds a model or designs the part in
+     > OpenSCAD, slices it and queues it. A print starts only with the owner's typed approval. A watcher
+     > that spends no model calls follows the print, and the person who asked gets a line with a photo in
+     > the chat the request came from. The owner gets one Workshop screen in Hermes Desktop: the part in
+     > 3D on the build plate, a safety checklist, Start, Pause and Stop, the queue, the done box, messages,
+     > filament and a setup check. It works with a Bambu Lab printer through Bambuddy, or with the built-in
+     > simulated printer (`hermes home3d demo`).
+
 3. **Add the X link** as a comment on that pull request.
