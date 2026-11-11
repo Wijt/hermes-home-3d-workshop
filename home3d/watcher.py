@@ -1014,7 +1014,7 @@ class _Pass:
             _log(f"pending_approval_requests failed: {exc}")
             return
         try:  # a request whose owner message is still waiting in the outbox is not written a second time
-            waiting = self.store.outbox_open_refs("approval_request_ids")
+            waiting = self.store.outbox_open_refs("approval_request_ids") if rows else set()
         except Exception:
             waiting = set()
         for r in rows:

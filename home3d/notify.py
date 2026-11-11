@@ -311,7 +311,7 @@ def enqueue(settings: Settings, store: Any, *, audience: str, target: str, text:
         return None
     d = send(settings, target, text, media, audience=audience, dry_run=True)  # the send log; nothing goes out
     d.record_id, d.status = rid, final
-    _settle(store, store.outbox_get(rid) or {"id": rid, "audience": audience, "refs": refs}, final)
+    _settle(store, {"id": rid, "audience": audience, "refs": refs}, final)
     return d
 
 
