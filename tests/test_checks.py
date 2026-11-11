@@ -281,3 +281,29 @@ def test_doctor_text_still_prints_missing_as_warn(capsys):
     out = capsys.readouterr().out
     assert "[warn] watcher" in out and "never ran: hermes home3d setup" in out and "[missing]" not in out
     assert "[  ok] owner_ids" in out  # unchanged: only a local session can approve
+
+
+# ---- the status tool --------------------------------------------------------------------------------------------
+def test_status_tool_reports_capabilities_and_caches_them(monkeypatch):
+    from home3d_ws.home3d.tools import build_tools
+
+    rt = _rt()
+    calls = []
+    real = checks.run_checks
+    monkeypatch.setattr(checks, "run_checks", lambda rt_, **kw: calls.append(kw) or real(rt_, **kw))
+    status = {n: h for n, _schema, h in build_tools(rt)}["home3d_status"]
+    out = json.loads(status({}, session_id="s1", task_id="t1"))
+    assert out["capabilities"] == {"slice": True, "find_models": True, "camera": True, "design": True,
+                                   "auto_eject": True, "notify": False}
+    json.loads(status({}, session_id="s1", task_id="t1"))
+    assert len(calls) == 1 and calls[0]["timeout_s"] == checks.STATUS_TIMEOUT_S  # cached for the next call
+    rt.settings.owner_target, rt.settings.family_target = "whatsapp:<owner>", "whatsapp:<family>"
+    monkeypatch.setattr(notify, "hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(cli, "_cron_list", lambda binary, all_jobs=True, timeout=60: "")
+    assert json.loads(status({}, session_id="s1", task_id="t1"))["capabilities"]["notify"] is True  # settings changed
+    assert len(calls) == 2
+
+
+def test_cached_capabilities_never_raises(monkeypatch):
+    monkeypatch.setattr(checks, "run_checks", lambda rt_, **kw: 1 / 0)
+    assert checks.cached_capabilities(_rt()) == {}

@@ -322,7 +322,11 @@ def test_cli_parser_and_dispatch(rig, capsys):
 def test_cli_setup_installs_script_and_prints_cron(tmp_path, monkeypatch, capsys, data_dir):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     rt = Runtime(None, settings=settings(watch_interval="3m"))
-    assert cli.handle(_parse(["setup", "--print-only"]), rt) == 0
+    from home3d_ws.home3d import notify  # no hermes binary: setup installs the script and prints the command
+
+    monkeypatch.setattr(notify, "hermes_bin", lambda: None)
+    monkeypatch.setattr(cli, "hermes_home", lambda: tmp_path / "hermes")
+    assert cli.handle(_parse(["setup"]), rt) == 1
     script = tmp_path / "hermes" / "scripts" / cli.SCRIPT_NAME
     text = script.read_text(encoding="utf-8")
     assert "__PLUGIN_DIR__" not in text and repr(str(ROOT)) in text and os.access(script, os.X_OK)

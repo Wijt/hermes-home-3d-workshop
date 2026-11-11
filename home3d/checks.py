@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from typing import Any, Callable, Optional
 
 from .backends.base import BackendError
@@ -312,4 +313,29 @@ def capabilities(checks: list[dict]) -> dict:
             "notify": usable("delivery")}
 
 
-__all__ = ["run_checks", "capabilities", "CHECK_IDS", "CAPABILITIES", "STATUSES"]
+CACHE_S = 600.0  # the status tool reuses its capabilities this long
+STATUS_TIMEOUT_S = 6.0  # a status call waits at most this long for fresh checks
+_cache: "weakref.WeakKeyDictionary[Any, tuple[tuple, float, dict]]" = weakref.WeakKeyDictionary()
+_cache_lock = threading.Lock()
+
+
+def cached_capabilities(rt, max_age_s: float = CACHE_S, timeout_s: float = STATUS_TIMEOUT_S) -> dict:
+    """``capabilities(run_checks(rt))`` remembered per runtime for ``max_age_s`` (and until the backend settings
+    change), so the status tool does not probe everything on every call. Never raises."""
+    try:
+        s = rt.settings
+        key = (s.backend, s.bambuddy_url, s.printer_id, s.autoeject_printer_preset, s.owner_target, s.family_target)
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _cache.get(rt)
+        if hit and hit[0] == key and now - hit[1] < max_age_s:
+            return dict(hit[2])
+        caps = capabilities(run_checks(rt, timeout_s=timeout_s))
+        with _cache_lock:
+            _cache[rt] = (key, now, caps)
+        return dict(caps)
+    except Exception:
+        return {}
+
+
+__all__ = ["run_checks", "capabilities", "cached_capabilities", "CHECK_IDS", "CAPABILITIES", "STATUSES"]

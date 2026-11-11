@@ -448,6 +448,9 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
     me, _ = _who(rt, kw)
     if me:
         out["speaking"] = me
+    from .checks import cached_capabilities  # what works on this install (cached; read-only probes)
+
+    out["capabilities"] = cached_capabilities(rt)
     return out
 
 
