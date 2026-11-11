@@ -5,6 +5,7 @@
   /home3d approve clear                 owner: mark the plate clear now if the gate passes (also confirms the plate
                                         after a failed print)
   /home3d approve resume [ack]          owner: resume a paused print (``ack`` = resume despite a printer error)
+  /home3d stop [reason] | pause [reason]  the owner and known people (``stop_policy``): stop / pause the print now
   /home3d whoami                        the sender id / household person this chat maps to
   /home3d upgrades | moments            upgrade proposals / human-needed moments (last 30 days)
   /home3d help                          one line per subcommand, in the household language (``help_text``)
@@ -18,6 +19,13 @@ or remotely reachable dashboard. ``source.chat_id`` is never accepted: in a grou
 not the person. The command runs the same gate as the ``pre_tool_call`` hook and, when it passes, does the action
 right away; nothing is stored that could authorise a later action. When the gate or the action fails, the owner is
 told why and sends the command again when ready.
+
+One code path: every printer action of the command goes through ``perform(rt, action, sender=...)``, which
+returns ``{"ok", "code", "message"}`` (a Desktop screen or any other program can call it, or the slash command, as
+the local owner). In this order it refuses a run nobody is present for (``Runtime.absent_reason``: cron, kanban
+worker, ``chat -q``, ``-z``, ``--source tool``; even for the owner), a sender the rule does not allow
+(``gates.approval_refusal`` / ``gates.stop_refusal``, the same rules as the agent path), a start / resume / plate
+clear that arrived as a voice message, then runs the safety gate and the action.
 """
 
 from __future__ import annotations
@@ -30,7 +38,8 @@ import uuid
 from typing import Any, Callable, Optional
 
 from .config import LOCAL_SENDER, norm_id, scoped_sender
-from .hooks import TOOL_FOR_ACTION, approve_command, evaluate, is_local_platform, watcher_fresh
+from .gates import TYPED, VOICE, approval_refusal, refusal, stop_refusal
+from .hooks import TOOL_FOR_ACTION, absent_text, approve_command, evaluate, is_local_platform, watcher_fresh
 
 _LOCAL_UID = re.compile(r"^uid:\d+$")
 
@@ -44,6 +53,10 @@ HELP_LINES = (
      "sahibi: tablayı boş işaretle (yarıda kalan baskıdan sonra tablayı da onaylar)"),
     ("approve resume [ack]", "owner: resume a paused print (ack = despite an active printer error)",
      "sahibi: duraklatılan baskıya devam et (ack = yazıcı hatasına rağmen)"),
+    ("stop [reason]", "the owner and known people: stop the running print now",
+     "sahibi ve tanınan kişiler: süren baskıyı hemen durdur"),
+    ("pause [reason]", "the owner and known people: pause the running print (resume needs the owner)",
+     "sahibi ve tanınan kişiler: süren baskıyı duraklat (devam için sahibi gerekir)"),
     ("whoami", "which household person this chat is (and whether it is the owner)",
      "bu sohbet evden kim (sahibi mi)"),
     ("upgrades", "upgrade proposals from repeated hands-on moments",
@@ -80,6 +93,12 @@ _T = {
     "next_job": ("Next workshop job: #{qid} \"{name}\": /home3d approve start {qid}",
                  "Sıradaki atölye işi: #{qid} \"{name}\": /home3d approve start {qid}"),
     "resumed": ("▶️ Resumed \"{name}\".", "▶️ \"{name}\" devam ediyor."),
+    "stopped": ("⏹️ Stopped \"{name}\" ({by}). Check the plate before the next print.",
+                "⏹️ \"{name}\" durduruldu ({by}). Sonraki baskıdan önce tablaya bak."),
+    "paused": ("⏸️ Paused \"{name}\" ({by}). Resume: /home3d approve resume", "⏸️ \"{name}\" duraklatıldı ({by}). "
+               "Devam: /home3d approve resume"),
+    "already_paused": ("⏸️ The print is already paused.", "⏸️ Baskı zaten duraklatılmış."),
+    "nothing_printing": ("Nothing is printing, so no command was sent.", "Şu an baskı yok, komut gönderilmedi."),
     "not_done": ("Not done: {why} Nothing was kept: send the command again when ready.",
                  "Yapılamadı: {why} Onay saklanmadı, hazır olunca komutu tekrar gönder."),
     "unknown": ("Unknown subcommand '{sub}'.", "Bilinmeyen alt komut: '{sub}'."),
@@ -253,6 +272,9 @@ class _Command:
             return format_status(self.tool("home3d_status", {}, session_id), lang)
         if sub in ("approve", "onay", "onayla"):
             return self.approve(rest, source, session_id, platform, lang)
+        if sub in ("stop", "dur", "durdur", "pause", "duraklat"):
+            action = "stop" if sub in ("stop", "dur", "durdur") else "pause"
+            return self.act(action, source, session_id, platform, reason=" ".join(rest)[:200])["message"]
         if sub == "whoami":
             return self.whoami(source, session_id, platform, lang)
         if sub in ("upgrades", "upgrade"):
@@ -261,7 +283,7 @@ class _Command:
             return self.moments(lang)
         return _t("unknown", lang, sub=sub[:30]) + "\n" + help_text(lang)
 
-    # -- approve --
+    # -- approve / stop / pause: all through perform() --
     def approve(self, rest: list[str], source: Any, session_id: str, platform: str, lang: str) -> str:
         what = rest[0] if rest else ""
         flags = {w.lower() for w in rest[1:]}
@@ -269,57 +291,22 @@ class _Command:
             qid = _parse_id(rest[1]) if len(rest) > 1 else None
             if qid is None:
                 return _t("usage_start", lang)
-            jump = bool(flags & {"jump", "--jump", "atla"})
-            action, args = "start", {"queue_item_id": qid, "allow_jump": jump}
-        elif what in ("clear", "plate", "temizle", "tabla"):
-            qid, jump = None, False
-            action, args = "clear_plate", {"action": "confirm"}
-        elif what in ("resume", "devam"):
-            qid, jump = None, False
-            ack = bool(flags & {"ack", "--ack", "onay", "tamam"})
-            action, args = "resume", {"action": "resume", "reason": "owner approved resume", "ack_hms": ack}
-        else:
-            return _t("usage_approve", lang)
-        ok, approver, sender, refusal = authorize_sender(self.rt, source, platform)
-        if not ok:
-            return refusal
-        store, tool = self.rt.store, TOOL_FOR_ACTION[action]
-        command = approve_command(action, qid, jump, ack=bool(args.get("ack_hms")))
-        store.add_event("approval_granted", "", {"action": action, "approver": approver, "sender": sender,
-                                                 "command": command, "session": session_id[:80]})
-        ev = evaluate(self.rt, action, args)  # the same cron check + safety gate as the pre_tool_call hook
-        if not ev.ok:
-            return _t("not_done", lang, why=_sentence(ev.message or ev.reason))
-        # A private session id for this one command: the pass below can only be used by the call made right here,
-        # never by another session (a group chat shares one session id) or by a later call.
-        cmd_sid = f"home3d-approve-{uuid.uuid4().hex}"
-        store.remember_sender(cmd_sid, sender, platform or _src(source, "platform"))
-        store.issue_pass(tool, ev.target, cmd_sid, detail=ev.pass_detail)  # resume ack: the codes shown
-        try:
-            # The handler is called directly, not through ctx.dispatch_tool: Hermes' registry.dispatch skips the
-            # pre_tool_call hooks anyway (v0.22.5), so the owner check above, ``evaluate`` and the single-use pass are
-            # what authorise this call; the handler re-checks its gate and uses the pass.
-            res = self.tool(tool, args, cmd_sid)
-        finally:
-            store.consume_pass(tool, ev.target, cmd_sid)  # nothing lingers, used or not
-            store.forget_sender(cmd_sid)
-        if not res.get("ok"):
-            return _t("not_done", lang, why=_sentence(res.get("message") or res.get("error") or "?"))
-        store.add_event("approval_used", str(res.get("name") or res.get("job") or ""),
-                        {"action": action, "target": ev.target, "approver": approver, "tool": tool})
-        if action == "start":
-            who = f" ({res['requester']})" if res.get("requester") else ""
-            out = _t("started", lang, qid=qid, name=_pretty(str(res.get("name") or f"#{qid}")), who=who)
-            return out if watcher_fresh(store, self.rt.settings) else out + "\n" + _t("no_watcher", lang)
-        if action == "clear_plate":
-            plate = res.get("plate") or {}
-            diff = plate.get("difference_pct")
-            out = _t("cleared", lang, extra=f" ({diff:g}%)" if isinstance(diff, (int, float)) else "")
-            nxt = res.get("next_job") if isinstance(res.get("next_job"), dict) else None
-            if nxt and nxt.get("id"):
-                out += "\n" + _t("next_job", lang, qid=nxt["id"], name=_pretty(str(nxt.get("name") or "")))
-            return out
-        return _t("resumed", lang, name=_pretty(str(res.get("job") or "")))
+            return self.act("start", source, session_id, platform, qid=qid,
+                            jump=bool(flags & {"jump", "--jump", "atla"}))["message"]
+        if what in ("clear", "plate", "temizle", "tabla"):
+            return self.act("clear", source, session_id, platform)["message"]
+        if what in ("resume", "devam"):
+            return self.act("resume", source, session_id, platform,
+                            ack=bool(flags & {"ack", "--ack", "onay", "tamam"}))["message"]
+        return _t("usage_approve", lang)
+
+    def act(self, action: str, source: Any, session_id: str, platform: str, **kw: Any) -> dict:
+        """``perform`` for whoever sent this command (``identify``). A command whose sender's newest message at
+        the gateway was a voice note (Hermes' voice mode hands a transcript on as text) counts as spoken."""
+        sender, label = identify(source, platform)
+        spoken = bool(source is not None and self.rt.spoken_command(_src(source, "user_id")))
+        return perform(self.rt, action, sender=sender, label=label, platform=platform or _src(source, "platform"),
+                       session_id=session_id, spoken=spoken, tool=self.tool, **kw)
 
     # -- info --
     def whoami(self, source: Any, session_id: str, platform: str, lang: str) -> str:
@@ -430,6 +417,140 @@ def _parse_id(value: str) -> Optional[int]:
     return int(v) if v.isdigit() and int(v) > 0 else None
 
 
+ACTIONS = ("start", "clear", "resume", "stop", "pause")
+_APPROVAL = {"start": "start", "clear": "clear_plate", "resume": "resume"}
+
+
+def _result(ok: bool, code: str, message: str, **extra: Any) -> dict:
+    return {"ok": ok, "code": code, "message": message, **extra}
+
+
+def perform(rt, action: str, *, sender: str, label: str = "", platform: str = "", session_id: str = "",
+            qid: Optional[int] = None, jump: bool = False, ack: bool = False, reason: str = "", spoken: bool = False,
+            tool: Optional[Callable[[str, dict, str], dict]] = None) -> dict:
+    """Do one printer action for an actor and say how it went: ``{"ok": bool, "code": str, "message": str}``.
+
+    ``action``: ``start`` (``qid``, ``jump``), ``clear`` (mark the plate clear / confirm it), ``resume`` (``ack``:
+    despite a printer error), ``stop``, ``pause`` (``reason``). ``sender``: the id as the store records it
+    (``identify``; ``config.LOCAL_SENDER`` = the local owner while ``local_is_owner``). ``spoken``: the ask came in
+    as a voice message. ``tool``: how to call a ``home3d_*`` handler (tests and ``/home3d`` reuse their cache).
+
+    ``code`` is ``ok`` or why not: ``usage``, ``unattended``, ``no_identity`` / ``local_off`` / ``not_owner``,
+    ``voice_message``, ``stop_unknown`` / ``stop_owner_only`` / ``stop_unattended``, ``bad_request``,
+    ``printer_unreachable``, ``gate``, ``nothing_printing``, ``failed``. ``message`` is in the household language.
+    Never raises for a refusal; nothing is stored that could authorise a later action."""
+    s = rt.settings
+    lang = s.language
+    action = str(action or "").strip().lower()
+    if action not in ACTIONS:
+        return _result(False, "usage", _t("usage_approve", lang))
+    if tool is None:
+        tool = _Command(rt).tool
+    sender = str(sender or "")
+    if action in ("stop", "pause"):
+        cmd = f"/home3d {action}"
+        actor = rt.actor_for(sender, VOICE if spoken else TYPED)
+        why = stop_refusal(actor, s.stop_policy)
+        if why:
+            return _result(False, why, refusal(why, lang, cmd=cmd, who=actor.label(lang)))
+        return _run(rt, "home3d_stop", {"action": action, "reason": reason or f"{action} by command"}, sender,
+                    platform, tool, action, lang)
+    gated = _APPROVAL[action]
+    if action == "start" and qid is None:
+        return _result(False, "usage", _t("usage_start", lang))
+    command = approve_command(gated, qid, jump, ack=ack)
+    tool_name = TOOL_FOR_ACTION[gated]
+    absent = absent_text(rt, tool_name, command)  # 1. nobody present (cron, kanban, -q, -z, tool): even the owner
+    if absent:
+        return _result(False, "unattended", _t("not_done", lang, why=_sentence(
+            refusal("unattended", lang, cmd=command) if lang == "tr" else absent)))
+    actor = rt.actor_for(sender, VOICE if spoken else TYPED)
+    why = approval_refusal(actor)  # 2. the same rule as the agent path (hooks.pre_tool_call)
+    if why == "unattended":  # the presence answer changed meanwhile: still refused
+        return _result(False, why, refusal(why, lang, cmd=command))
+    if why in ("no_identity", "not_owner", "local_off"):
+        if why == "local_off":
+            text = _t("local_off", lang)
+        elif sender:
+            text = _t("not_owner", lang, who=(s.person_for(sender).name if s.person_for(sender) else
+                                              (label or sender)))
+        else:
+            text = _t("not_owner", lang, who=label) if label else _t("no_user", lang)
+        return _result(False, why, text)
+    if why:  # voice_message, or a rule this code does not know: refused
+        return _result(False, why, refusal(why, lang, cmd=command, who=actor.label(lang)))
+    store = rt.store
+    approver = f"{s.owner_name} (local)" if sender == LOCAL_SENDER else actor.name
+    if gated == "start":
+        args: dict = {"queue_item_id": qid, "allow_jump": bool(jump)}
+    elif gated == "clear_plate":
+        args = {"action": "confirm"}
+    else:
+        args = {"action": "resume", "reason": "owner approved resume", "ack_hms": bool(ack)}
+    store.add_event("approval_granted", "", {"action": gated, "approver": approver, "sender": sender,
+                                             "command": command, "session": str(session_id or "")[:80]})
+    ev = evaluate(rt, gated, args)  # 3. the same presence check + safety gate as the pre_tool_call hook
+    if not ev.ok:
+        return _result(False, ev.code or "gate", _t("not_done", lang, why=_sentence(ev.message or ev.reason)))
+    # A private session id for this one command: the pass below can only be used by the call made right here,
+    # never by another session (a group chat shares one session id) or by a later call.
+    cmd_sid = f"home3d-approve-{uuid.uuid4().hex}"
+    store.remember_sender(cmd_sid, sender, platform)
+    store.issue_pass(tool_name, ev.target, cmd_sid, detail=ev.pass_detail)  # resume ack: the codes shown
+    try:
+        # The handler is called directly, not through ctx.dispatch_tool: Hermes' registry.dispatch skips the
+        # pre_tool_call hooks anyway (v0.22.5), so the owner check above, ``evaluate`` and the single-use pass are
+        # what authorise this call; the handler re-checks its gate and uses the pass.
+        res = tool(tool_name, args, cmd_sid)
+    finally:
+        store.consume_pass(tool_name, ev.target, cmd_sid)  # nothing lingers, used or not
+        store.forget_sender(cmd_sid)
+    if not res.get("ok"):
+        return _result(False, "failed", _t("not_done", lang, why=_sentence(res.get("message") or res.get("error")
+                                                                           or "?")), result=res)
+    store.add_event("approval_used", str(res.get("name") or res.get("job") or ""),
+                    {"action": gated, "target": ev.target, "approver": approver, "tool": tool_name})
+    if gated == "start":
+        who = f" ({res['requester']})" if res.get("requester") else ""
+        out = _t("started", lang, qid=qid, name=_pretty(str(res.get("name") or f"#{qid}")), who=who)
+        out = out if watcher_fresh(store, s) else out + "\n" + _t("no_watcher", lang)
+    elif gated == "clear_plate":
+        plate = res.get("plate") or {}
+        diff = plate.get("difference_pct")
+        out = _t("cleared", lang, extra=f" ({diff:g}%)" if isinstance(diff, (int, float)) else "")
+        nxt = res.get("next_job") if isinstance(res.get("next_job"), dict) else None
+        if nxt and nxt.get("id"):
+            out += "\n" + _t("next_job", lang, qid=nxt["id"], name=_pretty(str(nxt.get("name") or "")))
+    else:
+        out = _t("resumed", lang, name=_pretty(str(res.get("job") or "")))
+    return _result(True, "ok", out, result=res)
+
+
+def _run(rt, tool_name: str, args: dict, sender: str, platform: str, tool: Callable[[str, dict, str], dict],
+         action: str, lang: str) -> dict:
+    """Stop or pause through the ``home3d_stop`` handler, as ``sender`` (a private session id for this one call, so
+    the handler records who really did it and re-checks ``stop_policy`` itself)."""
+    store = rt.store
+    cmd_sid = f"home3d-cmd-{uuid.uuid4().hex}"
+    store.remember_sender(cmd_sid, sender, platform)
+    try:
+        res = tool(tool_name, args, cmd_sid)
+    finally:
+        store.forget_sender(cmd_sid)
+    if not res.get("ok"):
+        code = str(res.get("code") or ("nothing_printing" if "nothing is printing" in str(res.get("error"))
+                                       else "failed"))
+        if code == "nothing_printing":
+            return _result(False, code, _t("nothing_printing", lang), result=res)
+        return _result(False, code, str(res.get("message") or "") or
+                       _t("not_done", lang, why=_sentence(res.get("error") or "?")), result=res)
+    name = _pretty(str(res.get("job") or ""))
+    if action == "pause" and res.get("note") == "already paused":
+        return _result(True, "ok", _t("already_paused", lang), result=res)
+    return _result(True, "ok", _t("stopped" if action == "stop" else "paused", lang, name=name,
+                                  by=str(res.get("by") or "?")), result=res)
+
+
 def make_command(rt) -> Callable[..., str]:
     """``handler(raw_args, source=None, session_id=None, platform=None) -> str`` for ``/home3d``."""
     cmd = _Command(rt)
@@ -441,4 +562,4 @@ def make_command(rt) -> Callable[..., str]:
     return home3d
 
 
-__all__ = ["make_command", "authorize", "authorize_sender", "identify", "format_status", "help_text", "HELP_LINES"]
+__all__ = ["make_command", "perform", "ACTIONS", "authorize", "authorize_sender", "identify", "format_status", "help_text", "HELP_LINES"]

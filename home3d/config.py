@@ -35,6 +35,9 @@ SOURCE_CONFIG, SOURCE_SNAPSHOT, SOURCE_DEFAULTS = "config.yaml", "snapshot", "de
 # is ``local_is_owner``. A messaging user whose id happens to be "local" is never recorded as this value (hooks.py).
 LOCAL_SENDER = "local"
 INJECT_MODES = ("auto", "always", "never")
+# Who may stop or pause a print (``stop_policy``): known = the owner and the listed people (default), anyone = no
+# identity check, owner = the owner only. An unreadable value counts as "known".
+STOP_POLICIES = ("known", "anyone", "owner")
 # Hermes platforms whose user id the sender chooses freely (an IRC nick, an ntfy topic). A sender from there is
 # recorded as "<platform>:<id>" (``scoped_sender``), so only a household entry written the same way ("irc:<nick>")
 # matches it: a bare id (e.g. the owner's Slack or WhatsApp id) never makes an IRC user the owner.
@@ -118,6 +121,8 @@ class Settings:
     watch_interval: str = "2m"
     local_is_owner: bool = True  # a local CLI/TUI/desktop session is the owner
     inject_context: str = "auto"  # auto | always | never (pre_llm_call context)
+    stop_policy: str = "known"  # known | anyone | owner: who may stop or pause a print (STOP_POLICIES)
+    allow_guests: bool = False  # senders who are not in the list may prepare prints (import, slice, queue ...)
 
     # ---- derived helpers -------------------------------------------------------------------
     @property
@@ -221,6 +226,9 @@ def _build(values: Mapping[str, Any]) -> Settings:
     base.inject_context = str(base.inject_context or "").strip().lower()
     if base.inject_context not in INJECT_MODES:
         base.inject_context = "auto"
+    base.stop_policy = str(base.stop_policy or "").strip().lower()
+    if base.stop_policy not in STOP_POLICIES:
+        base.stop_policy = "known"
     return base
 
 
