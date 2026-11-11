@@ -2,6 +2,7 @@
 // printing, the plugin's real screen (the same hand-off three times, then the upgrade it proposed), a real photo of
 // that upgrade printed, and real footage of the printer pushing parts off its plate into the box, with the owner's
 // one line.
+import type { ReactNode } from "react";
 import { AbsoluteFill, Sequence, Video, interpolate, staticFile, useCurrentFrame } from "raea";
 import { Bubble, F, FONTS, INOUT, Label, OUT, P, Photo, Screen, Words, clamp, ramp } from "../kit";
 
@@ -126,39 +127,49 @@ function Printed() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// 4. "it fell in by itself": real footage of the printer at home. The head pushes the cooled parts forward on the
-//    tilted plate; then the box under the shelf, with the parts in it. The owner's line is the picture's title.
+// 4. "it fell in by itself": real footage of the printer at home, as two upright panels (the phone's own shape).
+//    First the head pushing the cooled parts forward on the tilted plate; then, beside it, the box under the shelf
+//    with the parts in it and the printer's own name plate. The owner's line is the picture's title.
 // ---------------------------------------------------------------------------------------------------------------
 const T_BUBBLE = 12; // the footage is seen first, then the owner's line lands beside it
-const T_BOX = 72; // the footage cuts from the push to the box
-const PANEL = { left: 1262, top: 66, width: 526, height: 948 }; // the footage is a phone's upright frame (480 x 864)
+const T_PANEL2 = 58; // the second panel arrives
+const PANEL = { top: 150, width: 408, height: 734, gap: 26, left: 1034 }; // 480 x 864 footage, shown a little smaller
 
 function Clip({ file, startFrom, frames, zoom, origin }: { file: string; startFrom: number; frames: number; zoom: [number, number]; origin: string }) {
   const f = useCurrentFrame();
-  // a slow push-in inside the panel, so the cut joins motion to motion
+  // a slow push-in inside the panel, so nothing in the beat is still
   const k = interpolate(f, [0, frames], zoom, clamp);
   return <Video src={staticFile(file)} muted startFrom={startFrom} style={{ position: "absolute", left: 0, top: 0, width: PANEL.width, height: PANEL.height, objectFit: "cover", transform: `scale(${k})`, transformOrigin: origin }} />;
 }
 
-function Fell() {
+function Panel({ i, at, children }: { i: 0 | 1; at: number; children: ReactNode }) {
   const f = useCurrentFrame();
-  const inn = ramp(f, 0, 12, OUT);
+  const inn = ramp(f, at, at + 14, OUT);
+  return (
+    <div style={{ position: "absolute", left: PANEL.left + i * (PANEL.width + PANEL.gap), top: PANEL.top + (1 - inn) * 46, width: PANEL.width, height: PANEL.height, borderRadius: 26, overflow: "hidden", background: "#000", opacity: inn }}>
+      {children}
+    </div>
+  );
+}
+
+function Fell() {
+  const beat = DURATION - T_EMPTY;
   return (
     <AbsoluteFill style={{ background: P.ink }}>
-      <div style={{ position: "absolute", left: PANEL.left, top: PANEL.top + (1 - inn) * 40, width: PANEL.width, height: PANEL.height, borderRadius: 30, overflow: "hidden", background: "#000", opacity: inn }}>
-        <Sequence from={0} durationInFrames={T_BOX} layout="none">
-          {/* closer on the bed and the box under it: the parts are small */}
-          <Clip file="footage/real-push.mp4" startFrom={58} frames={T_BOX} zoom={[1.45, 1.58]} origin="40% 40%" />
+      <Panel i={0} at={0}>
+        {/* closer on the bed: the parts are small */}
+        <Clip file="footage/real-push.mp4" startFrom={46} frames={beat} zoom={[1.5, 1.66]} origin="40% 36%" />
+      </Panel>
+      <Panel i={1} at={T_PANEL2}>
+        <Sequence from={T_PANEL2} layout="none">
+          <Clip file="footage/real-sign.mp4" startFrom={4} frames={beat - T_PANEL2} zoom={[1.02, 1.1]} origin="55% 45%" />
         </Sequence>
-        <Sequence from={T_BOX} layout="none">
-          <Clip file="footage/real-box.mp4" startFrom={14} frames={DURATION - T_EMPTY - T_BOX} zoom={[1.03, 1.1]} origin="50% 55%" />
-        </Sequence>
+      </Panel>
+      <div style={{ position: "absolute", left: 150, top: 318 }}>
+        <Bubble text="it fell in by itself" who="The owner" color={P.blue} at={T_BUBBLE} size={92} width={840} />
       </div>
-      <div style={{ position: "absolute", left: 150, top: 300 }}>
-        <Bubble text="it fell in by itself" who="The owner" color={P.blue} at={T_BUBBLE} size={104} width={1060} />
-      </div>
-      <div style={{ position: "absolute", left: 150, top: 610, width: 1040 }}>
-        <Words text="Now it clears its own plate." at={T_BOX + 2} each={3} size={96} />
+      <div style={{ position: "absolute", left: 150, top: 606, width: 840 }}>
+        <Words text="Now it clears its own plate." at={T_PANEL2 + 8} each={3} size={88} />
       </div>
       <Label kind="footage" style={TOP_LEFT} />
     </AbsoluteFill>

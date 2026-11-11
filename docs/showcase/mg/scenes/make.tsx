@@ -1,10 +1,10 @@
 // make (345 frames): the agent does the work, so nobody needs to know how a 3D printer is used. Four of the
 // plugin's tools, one at a time on the left. On the right: three models it found, and the one Mum picks; that one on
-// a tile of the build plate, made hers (her name, in red); its 21 layers lifted apart; and the blue note it waits
-// under. The lifted layers are the scene's one bold moment.
+// a tile of the build plate, made hers (her name, in red); its 21 layers lifted apart; and her yes, which starts
+// the print. The lifted layers are the scene's one bold moment.
 import type { ReactNode } from "react";
 import { AbsoluteFill, useCurrentFrame } from "raea";
-import { Bubble, F, IN, INOUT, Iso, Line, OUT, P, Stage, T, Wipe, keys, plateSlabs, pop, project, ramp, tagSlabs, type View } from "../kit";
+import { Bubble, F, IN, INOUT, Iso, Line, OUT, P, Stage, T, Wipe, keys, plateSlabs, project, ramp, tagSlabs, type View } from "../kit";
 
 export const DURATION = 345;
 
@@ -12,7 +12,7 @@ const STEPS = [
   { at: 6, tool: "home3d_find_models", lines: ["Finds models online", "and shows the options."] },
   { at: 96, tool: "home3d_customize", lines: ["Makes it hers:", "her name, in red."] },
   { at: 170, tool: "home3d_slice", lines: ["21 layers, 13 minutes,", "4 g of PLA"] },
-  { at: 255, tool: "home3d_queue", lines: ["Six safety checks,", "then the owner's OK."] },
+  { at: 255, tool: "home3d_queue", lines: ["Six safety checks.", "She says yes, it prints."] },
 ] as const;
 
 const COL = { left: 120, top: 410, width: 760 };
@@ -137,11 +137,8 @@ export default function Make() {
   const plate = plateSlabs({ size: 440, grid: 110, shadow: landed > 0.05 ? { x: 10, y: 12, w: 246, h: 110, o: 0.34 * landed } : undefined });
   const tag = (c: { top: string; side: string; dark: string }, id: string) => (printed > 0 ? tagSlabs({ printed, spread, top: c.top, side: c.side, dark: c.dark, id }) : []);
 
-  // queue: a blue note over the part, on a short stem
-  const noteK = pop(f, 267, 13);
+  // queue: Mum's yes lands over the part
   const [nx, ny] = project(view, 0, 0, 44);
-  const NOTE_W = 560;
-  const stem = 96 * ramp(f, 265, 275, OUT);
 
   return (
     <Stage frames={DURATION} drift={0.02}>
@@ -172,10 +169,9 @@ export default function Make() {
         </>
       )}
 
-      {/* the note */}
-      <div style={{ position: "absolute", left: nx - 2, top: ny - stem, width: 4, height: stem, background: P.blue, opacity: stem > 0 ? 1 : 0 }} />
-      <div style={{ position: "absolute", left: nx - NOTE_W / 2, top: ny - 96 - 84, width: NOTE_W, height: 84, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 22, background: P.blue, color: "#FFFFFF", fontFamily: F.text, fontWeight: 700, fontSize: 40, lineHeight: 1, whiteSpace: "nowrap", transform: `scale(${Math.max(0.001, noteK)})`, transformOrigin: "50% 100%", opacity: noteK > 0 ? 1 : 0 }}>
-        Waiting for the owner's OK
+      {/* her yes */}
+      <div style={{ position: "absolute", left: nx - 250, top: ny - 300, width: 520 }}>
+        <Bubble text="Yes, print it." who="Mum" group="Family" at={267} size={60} width={520} />
       </div>
 
       {/* the tools, one at a time */}

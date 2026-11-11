@@ -204,11 +204,12 @@ const POPS: Array<[number, string]> = [
   ...([[0.3, "E5"], [3.25, "A4"], [43.45, "A4"], [60.12, "E5"], [61.02, "A4"], [65.35, "C5"]] as Array<[number, string]>).map(([t, n]) => [re(t), n] as [number, string]),
   [12.8, "E5"], // Mum picks the second one
   [19.9, "A4"], // the blue note
+  [38.97, "A4"], // Mıstık tells Mum the print has started
   [61.73, "E5"], // the owner's line
 ];
 POPS.sort((x, y) => x[0] - y[0]);
 /** a small thing arriving: a tool's name, a mark, a counted number */
-const TICKS = [...[51.87, 52.03, 52.2, 64.35, 64.62, 64.88, 70.67].map(re), 11.2, 13.2, 14.2, 16.67, 19.5].sort((x, y) => x - y);
+const TICKS = [...[51.87, 52.03, 52.2, 64.35, 64.62, 64.88, 70.67].map(re), 11.2, 13.2, 14.2, 16.67, 19.5, 63.27].sort((x, y) => x - y);
 /** air before a colour takes the frame: [start, length] */
 const AIRS: Array<[number, number]> = ([[5.85, 0.6], [10.5, 0.45], [18.0, 0.45], [32.7, 0.45], [59.4, 0.55]] as Array<[number, number]>).map(([t, d]) => [re(t), d] as [number, number]);
 const PRESS = re(25.5);

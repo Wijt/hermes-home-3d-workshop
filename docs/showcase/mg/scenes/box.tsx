@@ -119,8 +119,8 @@ export default function Box() {
       </Iso>
 
       {/* Mıstık tells the chat */}
-      <div style={{ position: "absolute", right: 80, top: 128, width: 720 }}>
-        <Bubble text="Mum, your key tag is in the box." who="Mıstık" group="Family" color={P.bone} ink={P.ink} side="right" at={T_BUBBLE} out={T_BUBBLE_OUT} size={60} width={720} />
+      <div style={{ position: "absolute", right: 80, top: 128, width: 840 }}>
+        <Bubble text="Mum, your key tag is done. Take it from the box." who="Mıstık" group="Family" color={P.bone} ink={P.ink} side="right" at={T_BUBBLE} out={T_BUBBLE_OUT} size={56} width={840} />
       </div>
       <Label kind="chat" at={T_BUBBLE + 8} out={T_BUBBLE_OUT} style={{ left: "auto", right: 80, bottom: "auto", top: 414 }} />
 

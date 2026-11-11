@@ -32,7 +32,7 @@ tools/build_film.sh sound                               # only the sound again, 
 ```
 
 The captures in `media/screen/` (`backroom.mp4`, `watch.mp4`, `twist.png`), the photos in `media/real/` and the
-two clips of real footage in `media/footage/` (`real-push.mp4`, `real-box.mp4`: 480 x 864, 30 fps, encoded
+two clips of real footage in `media/footage/` (`real-push.mp4`, `real-sign.mp4`: 480 x 864, 30 fps, encoded
 without B-frames, which raea needs) are git-ignored, as for the first cut. The film needs them; it does not need
 `media/manifest.json`.
 
@@ -40,8 +40,8 @@ What is real and what is drawn: the chat is re-created and labelled; the key tag
 drawings, and so are the three model cards; the Workshop screen is a real capture of the plugin on its simulated
 printer and is labelled; the photos are from the real printer's camera and the footage was filmed at home, and
 both are labelled. The numbers on screen are read off the capture
-(58 x 24 x 4.2 mm, 21 layers, 13 minutes, 4 g of PLA) or off the plugin (14 tools, 4 hooks, 0 model calls in the
-watcher). The line "it fell in by itself" is the owner's own, from the story in the main README.
+(58 x 24 x 4.2 mm, 21 layers, 13 minutes, 4 g of PLA) or off the plugin (14 tools, 4 hooks, one screen). The
+chat lines follow the plugin's own notices (started, done). The line "it fell in by itself" is the owner's own, from the story in the main README.
 
 ## The first cut
 

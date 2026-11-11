@@ -7,7 +7,7 @@ export const DURATION = 270;
 
 // ---- first half: the two chats (frame px, once the chats have made room for the words) ----
 const FAM = { text: "A key tag, red please.", left: 150, top: 134, width: 1000, size: 72 };
-const LAB = { text: "A phone stand for the bench.", left: 570, top: 336, width: 1200, size: 72 };
+const LAB = { text: "A cable clip for the garage?", left: 570, top: 336, width: 1200, size: 72 };
 // the middle of the two bubbles together, at rest, and where that middle sits while they are the whole picture
 const PAIR = { x: 960, y: 342 };
 const OPEN = { y: 512, k: 1.06 };
@@ -27,7 +27,7 @@ const NUMS = [
   { to: 14, label: "tools", count: 20 },
   { to: 4, label: "hooks", count: 16 },
   { to: 1, label: "screen in Hermes Desktop", count: 12 },
-  { to: 0, label: "model calls to watch a print", count: 0 },
+  { to: 0, label: "slicers opened", count: 0 },
 ];
 const ROW = { left: 150, top: 168, col: 405, step: 124, rule: 361 };
 const T_NUM = 128; // the first number; the next two follow 8 frames apart
@@ -90,12 +90,12 @@ export default function Groups() {
               <Bubble text={FAM.text} who="Mum" group="Family" color={P.red} at={T_FAM} out={OUT_FAM} size={FAM.size} width={FAM.width} />
             </div>
             <div style={{ position: "absolute", left: LAB.left, top: LAB.top, width: LAB.width, transform: `translateX(${labX}px)`, opacity: 1 }}>
-              <Bubble text={LAB.text} who="Engineer" group="Lab" color={P.blue} side="right" at={T_LAB} out={OUT_LAB} size={LAB.size} width={LAB.width} />
+              <Bubble text={LAB.text} who="Dad" group="Family" color={P.red} side="right" at={T_LAB} out={OUT_LAB} size={LAB.size} width={LAB.width} />
             </div>
           </AbsoluteFill>
           <div style={{ position: "absolute", left: 150, top: 606, display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-            <Words text="One printer." at={T_WORDS} each={3} out={OUT_WORDS} size={T.display} />
-            <Words text="Every group chat." at={T_WORDS + 6} each={3} out={OUT_WORDS} size={T.display} />
+            <Words text="One of the family." at={T_WORDS} each={3} out={OUT_WORDS} size={T.display} />
+            <Words text="It knows who asked." at={T_WORDS + 6} each={3} out={OUT_WORDS} size={T.display} />
           </div>
           <Label kind="chat" at={12} out={OUT_FAM} style={{ left: "auto", right: 80, bottom: "auto", top: 130 }} />
         </>

@@ -183,6 +183,24 @@ and the simulated printer and the done box followed each time. Messages, the don
 showed the plugin's own data. The screenshots come from that run. It has not yet been run in the Hermes
 Desktop app itself, or against a real printer.
 
+### Next in Hermes Desktop
+
+The Workshop screen is the first half of the Desktop side. The plan is that the owner never has to leave
+Hermes Desktop to see or decide anything about a request:
+
+- **In the chat itself:** the models the agent found, side by side and turnable in 3D, with "pick this
+  one"; the sliced plate (supports, layers, time, grams) as a card; the camera picture as a card. Today
+  only a part made with `home3d_design` gets an inline 3D card.
+- **A request inbox:** each request with its stage (asked, options found, picked, customised, sliced,
+  printing, in the box) and whether it is waiting for anybody.
+- **Why it is asking:** when a rule sends a job to the owner (for example, more support than the owner
+  allows), the card shows the rule and the picture that triggered it, and the owner can change the rule
+  there.
+- **Indicators:** a count of things that need the owner on the sidebar entry, next to the status-bar chip
+  that exists today.
+
+None of this is built yet.
+
 ## Groups
 
 By default the plugin serves one household: `household` names the people, `family_target` is their chat.

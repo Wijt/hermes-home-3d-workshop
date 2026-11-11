@@ -83,13 +83,15 @@ cut is `out/fallback-final.mp4`.
    - Pull request: https://github.com/NousResearch/hermes-agent/pull/153024
    - A description that fits (it says only what the README's status table supports):
 
-     > Ask. It's in the box. The plugin makes a 3D printer a member of the group chat. People in a family
-     > or team chat ask in plain words, often by voice note. The agent finds a model or designs the part in
-     > OpenSCAD, slices it and queues it. A print starts only with the owner's typed approval. A watcher
-     > that spends no model calls follows the print, and the person who asked gets a line with a photo in
-     > the chat the request came from. The owner gets one Workshop screen in Hermes Desktop: the part in
-     > 3D on the build plate, a safety checklist, Start, Pause and Stop, the queue, the done box, messages,
-     > filament and a setup check. It works with a Bambu Lab printer through Bambuddy, or with the built-in
-     > simulated printer (`hermes home3d demo`).
+     > Ask. It's in the box. With this plugin a 3D printer becomes one of the family. Anyone in the group
+     > chat asks in plain words, often by voice note, and nobody opens a slicer. Mıstık finds models and
+     > shows the options, customises one or designs the part in OpenSCAD, slices it and queues it, then
+     > tells the person who asked, by name, when it starts and when it is in the box. The owner is the
+     > technical contact: he hears about failures and sets the rules, including who may start a print
+     > (himself only by default, or the people in the household list for their own jobs). In Hermes
+     > Desktop one Workshop screen shows it all: the part in 3D on the build plate, the slice facts, a
+     > safety checklist, Start, Pause and Stop, the queue, the done box, messages, filament and a setup
+     > check. It works with a Bambu Lab printer through Bambuddy, or with the built-in simulated printer
+     > (`hermes home3d demo`).
 
 3. **Add the X link** as a comment on that pull request.

@@ -4,7 +4,7 @@
 // plate. It ends close on the finished tag (END_VIEW), which is the picture "box" starts on.
 import type { ReactNode } from "react";
 import { AbsoluteFill, useCurrentFrame } from "raea";
-import { Chip, F, FONTS, IN, INOUT, Iso, Label, Line, Nozzle, OUT, P, Screen, Stage, T, Words, nozzleAt, plateSlabs, pop, project, ramp, tagSlabs, tween, type CamKey, type View } from "../kit";
+import { Bubble, Chip, F, FONTS, IN, INOUT, Iso, Label, Line, Nozzle, OUT, P, Screen, Stage, T, Words, nozzleAt, plateSlabs, pop, project, ramp, tagSlabs, tween, type CamKey, type View } from "../kit";
 
 export const DURATION = 300;
 const LAST = DURATION - 1;
@@ -182,14 +182,19 @@ export default function Print() {
           </div>
 
           {/* the second read */}
-          <div style={{ position: "absolute", left: COL, top: 584, display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-            <Words text="0 model calls" at={T_WORDS} each={3} out={T_PUSH} size={104} />
-            <Words text="while it prints." at={T_WORDS + 7} each={3} out={T_PUSH + 2} size={104} />
-            <Line at={T_LINE} out={T_PUSH + 4} size={T.body} weight={500} color={P.mist} style={{ marginTop: 30, marginLeft: 4 }}>
-              <span style={{ display: "block", whiteSpace: "nowrap" }}>A scheduled job checks the printer.</span>
-              <span style={{ display: "block", whiteSpace: "nowrap" }}>If something is off, it tells the owner.</span>
+          <div style={{ position: "absolute", left: COL, top: 548, display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+            <Words text="Mıstık keeps watch." at={T_WORDS} each={3} out={T_PUSH} size={88} />
+            {/* what it says in the family chat while it watches */}
+            <div style={{ marginTop: 16 }}>
+              <Bubble text="Mum, your key tag has started printing. About 13 minutes to go." who="Mıstık" group="Family" color={P.bone} ink={P.ink} at={T_LINE - 4} out={T_PUSH + 2} size={44} width={790} />
+            </div>
+            <Line at={T_LINE + 14} out={T_PUSH + 4} size={40} weight={500} color={P.mist} style={{ marginTop: 14, marginLeft: 4 }}>
+              <span style={{ display: "block", whiteSpace: "nowrap" }}>If something goes wrong,</span>
+              <span style={{ display: "block", whiteSpace: "nowrap" }}>it tells the chat and the owner.</span>
             </Line>
           </div>
+
+          <Label kind="chat" at={T_LINE + 4} out={T_PUSH} style={{ left: "auto", right: 64, bottom: "auto", top: 124 }} />
 
           {/* done */}
           <div style={{ position: "absolute", left: chipX - 300, top: chipY - 46 - CHIP_H, width: 600, display: "flex", flexDirection: "row", justifyContent: "center" }}>

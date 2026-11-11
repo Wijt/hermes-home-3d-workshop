@@ -167,3 +167,14 @@ Everything is on screen by frame 100 and holds to the end.
 - **Real footage.** The last beat of `twist` (now 120 frames; the scene is 370) is a phone clip of the printer at
   home pushing parts off its plate, then the box with the parts in it, beside the owner's line and "Now it clears
   its own plate." The scene table's frame counts above are the first cut's: `make` 345, `twist` 370, film 2530.
+- **Third cut (the owner's notes).** The film no longer talks about model calls. In `print` the second read is
+  "Mıstık keeps watch.", Mıstık's message to the family ("Mum, your key tag has started printing. About 13 minutes
+  to go.") and "If something goes wrong, it tells the chat and the owner."; the bubble in `box` is the plugin's
+  finish notice, shortened ("Mum, your key tag is done. Take it from the box."); the fourth number in `groups` is
+  0 "slicers opened". The footage beat is two upright panels (the push; then the box with the printer's name
+  plate), cut so that no hand is in the picture.
+- **Final cut (the owner's vision).** The owner's approval is out of the film. In `make` the last step reads
+  "Six safety checks. She says yes, it prints." and Mum's bubble "Yes, print it." replaces the blue note (this is
+  the plugin with `start_policy: known`; the default still asks the owner). The bars in `approve` are "It is all in
+  Hermes Desktop." and "Start from the chat, or here." In `groups` the two messages are Mum's and Dad's, and the
+  words are "One of the family. It knows who asked."
