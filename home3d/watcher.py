@@ -552,6 +552,11 @@ class _Pass:
             if photo is not None:
                 self.w["photo_for_job"], self.w["photo_path"] = job, str(photo)
         paused = False
+        if prev == PAUSE and st.state in (RUNNING, FINISH) and not first:
+            try:  # it runs again: the filament swap that held it is done
+                self.store.resolve_human_needed(("filament_swap",), "the print resumed", job_name=job or None)
+            except Exception as exc:
+                _log(f"resolve_human_needed failed: {exc}")
         if st.state == PAUSE and prev != PAUSE:
             paused = True
             h = blocking[0] if blocking else None
@@ -658,9 +663,11 @@ class _Pass:
                 self._job_state(jobrow, "cleared", "ejected")
                 self._note("finished_ejected", job, ctx, family=family, owner_media=self._snapshot(),
                            family_media=part, **payload)
+                self._done_part(jobrow, job, ctx, "pushed_off", part)
             elif new.eject_planned and "plate_not_clear" not in ev:
                 # family hears the eject outcome; the owner sees what the camera sees now (or the last layers)
                 self._note("finished", job, ctx, owner_media=(self._fresh if pushed else None) or part, **payload)
+                self._done_part(jobrow, job, ctx, "unknown", part)  # the camera's look decides
             elif jobrow is None:
                 # not a workshop job (or nobody knows whose): its eject plan is unknown, so no "take it off" order
                 # and no remove_part moment without evidence; the camera's look at FINISH decides the wording
@@ -673,22 +680,54 @@ class _Pass:
                 self._note("finished", job, ctx, family=family, owner_media=part, family_media=part,
                            human="remove_part" if "plate_not_clear" in ev else "",
                            detail="no auto-eject planned", **payload)
+                self._done_part(jobrow, job, ctx, "on_plate", part)
             return
         if "plate_clear" in ev:
             self._job_state(jobrow, "cleared", "ejected" if prev.phase in _EJECT_FLOW else "removed")
             if prev.phase in _EJECT_FLOW:
+                part = self._part_photo(job, take=False)
                 self._note("finished_ejected", job, ctx, family=family, owner_media=self._snapshot(),
-                           family_media=self._part_photo(job, take=False), **payload)
+                           family_media=part, **payload)
+                self._done_part(jobrow, job, ctx, "pushed_off", part)
             else:
+                self._plate_emptied()
                 photo = self._snapshot()
                 ctx.update(photo=photo is not None, confirm_first=self._confirm_first(st))
                 self._note("plate_clear", job, ctx, owner_media=photo, **payload)
         if "plate_not_clear" in ev:
             self._note("plate_not_clear", job, ctx, family=family, owner_media=self._snapshot(),
                        human="remove_part", detail=new.reason, **payload)
+            self._done_part(jobrow, job, ctx, "on_plate")
         if "eject_unverified" in ev:
             self._note("eject_unverified", job, ctx, family=family, owner_media=self._snapshot(),
                        human="camera_check", detail=new.reason, **payload)
+
+    def _done_part(self, jobrow: Optional[dict], job: str, ctx: dict, left_plate: str,
+                   photo: Optional[Path] = None) -> None:
+        """Record a workshop job's finished part in the done box (who it is for, the group told, the photo, how it
+        left the plate). Prints that are not workshop jobs are not recorded. Never raises."""
+        if not jobrow or jobrow.get("queue_item_id") is None:
+            return
+        route = ctx.get(ROUTE_KEY)
+        try:
+            self.store.record_done_part(int(jobrow["queue_item_id"]), job_name=pretty_job(job),
+                                        title=str(ctx.get("family_job") or pretty_job(job)),
+                                        requester=str(jobrow.get("requester") or ""),
+                                        group=route.group if isinstance(route, notify.Route) else "",
+                                        photo=str(photo or ""), left_plate=left_plate,
+                                        request_id=jobrow.get("request_id"))
+        except Exception as exc:
+            _log(f"record_done_part failed: {exc}")
+
+    def _plate_emptied(self) -> None:
+        """The camera saw the plate empty after a part waited on it: a person took it off (done box, open
+        human-needed moments about the plate)."""
+        try:
+            self.store.plate_emptied()
+            self.store.resolve_human_needed(("remove_part", "camera_check", "failure_check"),
+                                            "the camera saw the plate empty")
+        except Exception as exc:
+            _log(f"plate_emptied failed: {exc}")
 
     def _known_foreign(self, job: str) -> bool:
         """This print was decided "not ours" when it started (``job_memo`` with no queue id)."""
@@ -954,6 +993,7 @@ class _Pass:
             self._job_state(job, "finished", "finished (the watcher did not see the end)")
             self._note("finished", name, ctx, family=family, owner_media=photo, family_media=photo,
                        queue_item_id=int(item.id), missed_end=ctx["missed_end"])
+            self._done_part(job, name, ctx, "unknown", photo)  # nobody saw how it left the plate
         else:
             self._job_state(job, "failed", "failed in the printer queue (the watcher did not see the end)")
             if idle:

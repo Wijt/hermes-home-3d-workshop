@@ -108,6 +108,21 @@ config_schema:
     default: ""
     label: Profile that owns the messaging adapters
     description: "Hermes profile used for 'hermes send' (e.g. 'default' on a multi-profile gateway). Empty = current."
+  groups:
+    type: list
+    default: []
+    label: Groups the workshop serves
+    description: 'List of {"name": "Lab", "target": "telegram:<group>", "language": "en", "tone": "team", "members": ["<sender id>"]}. A request belongs to the group whose target is the chat it came from, else the group listing its sender, else family_target (household members). Notices about a job go to its group in that group''s language; tone "team" is plain neutral wording, "family" the warm one. A requester in no group and not in the household is not announced; the owner is told. Empty = family_target as before.'
+  send_timeout_s:
+    type: float
+    default: 20.0
+    label: Seconds one notice send may take
+    description: "One 'hermes send' is stopped after this long (1-120 s); a failed notice is retried on a later watcher pass."
+  send_budget_s:
+    type: float
+    default: 45.0
+    label: Seconds one watcher pass may spend sending
+    description: "All notice sends of one watcher pass together; what does not fit goes out on the next pass."
   autoeject_printer_preset:
     type: str
     default: ""

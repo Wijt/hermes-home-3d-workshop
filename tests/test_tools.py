@@ -1003,3 +1003,11 @@ def test_design_is_not_gated_and_its_audit_never_stores_the_code(rt, monkeypatch
                         result=json.dumps({"ok": True, "name": "pen-cup", "version": 1}), session_id="s-mum")
     events = [e for e in rt.store.events(limit=20) if e.get("kind") == "tool"]
     assert events and "x" * 50 not in json.dumps(events)
+
+
+def test_a_queued_job_keeps_where_it_was_asked_from(rt):
+    """Delivery: the job stores the platform, chat and sender of the session that queued it (its group's chat)."""
+    rt.store.remember_sender("s-mum", MUM, "whatsapp", chat_id="<family-group>")
+    _, q = queued(rt)
+    job = rt.store.get_job(q["queue_item_id"])
+    assert (job["platform"], job["chat_id"], job["sender_id"]) == ("whatsapp", "<family-group>", MUM)

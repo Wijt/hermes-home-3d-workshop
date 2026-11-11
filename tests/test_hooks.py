@@ -986,3 +986,20 @@ def test_r3_a_longer_watch_interval_does_not_make_the_watcher_look_off():
     assert hooks_mod.watcher_stale_s(settings(watch_interval="*/5 * * * *")) == hooks_mod.WATCHER_STALE_S
     d = rig.pre("home3d_start", {"queue_item_id": rig.queue_job()}, "s-mum")
     assert "watcher is off" not in d["message"] and "next watcher pass (about 15 min)" in d["message"]
+
+
+def test_the_turn_records_the_chat_it_came_from(rig, monkeypatch):
+    """Delivery: the origin chat of a request (Hermes binds it as HERMES_SESSION_CHAT_ID; a child inherits it)."""
+    import sys
+    import types
+
+    fake = types.ModuleType("gateway.session_context")
+    fake.get_session_env = lambda name, default="": "<family-group>" if name == "HERMES_SESSION_CHAT_ID" else default
+    monkeypatch.setitem(sys.modules, "gateway.session_context", fake)
+    rig.turn("s-group", MUM, "whatsapp")
+    assert rig.store.session_origin("s-group") == {"platform": "whatsapp", "chat_id": "<family-group>",
+                                                   "sender_id": MUM}
+    monkeypatch.delitem(sys.modules, "gateway.session_context")
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    rig.turn("s-child", "", "whatsapp", parent="s-group")
+    assert rig.store.session_origin("s-child")["chat_id"] == "<family-group>"

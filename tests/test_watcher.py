@@ -1443,3 +1443,58 @@ def test_dl_a_team_group_hears_neutral_wording_in_its_own_chat():
     box = notify.read_outbox()
     assert {r["target"] for r in box if r["audience"] == "team"} == {"telegram:<lab-group>"}
     assert not [r for r in box if r["target"] == "whatsapp:<family-group>"]
+
+
+def test_dl_done_box_records_pushed_off_and_on_plate_parts_and_collected():
+    lab = {"name": "Lab", "target": "telegram:<lab-group>", "tone": "team", "members": ["u-alex"]}
+    rig = Rig(language="en", groups=[lab], household=[{"id": "fam-1", "name": "Mum"}])
+    rig.run()
+    # an auto-eject job for Mum: pushed off into the done box
+    rig.store.upsert_job(7, name="Gift box.gcode.3mf", requester="Mum", eject_planned=1, state="queued")
+    rig.status(RUNNING, job_name="Gift box", progress=99, layer=99, total_layers=100, bed_temp=65)
+    rig.run(2)
+    rig.status(FINISH, job_name="Gift box", progress=100, bed_temp=60)
+    rig.run(2)
+    rig.status(FINISH, job_name="Gift box", progress=100, bed_temp=28)
+    rig.run(15)
+    (gift,) = rig.store.done_box()
+    assert (gift["queue_item_id"], gift["requester"], gift["left_plate"], gift["collected"]) == (7, "Mum",
+                                                                                               "pushed_off", 0)
+    assert gift["photo"] and Path(gift["photo"]).is_file()
+    # a manual job for Alex (the lab): waits on the plate until the camera sees it empty
+    rig.status(IDLE, bed_temp=25)
+    rig.run(2)
+    rig.store.upsert_job(8, name="bracket.gcode.3mf", requester="Alex", eject_planned=0, state="queued",
+                         sender_id="u-alex")
+    rig.status(RUNNING, job_name="bracket", progress=99, layer=99, total_layers=100, bed_temp=65)
+    rig.run(2)
+    rig.b.plate = OCCUPIED
+    rig.status(FINISH, job_name="bracket", progress=100, bed_temp=40)
+    out = rig.run(2)
+    bracket = next(p for p in rig.store.done_box() if p["queue_item_id"] == 8)
+    assert bracket["left_plate"] == "on_plate" and bracket["group_name"] == "Lab"
+    assert any("Ready to collect" in r["family_text"] for r in out)  # the lab hears it waits on the plate
+    assert [m["kind"] for m in rig.store.open_human_needed()] == ["remove_part"]
+    rig.b.plate = EMPTY
+    rig.status(IDLE, bed_temp=25)
+    rig.run(20)
+    bracket = next(p for p in rig.store.done_box() if p["queue_item_id"] == 8)
+    assert bracket["left_plate"] == "taken_off" and rig.store.open_human_needed() == []
+    assert rig.store.set_collected(gift["id"], by="Mum") is True
+    assert [p["queue_item_id"] for p in rig.store.done_box(collected=False)] == [8]
+    assert rig.store.get_done_part(gift["id"])["collected_by"] == "Mum"
+    assert rig.store.set_collected(999) is False
+
+
+def test_dl_a_resumed_print_closes_its_filament_swap_moment(rig):
+    rig.store.upsert_job(7, name="Vazo.gcode.3mf", requester="Mum", state="queued")
+    rig.status(RUNNING, job_name="Vazo", progress=10, layer=1, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(PAUSE, job_name="Vazo", progress=30, layer=3, total_layers=10, hms=[RUNOUT])
+    rig.run(2)
+    assert [m["kind"] for m in rig.store.open_human_needed()] == ["filament_swap"]
+    rig.status(RUNNING, job_name="Vazo", progress=31, layer=3, total_layers=10, bed_temp=60)
+    rig.run(2)
+    assert rig.store.open_human_needed() == []
+    (m,) = rig.store.human_needed(kind="filament_swap")
+    assert m["resolved"] == 1 and m["resolved_by"] == "the print resumed"

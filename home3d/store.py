@@ -906,7 +906,7 @@ class Store:
                       "request_id=?, updated=? WHERE id=?",
                       (str(job_name or "") or row["job_name"], str(title or "") or row["title"],
                        str(requester or "") or row["requester"], str(group or "") or row["group_name"],
-                       str(photo or "") or row["photo"], state,
+                       str(photo or "") or row["photo"], row["left_plate"] if state == "unknown" else state,
                        request_id if request_id is not None else row["request_id"], now, row["id"]))
             return int(row["id"])
 
