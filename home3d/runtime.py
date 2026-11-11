@@ -173,7 +173,7 @@ class Runtime:
         self._snap_hash: Optional[str] = None
         self._voice_lock = threading.Lock()
         self._inbound: dict[str, list[tuple[float, bool]]] = {}  # sender id -> [(ts, voice)], newest last
-        self._channels: dict[str, tuple[str, float]] = {}  # session id -> (VOICE | TYPED, ts)
+        self._channels: dict[str, tuple[str, float, str]] = {}  # session id -> (VOICE | TYPED, ts, inbound key)
 
     # ---- settings / store / backend --------------------------------------------------------
     @property
@@ -342,7 +342,7 @@ class Runtime:
     def actor(self, session_id: Optional[str]) -> Actor:
         """Who is talking in ``session_id`` and how their last message arrived. No session: nobody."""
         sid = str(session_id or "")
-        return self.actor_for(self.sender_id(sid) if sid else "", self.session_channel(sid))
+        return self.actor_for(self.sender_id(sid) if sid else "", self.current_channel(sid))
 
     # ---- voice: how did the message that asks arrive ---------------------------------------------
     def note_inbound(self, user_id: Any, voice: bool) -> None:
@@ -363,15 +363,17 @@ class Runtime:
                 self._inbound.pop(next(iter(self._inbound)))
 
     def take_voice(self, user_id: Any) -> bool:
-        """True when ``user_id`` sent a voice note (within ``VOICE_MARK_TTL_S``) that no turn has accounted for
-        yet. The sender's noted messages are used up by this call: one turn each."""
+        """True when the newest message ``user_id`` sent (within ``VOICE_MARK_TTL_S``) that no turn has accounted
+        for yet is a voice note. Only the newest counts: a voice note to the family followed by a typed request to
+        the agent is a typed request. The sender's noted messages are used up by this call: one turn each."""
         key = norm_id(user_id)
         if not key:
             return False
         now = time.time()
         with self._voice_lock:
             events = self._inbound.pop(key, [])
-        return any(voice and now - ts <= VOICE_MARK_TTL_S for ts, voice in events)
+        last = events[-1] if events else None
+        return bool(last and last[1] and now - last[0] <= VOICE_MARK_TTL_S)
 
     def spoken_command(self, user_id: Any) -> bool:
         """The sender's newest message is a voice note at most ``VOICE_COMMAND_S`` old: a slash command arriving
@@ -388,14 +390,21 @@ class Runtime:
         """Record how this turn's message arrived and return it: ``VOICE`` when the sender's voice note was noted
         at the gateway, the text has the shape of a transcript (``looks_like_voice``), or this is a delegated
         child of a voice turn; else ``TYPED``. Called once per turn by ``pre_llm_call``."""
+        began = time.time()  # before the sender's notes are taken: a note arriving after that is newer than the turn
         voice = self.take_voice(user_id) or looks_like_voice(user_message)
-        if not voice and parent and parent != session_id:
-            voice = self.session_channel(parent) == VOICE
+        key = norm_id(user_id)
+        if parent and parent != session_id:
+            with self._voice_lock:
+                prec = self._channels.get(parent)
+            if not key and prec:
+                key = (tuple(prec) + ("", "", ""))[2]  # a delegated child acts for its parent's sender
+            if not voice:
+                voice = self.session_channel(parent) == VOICE
         channel = VOICE if voice else TYPED
         if session_id:
             with self._voice_lock:
                 self._channels.pop(session_id, None)
-                self._channels[session_id] = (channel, time.time())
+                self._channels[session_id] = (channel, began, key)
                 while len(self._channels) > CHANNEL_MAX_SESSIONS:
                     self._channels.pop(next(iter(self._channels)))
         return channel
@@ -407,6 +416,24 @@ class Runtime:
         with self._voice_lock:
             rec = self._channels.get(str(session_id))
         return rec[0] if rec else ""
+
+    def current_channel(self, session_id: Optional[str]) -> str:
+        """How the message the agent is acting on NOW arrived: ``session_channel``, except that a voice note from
+        the session's sender that reached the gateway after this turn began (and no turn has taken yet) makes it
+        ``VOICE``. Hermes' ``busy_input_mode: steer`` folds a message sent while the agent works into the running
+        turn without a new ``pre_llm_call``, so a start asked by such a voice note must not pass as typed."""
+        if not session_id:
+            return ""
+        with self._voice_lock:
+            rec = self._channels.get(str(session_id))
+            if not rec:
+                return ""
+            channel, since, key = (tuple(rec) + ("", "", ""))[:3]
+            events = self._inbound.get(key) if key else None
+            last = events[-1] if events else None
+        if channel != VOICE and last and last[1] and last[0] >= since and time.time() - last[0] <= VOICE_MARK_TTL_S:
+            return VOICE
+        return channel
 
     @staticmethod
     def now() -> float:

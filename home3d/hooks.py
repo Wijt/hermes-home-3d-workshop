@@ -618,8 +618,9 @@ class _Hooks:
                  parent: str) -> str:
         rt = self.rt
         s, store = rt.settings, rt.store
-        who = self._record_sender(session_id, sender, platform, parent)
+        # how the message arrived is noted first: a store error in _record_sender must not leave a stale TYPED
         spoken = rt.note_turn(session_id, sender, user_message, parent) == VOICE  # before any early return
+        who = self._record_sender(session_id, sender, platform, parent)
         mode = s.inject_context
         if mode == "never":
             return ""

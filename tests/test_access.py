@@ -325,6 +325,52 @@ def test_a_voice_note_from_the_owner_never_starts_but_a_typed_turn_does():
     assert r.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "approve"
 
 
+def test_a_voice_note_steered_into_a_running_typed_turn_never_starts():
+    """busy_input_mode: steer folds a message sent while the agent works into the running turn: no new
+    pre_llm_call. A voice note noted at the gateway after the turn began counts for that turn."""
+    r = Rig()
+    qid = r.queue_job()
+    r.turn("s-owner", OWNER, "find me a vase")  # a typed turn starts
+    r.h["pre_gateway_dispatch"](event=_event(OWNER, "voice"), gateway=None, session_store=None)  # steered in
+    d = r.pre("home3d_start", {"queue_item_id": qid}, "s-owner")
+    assert d["action"] == "block" and "voice" in d["message"]
+    for tool, args in (("home3d_clear_plate", {"action": "confirm"}), ("home3d_stop", {"action": "resume"})):
+        assert r.pre(tool, args, "s-owner")["action"] == "block", tool
+    assert not r.store.peek_pass("home3d_start", str(qid), "s-owner")
+    r.store.issue_pass("home3d_start", str(qid), "s-owner")  # a pass issued before the note arrived
+    out = r.call("home3d_start", {"queue_item_id": qid}, "s-owner")
+    assert out["ok"] is False and out["codes"] == ["voice_message"] and r.be.status().state == "IDLE"
+    # a typed message steered in after the voice note makes the newest message typed again
+    r.h["pre_gateway_dispatch"](event=_event(OWNER, "text"), gateway=None, session_store=None)
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "approve"
+
+
+def test_only_the_newest_noted_message_decides_voice():
+    """A voice note (e.g. to the family in the group) followed by a typed request to the agent is typed."""
+    r = Rig()
+    qid = r.queue_job()
+    r.h["pre_gateway_dispatch"](event=_event(OWNER, "voice"), gateway=None, session_store=None)
+    r.h["pre_gateway_dispatch"](event=_event(OWNER, "text"), gateway=None, session_store=None)
+    r.turn("s-owner", OWNER, "start number one")
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "approve"
+
+
+def test_a_store_error_while_recording_the_sender_still_notes_a_voice_turn(monkeypatch):
+    r = Rig()
+    qid = r.queue_job()
+    r.turn("s-owner", OWNER, "typed first")
+    r.h["pre_gateway_dispatch"](event=_event(OWNER, "voice"), gateway=None, session_store=None)
+
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(r.store, "remember_sender", boom)
+    r.turn("s-owner", OWNER, "start it")  # the hook swallows the error
+    monkeypatch.undo()
+    assert r.rt.session_channel("s-owner") == "voice"
+    assert r.pre("home3d_start", {"queue_item_id": qid}, "s-owner")["action"] == "block"
+
+
 def test_a_transcript_shaped_turn_counts_as_voice_without_the_gateway_hook():
     r = Rig()
     qid = r.queue_job()
