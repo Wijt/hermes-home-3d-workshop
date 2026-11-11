@@ -155,8 +155,11 @@ def test_first_pass_on_idle_printer_is_silent(rig):
 
 def test_auto_eject_job_full_loop(rig):
     rig.store.upsert_job(7, name="Gül kutusu.gcode.3mf", requester="Mum", eject_planned=1, state="queued")
-    rig.status(RUNNING, job_name="Gül kutusu", progress=50, layer=50, total_layers=100, bed_temp=65)
-    assert rig.run(2) == []
+    rig.status(RUNNING, job_name="Gül kutusu", progress=50, layer=50, total_layers=100, bed_temp=65,
+               remaining_min=90)
+    (st,) = rig.run(2)  # the person who asked hears one short line; the owner started it and hears nothing
+    assert st["kind"] == "started" and st["owner_text"] == ""
+    assert st["family_text"] == '🖨️ Anneciğim, "Gül kutusu" basılmaya başladı, yaklaşık 1 saat 30 dakika sürecek.'
     assert rig.store.get_job(7)["state"] == "printing"
 
     rig.status(RUNNING, job_name="Gül kutusu", progress=99, layer=99, total_layers=100, bed_temp=65)
@@ -182,7 +185,7 @@ def test_auto_eject_job_full_loop(rig):
 
     box = notify.read_outbox()
     audiences = [(r["audience"], r["dry_run"]) for r in box]
-    assert audiences == [("owner", True), ("owner", True), ("family", True)]
+    assert audiences == [("family", True), ("owner", True), ("owner", True), ("family", True)]
     assert box[-1]["media"] == part_photo
     assert rig.store.human_needed() == []
 
@@ -768,7 +771,7 @@ def test_a_finish_hidden_by_the_next_auto_start_job_is_still_reported():
     rig.b.items = [ours, fam]
     for pct in (90, 98, 100, 100, 100, 100):
         rig.status(RUNNING, job_name="towel_hook", progress=pct, layer=round(pct / 2), total_layers=50, bed_temp=60)
-        assert rig.run(2) == []
+        assert all(r["kind"] == "started" and not r["owner_text"] for r in rig.run(2))
     photo = rig.kv["photo_path"]
     assert rig.b.snaps == 1  # one "done" photo of our part, before the push
     ours.status, fam.status = "completed", "printing"
@@ -823,7 +826,7 @@ def test_real_order_push_before_finish_one_message_one_light_cycle():
                                  'from the box.')
     assert ej["family_media"] == part and ej["owner_media"] not in ("", part)
     assert rig.b.cycles == cycles + 1  # the plate check and the photo share one light cycle
-    box = notify.read_outbox()
+    box = notify.read_outbox()[1:]  # after the "started" line to the family
     assert [r["audience"] for r in box] == ["owner", "family"]  # one merged owner message
     assert box[0]["text"].startswith("✅ Finished:") and "camera thinks the plate is empty" in box[0]["text"]
     assert box[0]["media"] == ej["owner_media"]
@@ -1282,7 +1285,7 @@ def test_r3_an_approval_request_stays_pending_when_the_owner_text_fails(monkeypa
     rig.store.add_approval_request("start", 7, "Mum", "s-mum")
     sent: list[str] = []
 
-    def fail(settings, target, text, media=None, *, audience="", dry_run=False):
+    def fail(settings, target, text, media=None, *, audience="", dry_run=False, **kw):
         sent.append(text)
         return notify.Delivery(target=target, ok=False, error="adapter not connected", audience=audience)
 
@@ -1290,10 +1293,14 @@ def test_r3_an_approval_request_stays_pending_when_the_owner_text_fails(monkeypa
     assert "approval_request" in kinds(rig.run(2))
     (row,) = rig.store.approval_requests()
     assert row["announced_ts"] is None and len(rig.store.pending_approval_requests()) == 1
-    monkeypatch.setattr(notify, "send", lambda s, t, x, m=None, *, audience="", dry_run=False:
+    (rec,) = rig.store.outbox(status="pending")  # the message waits in the outbox for its retry
+    assert rec["attempts"] == 1 and rec["last_error"] == "adapter not connected"
+    assert rig.run(0.5) == [] and len(sent) == 1  # backoff: not retried yet, and not written a second time
+    monkeypatch.setattr(notify, "send", lambda s, t, x, m=None, *, audience="", dry_run=False, **kw:
                         notify.Delivery(target=t, ok=True, audience=audience))
-    assert "approval_request" in kinds(rig.run(2))  # retried
+    rig.run(2)  # the same record is retried (no second approval message)
     assert rig.store.pending_approval_requests() == []
+    assert rig.store.outbox_get(rec["id"])["status"] == "sent" and rig.store.outbox_counts()["sent"] == 1
     assert len(sent) == 1
 
 
@@ -1375,3 +1382,64 @@ def test_r3_a_stop_the_stop_tool_could_not_match_still_closes_the_job():
     assert job["state"] == "cancelled" and job["outcome"] == "stopped by Dad: spaghetti"
     later = kinds(rig.run(2)) + kinds(rig.run(20))
     assert "failed" not in later, later
+
+
+# ---- delivery: outbox records, groups, who is told ---------------------------------------------------------------
+def test_dl_without_targets_nothing_counts_as_notified(rig):
+    """Audit: with empty targets events were stored owner_notified=1 / family_notified=1 though nothing was sent."""
+    rig.store.upsert_job(7, name="Vazo.gcode.3mf", requester="Mum", state="queued")
+    rig.status(PAUSE, job_name="Vazo", progress=30, layer=3, total_layers=10)
+    out = rig.run(2)
+    assert "paused" in kinds(out) and any(r["family_text"] for r in out)
+    assert all(e["owner_notified"] == 0 and e["family_notified"] == 0 for e in rig.store.events())
+    assert rig.store.outbox_counts()["no_target"] == 2 and rig.store.outbox_counts()["sent"] == 0
+
+
+def test_dl_a_sent_record_marks_its_events_notified(rig, monkeypatch):
+    monkeypatch.setattr(notify, "send", lambda s, t, x, m=None, *, audience="", dry_run=False, **kw:
+                        notify.Delivery(target=t, ok=True, dry_run=dry_run, audience=audience,
+                                        status=notify.DRY_RUN if dry_run else notify.SENT))
+    rig.s.owner_target, rig.s.family_target = "whatsapp:<owner-chat>", "whatsapp:<family-group>"
+    rig.store.upsert_job(7, name="Vazo.gcode.3mf", requester="Mum", state="queued")
+    rig.status(PAUSE, job_name="Vazo", progress=30, layer=3, total_layers=10)
+    rig.run(2)
+    ev = next(e for e in rig.store.events() if e["kind"] == "paused")
+    assert ev["owner_notified"] == 1 and ev["family_notified"] == 1
+
+
+def test_dl_an_outsider_requester_is_not_announced_the_owner_is_told():
+    """Audit: a job for a requester in no group and not in the household was announced into the family group."""
+    rig = Rig(language="en", family_target="whatsapp:<family-group>")
+    rig.run()
+    rig.store.upsert_job(9, name="clip.gcode.3mf", requester="Alex", state="queued")
+    rig.status(RUNNING, job_name="clip", progress=10, layer=1, total_layers=10, bed_temp=60)
+    (st,) = rig.run(2)  # the first notice about the job: the owner learns that nobody else is told
+    assert st["family_text"] == "" and st["owner_text"].startswith("ℹ️ Alex is in no group")
+    rig.status(PAUSE, job_name="clip", progress=30, layer=3, total_layers=10)
+    (p,) = rig.run(2)
+    assert p["family_text"] == "" and "Paused" in p["owner_text"] and "in no group" not in p["owner_text"]
+    assert not [r for r in notify.read_outbox() if r["target"] == "whatsapp:<family-group>"]
+    rig.status(RUNNING, job_name="clip", progress=40, layer=4, total_layers=10, bed_temp=60)
+    rig.run(2)
+    rig.status(PAUSE, job_name="clip", progress=50, layer=5, total_layers=10)
+    (p2,) = rig.run(2)
+    assert "in no group" not in p2["owner_text"]  # told once per job
+
+
+def test_dl_a_team_group_hears_neutral_wording_in_its_own_chat():
+    lab = {"name": "Lab", "target": "telegram:<lab-group>", "language": "en", "tone": "team", "members": ["u-alex"]}
+    rig = Rig(language="tr", family_target="whatsapp:<family-group>", groups=[lab])
+    rig.run()
+    rid = rig.store.add_request(requester="Alex", text="sensor bracket", platform="telegram", chat_id="<lab-group>",
+                                sender_id="u-alex")
+    rig.store.upsert_job(9, request_id=rid, name="bracket.gcode.3mf", requester="Alex", state="queued")
+    rig.status(RUNNING, job_name="bracket", progress=10, layer=1, total_layers=10, bed_temp=60, remaining_min=30)
+    (st,) = rig.run(2)
+    assert st["family_text"] == '🖨️ Print started: "sensor bracket" (for Alex), about 30 min.' and st["group"] == "Lab"
+    rig.status(PAUSE, job_name="bracket", progress=30, layer=3, total_layers=10)
+    (p,) = rig.run(2)
+    assert p["family_text"].startswith('⏸️ Print paused: "sensor bracket" (for Alex)')
+    assert "Duraklatıldı" in p["owner_text"]  # the owner keeps the technical notice in the household language
+    box = notify.read_outbox()
+    assert {r["target"] for r in box if r["audience"] == "team"} == {"telegram:<lab-group>"}
+    assert not [r for r in box if r["target"] == "whatsapp:<family-group>"]

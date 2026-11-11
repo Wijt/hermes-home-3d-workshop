@@ -1,11 +1,18 @@
-"""Owner vs family message templates (tr / en). Pure, stdlib only.
+"""Owner vs family vs team message templates (tr / en). Pure, stdlib only.
 
 ``render(kind, audience, lang, **ctx)`` returns the text, or ``""`` when that audience should not get a
 message for this kind (offline, HMS, ready-next and upgrade notices are owner-only).
 
 Family: one or two short warm lines, plain words, addressed to the requester (``address_as`` or
 ``requester``) when known, never English words inside Turkish. Owner: technical (state, layer, temps,
-HMS, links) but still short.
+HMS, links) but still short. Team (a group whose ``tone`` is "team", e.g. a lab): the same facts as the
+family line in plain, neutral wording: no forms of address, the requester is named as "for <name>".
+
+The person who asked hears: ``started`` (one line), ``finished`` / ``finished_ejected`` (with the photo),
+``failed``, ``paused``, and what needs them (``plate_not_clear``: ready to collect from the plate,
+``eject_unverified``). ``requester_not_told`` is the owner line for a job whose requester is in no group and
+not in the household (nobody else was told); ``delivery_failed`` tells the owner once about notices that
+could not be delivered (``failures``: list of {"to", "text", "error", "attempts"}).
 
 Family texts name the print by what the person asked for (``family_job``: the stored request text,
 shortened with ``short_text``) and fall back to ``job`` (the pretty file name); owner texts always use
@@ -38,15 +45,19 @@ from typing import Any, Callable, Optional
 
 KINDS = ("started", "finished", "finished_ejected", "plate_not_clear", "eject_unverified", "plate_clear",
          "failed", "paused", "hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "eject_skipped",
-         "light_left_on", "approval_request", "start_failed", "stopped", "online")
+         "light_left_on", "approval_request", "start_failed", "stopped", "online", "requester_not_told",
+         "delivery_failed")
 OWNER_ONLY = frozenset({"hms", "offline", "ready_next", "queue_foreign", "upgrade_proposed", "plate_clear",
-                        "light_left_on", "approval_request", "start_failed", "stopped", "online"})
+                        "light_left_on", "approval_request", "start_failed", "stopped", "online",
+                        "requester_not_told", "delivery_failed"})
 _STATE_WORDS = {"PREPARE": ("preparing", "hazırlanıyor"), "RUNNING": ("printing", "baskıda"),
                 "PAUSE": ("paused", "duraklatıldı"), "FINISH": ("finished", "bitti"),
                 "FAILED": ("failed", "yarıda kaldı"), "IDLE": ("idle", "boşta"), "UNKNOWN": ("unknown", "bilinmiyor")}
 ERROR_MAX = 300  # owner texts quote at most this much of a printer manager's error message
 FAMILY_JOB_MAX = 40  # family texts quote at most this many characters of the request text
-AUDIENCES = ("owner", "family")
+AUDIENCES = ("owner", "family", "team")
+REQUESTER_AUDIENCES = ("family", "team")  # the tones a group can have (config.GROUP_TONES)
+FAILURES_MAX = 3  # a delivery_failed notice lists at most this many undelivered notices
 
 _TR_BACK = set("aıou")
 _TR_FRONT = set("eiöü")
@@ -258,11 +269,11 @@ def _f_started(c: dict, tr: bool) -> str:
         head = f"🖨️ {who}, {job} basılmaya başladı" if who else f"🖨️ {job} basılmaya başladı"
         first = head + (f", yaklaşık {dur} sürecek." if dur else ".")
         second = "Bitince tabla soğuyacak, yazıcı parçayı kendisi düşürecek." if c.get("eject_planned") else ""
-        return _lines(first, second)
+        return first if c.get("one_line") else _lines(first, second)
     head = f"🖨️ {who}, {job} has started printing" if who else f"🖨️ {job} has started printing"
     first = head + (f", about {dur} to go." if dur else ".")
     second = "When it's done the bed cools and the printer pushes it off by itself." if c.get("eject_planned") else ""
-    return _lines(first, second)
+    return first if c.get("one_line") else _lines(first, second)  # the watcher's start notice is one short line
 
 
 def _f_finished(c: dict, tr: bool) -> str:
@@ -330,7 +341,126 @@ def _f_eject_skipped(c: dict, tr: bool) -> str:
     return f"ℹ️ {job} won't drop off by itself, someone will need to take it off when it's done."
 
 
+# ---- team templates (a group with tone "team": plain and neutral, no forms of address) ---------------------
+def _t_ref(c: dict, tr: bool) -> str:
+    """'"bracket v2" (for Sam)': the print as the team knows it, and whose it is (by name, never ``address_as``)."""
+    job, who = _fjob(c, tr), _s(c.get("requester"))
+    if not who:
+        return job
+    return f"{job} (isteyen: {who})" if tr else f"{job} (for {who})"
+
+
+def _t_owner_told(c: dict, tr: bool) -> str:
+    owner = _s(c.get("owner"))
+    named = bool(owner) and owner.lower() != "owner"
+    if tr:
+        return f"{dative(owner)} bildirildi." if named else "Yazıcı sorumlusuna bildirildi."
+    return f"{owner} has been notified." if named else "The printer owner has been notified."
+
+
+def _t_started(c: dict, tr: bool) -> str:
+    dur = duration(c.get("duration_min"), "tr" if tr else "en", short=True)
+    if tr:
+        return f"🖨️ Baskı başladı: {_t_ref(c, tr)}" + (f", yaklaşık {dur}." if dur else ".")
+    return f"🖨️ Print started: {_t_ref(c, tr)}" + (f", about {dur}." if dur else ".")
+
+
+def _t_finished(c: dict, tr: bool) -> str:
+    ref = _t_ref(c, tr)
+    if c.get("missed_end"):  # the watcher did not see the end: say nothing about where the part is
+        return f"✅ Baskı tamamlandı: {ref}." if tr else f"✅ Print finished: {ref}."
+    if tr:
+        return f"✅ Baskı tamamlandı: {ref}. Teslime hazır, parça yazıcının tablasında."
+    return f"✅ Print finished: {ref}. Ready to collect: the part is on the build plate."
+
+
+def _t_finished_ejected(c: dict, tr: bool) -> str:
+    ref = _t_ref(c, tr)
+    if tr:
+        return f"✅ Baskı tamamlandı: {ref}. Tabladan itildi, teslime hazır: biten parçalar kutusundan alınabilir."
+    return f"✅ Print finished: {ref}. It was pushed off the plate. Ready to collect from the done box."
+
+
+def _t_plate_not_clear(c: dict, tr: bool) -> str:
+    ref = _t_ref(c, tr)
+    if tr:
+        return f"📦 Teslime hazır: {ref} tamamlandı ancak tabladan itilemedi. Parça yazıcının tablasından alınmalı."
+    return (f"📦 Ready to collect: {ref} is finished but could not be pushed off. Please take the part off the "
+            "build plate.")
+
+
+def _t_eject_unverified(c: dict, tr: bool) -> str:
+    ref = _t_ref(c, tr)
+    if tr:
+        return f"❓ {ref} tamamlandı, ancak kamera tablanın boş olduğunu doğrulayamadı. Yazıcının kontrol edilmesi gerekiyor."
+    return f"❓ {ref} is finished, but the camera could not confirm that the plate is empty. The printer needs a look."
+
+
+def _t_failed(c: dict, tr: bool) -> str:
+    ref, p = _t_ref(c, tr), pct(c.get("progress"), "tr" if tr else "en")
+    if tr:
+        return f"⚠️ Baskı başarısız: {ref}" + (f", {p} seviyesinde durdu" if p else " tamamlanamadı") + f". {_t_owner_told(c, tr)}"
+    return f"⚠️ Print failed: {ref}" + (f" stopped at {p}" if p else " did not finish") + f". {_t_owner_told(c, tr)}"
+
+
+def _t_paused(c: dict, tr: bool) -> str:
+    ref, p = _t_ref(c, tr), pct(c.get("progress"), "tr" if tr else "en")
+    if tr:
+        why = ", filament bitti" if c.get("filament") else ""
+        return f"⏸️ Baskı duraklatıldı: {ref}" + (f" ({p})" if p else "") + f"{why}. {_t_owner_told(c, tr)}"
+    why = ", the filament ran out" if c.get("filament") else ""
+    return f"⏸️ Print paused: {ref}" + (f" ({p})" if p else "") + f"{why}. {_t_owner_told(c, tr)}"
+
+
+def _t_eject_skipped(c: dict, tr: bool) -> str:
+    ref = _t_ref(c, tr)
+    if tr:
+        return f"ℹ️ {ref} tabladan otomatik itilmeyecek; tamamlandığında yazıcıdan elle alınması gerekecek."
+    return f"ℹ️ {ref} will not be pushed off automatically; it has to be taken off the printer by hand when it finishes."
+
+
 # ---- owner templates --------------------------------------------------------------------------
+def _o_requester_not_told(c: dict, tr: bool) -> str:
+    """The job's requester is in no group and not in the household: nobody else was told, only the owner."""
+    who = _s(c.get("requester"))
+    if tr:
+        return (f"ℹ️ {who} hiçbir grupta ya da hane listesinde yok: gruba yazmadım, yalnızca sana bildirdim." if who
+                else "ℹ️ İsteyen kişi hiçbir grupta ya da hane listesinde yok: gruba yazmadım, yalnızca sana bildirdim.")
+    return (f"ℹ️ {who} is in no group and not in the household list: I did not post to a group, only you were told."
+            if who else "ℹ️ Whoever asked is in no group and not in the household list: I did not post to a group, "
+                        "only you were told.")
+
+
+def _o_delivery_failed(c: dict, tr: bool) -> str:
+    """Notices that could not be delivered after every retry: told to the owner once, with what was lost."""
+    items = [f for f in (c.get("failures") or []) if isinstance(f, dict)]
+    n = _int(c.get("count")) or len(items)
+    lines = []
+    for f in items[:FAILURES_MAX]:
+        to, text, err = _s(f.get("to")), short_text(f.get("text"), 80), short_text(f.get("error"), 80)
+        tries = _int(f.get("attempts"))
+        if tr:
+            tail = ", ".join(x for x in (f"{tries} deneme" if tries else "", err) if x)
+            lines.append(f"• {to or 'hedef yok'}: {_quote(text) or 'bildirim'}" + (f" ({tail})" if tail else ""))
+        else:
+            tail = ", ".join(x for x in (f"{tries} attempts" if tries else "", err) if x)
+            lines.append(f"• {to or 'no target'}: {_quote(text) or 'a notice'}" + (f" ({tail})" if tail else ""))
+    more = n - len(lines)
+    if tr:
+        head = (f"📭 {n} bildirim teslim edilemedi, artık denemiyorum:" if n > 1
+                else "📭 Bir bildirim teslim edilemedi, artık denemiyorum:" if lines
+                else "📭 Bir bildirim teslim edilemedi, artık denemiyorum.")
+        tail = f"… ve {more} tane daha." if more > 0 and lines else ""
+        hint = "Mesajlaşma bağlantısını kontrol et (hermes gateway çalışıyor mu, hedefler doğru mu)."
+    else:
+        head = (f"📭 {n} notices could not be delivered; I stopped trying:" if n > 1
+                else "📭 A notice could not be delivered; I stopped trying:" if lines
+                else "📭 A notice could not be delivered; I stopped trying.")
+        tail = f"… and {more} more." if more > 0 and lines else ""
+        hint = "Check the messaging connection (is hermes gateway running, are the targets right)."
+    return _lines(head, *lines, tail, hint)
+
+
 def _o_started(c: dict, tr: bool) -> str:
     lang = "tr" if tr else "en"
     eject = c.get("eject_planned")
@@ -666,21 +796,27 @@ _FAMILY: dict[str, Callable[[dict, bool], str]] = {
     "plate_not_clear": _f_plate_not_clear, "eject_unverified": _f_eject_unverified, "failed": _f_failed,
     "paused": _f_paused, "eject_skipped": _f_eject_skipped,
 }
+_TEAM: dict[str, Callable[[dict, bool], str]] = {
+    "started": _t_started, "finished": _t_finished, "finished_ejected": _t_finished_ejected,
+    "plate_not_clear": _t_plate_not_clear, "eject_unverified": _t_eject_unverified, "failed": _t_failed,
+    "paused": _t_paused, "eject_skipped": _t_eject_skipped,
+}
 _OWNER: dict[str, Callable[[dict, bool], str]] = {
     "started": _o_started, "finished": _o_finished, "finished_ejected": _o_finished_ejected,
     "plate_not_clear": _o_plate_not_clear, "eject_unverified": _o_eject_unverified, "plate_clear": _o_plate_clear,
     "failed": _o_failed, "paused": _o_paused, "hms": _o_hms, "offline": _o_offline, "ready_next": _o_ready_next,
     "queue_foreign": _o_queue_foreign, "upgrade_proposed": _o_upgrade_proposed, "eject_skipped": _o_eject_skipped,
     "light_left_on": _o_light_left_on, "approval_request": _o_approval_request, "start_failed": _o_start_failed,
-    "stopped": _o_stopped, "online": _o_online,
+    "stopped": _o_stopped, "online": _o_online, "requester_not_told": _o_requester_not_told,
+    "delivery_failed": _o_delivery_failed,
 }
 
 
 def render(kind: str, audience: str, lang: str, **ctx: Any) -> str:
-    """Message text for ``kind`` and ``audience`` ("owner" | "family"); "" = nothing to send."""
+    """Message text for ``kind`` and ``audience`` ("owner" | "family" | "team"); "" = nothing to send."""
     tr = lang == "tr"
-    if audience == "family":
-        fn = _FAMILY.get(kind)
+    if audience in REQUESTER_AUDIENCES:
+        fn = (_TEAM if audience == "team" else _FAMILY).get(kind)
         if fn is None:
             return ""
         return "\n".join(_cap(line) for line in fn(ctx, tr).strip().splitlines())

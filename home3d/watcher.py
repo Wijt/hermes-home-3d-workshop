@@ -68,6 +68,8 @@ _REQUEST_STATUS = {"printing": "printing", "finished": "done", "failed": "failed
                    "cancelled": "cancelled"}
 _EJECT_FLOW = ("finished", "cooling", "ejecting", "verifying")
 _SUFFIXES = (".gcode.3mf", ".3mf", ".gcode", ".stl")
+ROUTE_KEY = "_route"  # ctx key of the job's notify.Route (never rendered, never stored in an event)
+NOT_TOLD_KEEP = 100  # jobs remembered as "the owner was told nobody else was" (once per job)
 _FILAMENT_HMS = re.compile(r"^07[0-9A-F]{2}-[0-9A-F]{4}-0002-000[12]$")
 
 
@@ -157,6 +159,7 @@ class _Note:
     owner_media: Optional[Path] = None
     family_media: Optional[Path] = None
     payload: dict = field(default_factory=dict)
+    owner: bool = True  # False: only the person who asked hears about it (the one-line "started" notice)
 
 
 # ---- one pass -----------------------------------------------------------------------------------
@@ -184,7 +187,10 @@ class _Pass:
         self._queue_tried = False
         self.gcode_push = bool(getattr(backend, "eject_in_gcode", False))  # push before FINISH (real A1)
         self._announced: list[int] = []  # approval request ids told to the owner this pass
-        self._owner_ok = True  # the owner text of this pass was delivered (or there was none / a dry run)
+        self._announced_via_outbox = False  # this pass's approval requests ride on its owner outbox record
+        self._pass_deliveries: list = []  # final deliveries of this pass's records (no_target / dry run)
+        self._pass_records = 0
+        self._surfaced = ""  # the "notices could not be delivered" text when there is no owner chat
         self._st: Optional[PrinterStatus] = None  # this pass's printer status (None: not read / offline)
         self._back_online = False  # the printer manager answered again after an outage this pass
 
@@ -423,13 +429,18 @@ class _Pass:
         started = self.w.get("started_ts")
         if started and self.w.get("started_job") == job and 0 < self.now - float(started) < 7 * 86400:
             ctx["duration_min"] = (self.now - float(started)) / 60.0
-        owner = (self.s.owner_name or "").strip().lower()
-        family = bool(requester) and not (person and person.role == "owner") and requester.strip().lower() != owner
-        return ctx, family
+        # who hears about it besides the owner: the group of the chat the request came from (notify.route_for)
+        origin = req if (req.get("chat_id") or req.get("sender_id")) else (jobrow or {})
+        route = notify.route_for(self.s, requester=requester, platform=str(origin.get("platform") or ""),
+                                 chat_id=str(origin.get("chat_id") or ""), sender_id=str(origin.get("sender_id") or ""))
+        ctx[ROUTE_KEY] = route
+        # "family": a person who asked should hear (announced in their group, or the owner is told nobody was)
+        return ctx, route.announce or route.why == "outsider"
 
     def _note(self, kind: str, job: str, ctx: dict, *, family: bool = False, owner_media: Optional[Path] = None,
-              family_media: Optional[Path] = None, human: str = "", detail: str = "", **payload: Any) -> None:
-        self.notes.append(_Note(kind, job, ctx, family, owner_media, family_media, payload))
+              family_media: Optional[Path] = None, human: str = "", detail: str = "", owner: bool = True,
+              **payload: Any) -> None:
+        self.notes.append(_Note(kind, job, ctx, family, owner_media, family_media, payload, owner))
         if human:
             try:
                 upgrades.log_moment(self.store, human, detail or kind, job_name=job, source="watcher")
@@ -526,8 +537,15 @@ class _Pass:
             if self.w.get("photo_for_job") == job:  # keep it for a finish the watcher may report late (reconcile)
                 self.w["prev_photo"] = {"job": job, "path": self.w.get("photo_path") or ""}
                 self.w["photo_for_job"] = ""
-            self.store.add_event("started", job, {"state": st.state, "queue_item_id": (jobrow or {}).get("queue_item_id"),
-                                                  "silent": True})
+            ctx, family = self._ctx(job, jobrow, st) if jobrow and not first else ({}, False)
+            if family:  # the person who asked hears one short line; the owner started it and is not told again
+                ctx.update(one_line=True, duration_min=st.remaining_min)
+                self._note("started", job, ctx, family=True, owner=False,
+                           queue_item_id=(jobrow or {}).get("queue_item_id"))
+            else:
+                self.store.add_event("started", job, {"state": st.state,
+                                                      "queue_item_id": (jobrow or {}).get("queue_item_id"),
+                                                      "silent": True})
         if (st.state == RUNNING and job and self.w.get("photo_for_job") != job and self._near_end(st)
                 and self._job(job) is not None):  # the "done" photo is for workshop prints only (light discipline)
             photo = self._snapshot()
@@ -955,10 +973,16 @@ class _Pass:
         except Exception as exc:
             _log(f"pending_approval_requests failed: {exc}")
             return
+        try:  # a request whose owner message is still waiting in the outbox is not written a second time
+            waiting = self.store.outbox_open_refs("approval_request_ids")
+        except Exception:
+            waiting = set()
         for r in rows:
             try:
                 rid = int(r.get("id"))
             except (TypeError, ValueError, AttributeError):
+                continue
+            if rid in waiting:
                 continue
             try:
                 self._approval_note(rid, r)
@@ -1072,19 +1096,35 @@ class _Pass:
 
     # -- delivery --
     def deliver_notes(self) -> list[dict]:
+        """Turn this pass's notes into outbox records (``notify.enqueue``): ONE owner message (its texts merged, the
+        first photo) and one message per group chat a requester is told in (that group's language and tone). The
+        records are sent by ``deliver`` (``notify.flush``); an event counts as told only once its record went out."""
         if not self.notes:
             return []
         lang = self.s.language
         results: list[dict] = []
         owner_parts: list[str] = []
-        family_parts: list[str] = []
-        owner_media = family_media = None
+        owner_events: list[int] = []
+        owner_media: Optional[Path] = None
+        buckets: dict[tuple, dict] = {}  # (audience, language, target, group) -> parts, media, events, who
+        not_told = [str(x) for x in self.w.get("not_told_for") or []]
         for n in self.notes:
-            owner_text = messages.render(n.kind, "owner", lang, **n.ctx)
-            family_text = messages.render(n.kind, "family", lang, **n.ctx) if n.family else ""
-            payload = {k: v for k, v in n.ctx.items() if v not in (None, "")}
+            route = n.ctx.get(ROUTE_KEY)
+            ctx = {k: v for k, v in n.ctx.items() if k != ROUTE_KEY}
+            owner_text = messages.render(n.kind, "owner", lang, **ctx) if n.owner else ""
+            family_text, group = "", ""
+            if n.family and isinstance(route, notify.Route) and route.announce:
+                family_text = messages.render(n.kind, route.audience, route.language, **ctx)
+                group = route.group
+            elif n.family and isinstance(route, notify.Route) and route.why == "outsider":
+                key = str(ctx.get("queue_item_id") or n.job)
+                if key not in not_told and messages.render(n.kind, "family", lang, **ctx):
+                    not_told.append(key)  # once per job: the owner learns nobody else was told
+                    line = messages.render("requester_not_told", "owner", lang, **ctx)
+                    owner_text = "\n".join(x for x in (owner_text, line) if x)
+            payload = {k: v for k, v in ctx.items() if v not in (None, "")}
             payload.update(n.payload)
-            payload.update(owner_text=owner_text, family_text=family_text)
+            payload.update(owner_text=owner_text, family_text=family_text, group=group)
             try:
                 event_id = self.store.add_event(n.kind, n.job, _jsonable(payload))
             except Exception as exc:
@@ -1093,39 +1133,59 @@ class _Pass:
             if owner_text:
                 owner_parts.append(owner_text)
                 owner_media = owner_media or n.owner_media
+                if event_id is not None:
+                    owner_events.append(event_id)
             if family_text:
-                family_parts.append(family_text)
-                family_media = family_media or n.family_media
+                b = buckets.setdefault((route.audience, route.language, route.target, route.group),
+                                       {"parts": [], "media": None, "events": [], "job": n.job,
+                                        "requester": str(ctx.get("requester") or ""), "kinds": []})
+                b["parts"].append(family_text)
+                b["media"] = b["media"] or n.family_media
+                b["kinds"].append(n.kind)
+                if event_id is not None:
+                    b["events"].append(event_id)
             results.append({"event_id": event_id, "kind": n.kind, "job": n.job, "owner_text": owner_text,
-                            "family_text": family_text, "owner_media": str(n.owner_media or ""),
+                            "family_text": family_text, "group": group, "owner_media": str(n.owner_media or ""),
                             "family_media": str(n.family_media or "") if family_text else "", "deliveries": []})
-        deliveries: list[notify.Delivery] = []
+        self.w["not_told_for"] = not_told[-NOT_TOLD_KEEP:]
+        dry = not self.deliver
+        records: list[tuple[Optional[notify.Delivery], Any]] = []
         try:
             if owner_parts:
-                deliveries += notify.notify(self.s, owner_text="\n\n".join(owner_parts), family_text=None,
-                                            media=owner_media, dry_run=not self.deliver)
-            if family_parts:
-                deliveries += notify.notify(self.s, owner_text=None, family_text="\n\n".join(family_parts),
-                                            media=family_media, owner_media_only=False, dry_run=not self.deliver)
+                # the approval requests of this pass count as told once THIS message went out (notify._settle)
+                d = notify.enqueue(self.s, self.store, audience="owner", target=self.s.owner_target,
+                                   text="\n\n".join(owner_parts), media=owner_media,
+                                   kinds=[n.kind for n in self.notes if n.owner], job_name=self.notes[0].job,
+                                   event_ids=owner_events, approval_request_ids=self._announced, now=self.now,
+                                   dry_run=dry)
+                self._announced_via_outbox = True
+                records.append((d, "owner"))
+            for (audience, language, target, group), b in buckets.items():
+                d = notify.enqueue(self.s, self.store, audience=audience, target=target, text="\n\n".join(b["parts"]),
+                                   media=b["media"], kinds=b["kinds"], job_name=b["job"], requester=b["requester"],
+                                   group=group, event_ids=b["events"], now=self.now, dry_run=dry)
+                records.append((d, audience))
         except Exception as exc:
-            _log(f"notify failed: {exc}")
-        ok = {d.audience: d.ok for d in deliveries}
-        # approval requests count as told only when the owner text really went out (a dry run counts: it is the
-        # outbox); a failed send leaves them pending, so the next pass tries again
-        self._owner_ok = not owner_parts or ok.get("owner") is True
-        for d in deliveries:
-            if not d.ok:
-                _log(f"delivery to {d.audience} {d.target} failed: {d.error}")
-        for r in results:
-            r["deliveries"] = [d.to_dict() for d in deliveries]
-            if r["event_id"] is not None and self.deliver:
-                try:
-                    self.store.mark_event_notified(r["event_id"],
-                                                   owner=ok.get("owner") if r["owner_text"] else None,
-                                                   family=ok.get("family") if r["family_text"] else None)
-                except Exception:
-                    pass
+            _log(f"outbox write failed: {exc}")
+        self._pass_deliveries = [d for d, _ in records if d is not None]
+        self._pass_records = len(records)
         return results
+
+    def send_outbox(self, results: list[dict]) -> None:
+        """Send what is due in the outbox (this pass's records and earlier ones waiting for a retry), bounded by
+        ``send_budget_s``; what does not fit goes out on the next pass. Attaches this pass's deliveries."""
+        report = notify.flush(self.s, self.store, now=self.now, dry_run=not self.deliver)
+        for d in report.deliveries:
+            if d.status in (notify.PENDING, notify.FAILED):
+                _log(f"delivery to {d.audience} {d.target} failed (attempt {d.attempts}): {d.error}")
+        if report.gave_up:
+            _log(f"{len(report.gave_up)} notice(s) given up after every retry")
+        mine = list(self._pass_deliveries) + [d for d in report.deliveries if d.record_id is not None]
+        done = [d.to_dict() for d in mine]
+        for r in results:
+            r["deliveries"] = done
+        if report.surfaced_text and not str(self.s.owner_target or "").strip():
+            self._surfaced = report.surfaced_text  # no owner chat: the cron output carries it
 
     def prune_media(self) -> None:
         if not self.default_media or not self.out_dir.is_dir():
@@ -1158,8 +1218,13 @@ class _Pass:
         self.approvals()
         self.proposals()
         results = self.deliver_notes()
-        if self._owner_ok:
-            self.mark_announced()
+        if not self._announced_via_outbox:
+            self.mark_announced()  # nothing to tell the owner about them (started / removed meanwhile)
+        self.send_outbox(results)
+        if self._surfaced:
+            results.append({"event_id": None, "kind": notify.FAILURE_KIND, "job": "", "owner_text": self._surfaced,
+                            "family_text": "", "group": "", "owner_media": "", "family_media": "",
+                            "deliveries": []})
         self.w.update(now=self.now, updated=time.time())
         self.store.kv_set(KV_KEY, _jsonable(self.w))
         self.prune_media()
@@ -1300,7 +1365,8 @@ def _report_error(settings: Settings, store: Optional[Store], msg: str, *, dry_r
     if not settings.owner_target:
         return text
     try:
-        notify.send(settings, settings.owner_target, text, audience="owner")
+        notify.send(settings, settings.owner_target, text, audience="owner", retry=False,  # bounded: one try
+                    timeout_s=notify._limits(settings)[0])
     except Exception:
         pass
     return ""

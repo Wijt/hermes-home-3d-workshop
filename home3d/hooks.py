@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .backends.base import BackendError
-from .config import LOCAL_SENDER, norm_id, scoped_sender
+from .config import LOCAL_SENDER, norm_id, scoped_sender, session_chat_id
 from .gates import Gate, clear_plate_gate, describe, person_can_overrule, printer_blocks, resume_gate, start_gate
 
 logger = logging.getLogger(__name__)
@@ -555,7 +555,9 @@ class _Hooks:
             who = store.sender_for(parent)  # a delegate_task child (or a rotated session) speaks for its parent
             inherited = parent if who else ""
         if session_id:
-            store.remember_sender(session_id, who, platform, inherited_from=inherited)
+            # the chat this turn came from (a delegated child speaks in its parent's chat): the origin of a request
+            chat = session_chat_id() or (str(store.sender_info(parent).get("chat_id") or "") if inherited else "")
+            store.remember_sender(session_id, who, platform, inherited_from=inherited, chat_id=chat)
         return who
 
     def _context(self, session_id: str, user_message: Any, platform: str, sender: str, first: bool,
