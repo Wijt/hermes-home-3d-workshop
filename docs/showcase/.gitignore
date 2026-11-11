@@ -1,0 +1,12 @@
+# Large or local media: real photos, footage and screen captures stay on this machine.
+media/real/
+media/footage/
+media/screen/
+# Generated from the files above by tools/scan_media.py; it lists local files, so it is local too.
+media/manifest.json
+# Renders and stills
+out/
+stills/
+node_modules/
+# written by raea render
+styles.gen.ts
