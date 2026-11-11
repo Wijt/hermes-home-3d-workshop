@@ -695,8 +695,9 @@ class _Hooks:
             from . import upgrades
 
             who = rt.requester_name(session_id, "") if session_id else ""
+            job = (store.get_job(qid) or {}) if qid else {}  # the start of THIS job closes the moment
             upgrades.log_moment(store, "approve_start", f"{tool} {target} waited for the owner's approval",
-                                who=who, source="agent")
+                                job_name=str(job.get("name") or ""), who=who, source="agent")
 
 
 def _message_text(msg: Any) -> str:

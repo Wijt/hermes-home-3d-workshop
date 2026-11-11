@@ -11,7 +11,10 @@ One attempt per record per pass, each bounded by ``send_timeout_s``, and all of 
 what is left is carried to the next pass, not counted as an attempt). A failed attempt is retried on later passes
 after ``RETRY_BACKOFF_S``; after ``MAX_ATTEMPTS`` attempts or ``MAX_AGE_S`` the record is ``failed`` and the owner
 is told once (a ``delivery_failed`` notice, itself an outbox record). Records to one target go out in the order
-they were written: while an older one is waiting for its retry, newer ones for the same chat wait behind it.
+they were written while the oldest is in its first short retry window (``ORDER_HOLD_ATTEMPTS``) and in the pass
+in which it failed; after that, newer ones for the same chat are tried (one bad message never blocks a chat for
+hours). A successful send to a chat makes its other waiting records due at once (an outage that ended releases
+the queue).
 
 What a send that succeeded settles (``_settle``): the events of the message count as told (``owner_notified`` /
 ``family_notified``), and the approval requests in it as announced. A record that was given up closes its approval
@@ -19,7 +22,8 @@ requests ("the owner could not be told"), so the person can ask again.
 
 ``route_for`` decides who hears about a job: the group whose target is the chat the request came from, else the
 group that lists its sender, else the household's ``family_target``; a requester in no group and not in the
-household is not announced anywhere (the owner is told instead).
+household is not announced anywhere (the owner is told instead). A known sender id decides who asked; the
+requester name (written by the model) only counts when there is no sender id or the owner asked for someone.
 
 ``outbox_summary`` is what the status tool and a UI read: counts per status and the last failures.
 
@@ -40,7 +44,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import messages
-from .config import Person, Settings, data_dir
+from .config import LOCAL_SENDER, Person, Settings, data_dir, norm_id
 
 OUTBOX_FILE = "outbox.jsonl"
 SEND_TIMEOUT_S = 20.0  # one `hermes send` (Settings.send_timeout_s overrides it)
@@ -49,6 +53,7 @@ RETRY_DELAY_S = 3.0  # the in-line retry of a direct send() (the outbox retries 
 RETRY_BACKOFF_S = (60, 5 * 60, 15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600)  # wait after attempt n (last repeats)
 MAX_ATTEMPTS = 10  # then the record is failed (about 16 hours of trying with the backoff above)
 MAX_AGE_S = 24 * 3600  # a notice older than this is not worth sending any more
+ORDER_HOLD_ATTEMPTS = 2  # newer records to a chat wait behind an older one only while it has failed fewer times
 DRY_RUN_ENV = "HOME3D_DRY_RUN"
 SUMMARY_FAILURES = 5
 SENT, FAILED, PENDING, NO_TARGET, DRY_RUN = "sent", "failed", "pending", "no_target", "dry_run"
@@ -115,10 +120,14 @@ def route_for(settings: Settings, *, requester: str = "", platform: str = "", ch
     4. anyone else: not announced (``why="outsider"``), or ``why="nobody"`` when nobody is known to have asked.
     """
     name = (requester or "").strip()
-    person = _person_named(settings, name)
-    sender = settings.person_for(sender_id) if sender_id else None
+    sid = norm_id(sender_id)
+    sender = settings.person_for(sid) if sid else None
     owner = (settings.owner_name or "").strip().lower()
     sender_is_owner = bool(sender and sender.role == "owner")
+    if sid and sid != LOCAL_SENDER and not sender_is_owner:
+        person = sender  # a known sender decides who asked: never a household name the model wrote
+    else:
+        person = _person_named(settings, name)  # no sender id, a local session, or the owner asking for someone
     if (person and person.role == "owner") or (name and name.lower() == owner) or (not name and sender_is_owner):
         return Route(False, why="owner")
     group = settings.group_for(platform, chat_id, "" if sender_is_owner else sender_id)
@@ -127,7 +136,7 @@ def route_for(settings: Settings, *, requester: str = "", platform: str = "", ch
     if group is not None:
         return Route(True, audience=group.tone, language=settings.group_language(group), target=group.target,
                      group=group.name)
-    if person is not None or (sender is not None and not sender_is_owner):
+    if person is not None:
         return Route(True, audience="family", language=settings.language, target=settings.family_target)
     if not name and not str(sender_id or "").strip() and not str(chat_id or "").strip():
         return Route(False, why="nobody")
@@ -361,7 +370,7 @@ def flush(settings: Settings, store: Any, *, now: Optional[float] = None, dry_ru
     started = time.monotonic()
     clock = _clock_now(now)
     timeout, budget = _limits(settings)
-    waiting: set[str] = set()  # targets with an older record still waiting: newer ones go behind it
+    waiting: set[str] = set()  # targets whose newer records wait this pass (an older one failed now or is held)
     try:
         pending = store.outbox_pending()
     except Exception:
@@ -375,9 +384,12 @@ def flush(settings: Settings, store: Any, *, now: Optional[float] = None, dry_ru
         if _expired(rec, clock):
             _give_up(store, rec, report)
             continue
-        if target in waiting or not _due(rec, clock):
-            waiting.add(target)
+        if target in waiting:
             report.carried += 1 if _due(rec, clock) else 0
+            continue
+        if not _due(rec, clock):
+            if int(rec.get("attempts") or 0) < ORDER_HOLD_ATTEMPTS:
+                waiting.add(target)  # its first short retry: newer ones keep their place behind it
             continue
         if budget - (time.monotonic() - started) < timeout:
             report.carried += 1  # no time for a whole attempt: the next pass sends it (not counted as an attempt)
@@ -410,6 +422,7 @@ def _send_record(settings: Settings, store: Any, rec: dict, clock: float, timeou
         d.status = SENT
         if store.outbox_settle(rec["id"], SENT):
             _settle(store, rec, SENT)
+        store.outbox_release(rec["target"])  # the chat works again: what waits for it is due now
         return d
     waiting.add(rec["target"])
     if attempts >= MAX_ATTEMPTS:
@@ -490,6 +503,19 @@ def _brief(rec: dict) -> dict:
             "attempts": int(rec.get("attempts") or 0), "last_error": rec.get("last_error") or "",
             "last_attempt_ts": rec.get("last_attempt_ts"), "sent_ts": rec.get("sent_ts"),
             "text": text.splitlines()[0][:160] if text else "", "has_photo": bool(rec.get("media"))}
+
+
+def outbox_counts_public(store: Any) -> dict:
+    """What anyone may see of the outbox: counts and the age of the oldest pending notice. No target, no text, no
+    names (the full ``outbox_summary`` is for the owner and a UI). Never raises."""
+    try:
+        counts = store.outbox_counts()
+        oldest = store.outbox_pending(limit=1)
+    except Exception:
+        return {"counts": {}, "undelivered": 0, "oldest_pending_age_s": None}
+    age = max(0.0, time.time() - float(oldest[0].get("ts") or 0)) if oldest and oldest[0].get("ts") else None
+    return {"counts": counts, "undelivered": int(counts.get(PENDING, 0)) + int(counts.get(FAILED, 0)),
+            "oldest_pending_age_s": round(age) if age is not None else None}
 
 
 def outbox_summary(store: Any, failures: int = SUMMARY_FAILURES) -> dict:

@@ -758,10 +758,13 @@ class Store:
         cur = self._exec("UPDATE approval_requests SET resolved_ts=?, outcome=? WHERE action=? AND queue_item_id IS ? "
                          "AND resolved_ts IS NULL", (time.time(), str(outcome or "")[:200], action, qid))
         # the same event closes the human-needed moment that was waiting for it
+        # (a start closes only ITS job's wait; a resume every filament swap: one printer, one print at a time)
         moment = {"start": ("approve_start",), "resume": ("filament_swap",)}.get(action)
         if moment:
+            job = (self.get_job(qid) or {}) if action == "start" and qid is not None else {}
             self.resolve_human_needed(moment, str(outcome or "") or ("start approved" if action == "start"
-                                                                    else "print resumed"))
+                                                                    else "print resumed"),
+                                      job_name=str(job.get("name") or "") if action == "start" else None)
         return int(cur.rowcount or 0)
 
     def close_approval_request(self, request_id: int, outcome: str = "") -> bool:
@@ -855,6 +858,10 @@ class Store:
              1 if attempted else 0, now, next_try_clock if status == "pending" else None, status, now,
              int(record_id)))
         return cur.rowcount == 1
+
+    def outbox_release(self, target: str) -> None:
+        """Make every pending record to ``target`` due now (a send to it just worked: its retry wait is over)."""
+        self._exec("UPDATE outbox SET next_try_clock=NULL WHERE status='pending' AND target=?", (str(target or ""),))
 
     def outbox_unsurfaced_failures(self, limit: int = 20) -> list[dict]:
         """Records given up on that the owner has not been told about yet, oldest first."""

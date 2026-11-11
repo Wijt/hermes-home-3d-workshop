@@ -316,3 +316,72 @@ def test_team_wording_has_no_family_forms_of_address():
             assert text and "Mum dear" not in text and "Mum" in text, (kind, lang, text)
         assert "Mum dear" in M.render("finished", "family", lang, **ctx)  # family keeps today's wording
     assert M.render("hms", "team", "en", **ctx) == ""  # owner-only kinds stay owner-only
+
+
+# ---- review fixes -----------------------------------------------------------------------------------------------
+def test_a_known_sender_decides_who_asked_not_a_matching_household_name():
+    """Review: the model writes the requester name; a lab sender named like a household person is not family."""
+    lab = {"name": "Lab", "target": "telegram:<lab>", "tone": "team", "members": ["lab-1"]}
+    s = _s(household=[{"id": "fam-1", "name": "Alex"}], groups=[lab])
+    r = N.route_for(s, requester="Alex", platform="telegram", chat_id="", sender_id="lab-9")
+    assert r.announce is False and r.why == "outsider" and r.target == ""
+    # the household person themselves, the owner asking for them, or no sender id at all: family as before
+    assert N.route_for(s, requester="Alex", sender_id="fam-1").target == FAMILY
+    assert N.route_for(s, requester="Alex", sender_id="owner-1").target == FAMILY
+    assert N.route_for(s, requester="Alex").target == FAMILY
+
+
+def _passes(s, store, fake, start, end, step=60.0):
+    t = start
+    while t <= end:
+        N.flush(s, store, now=t)
+        t += step
+    return t
+
+
+def test_one_bad_message_does_not_block_its_chat_for_hours(fake):
+    """Review: a record the gateway always rejects held back every later notice to that chat for about 16 h."""
+    store, s = Store(), _s()
+    fake.ok = lambda target, text: text != "rejected"
+    N.enqueue(s, store, audience="owner", target=OWNER, text="rejected", now=0)
+    N.enqueue(s, store, audience="owner", target=OWNER, text="approve #7?", now=10)
+    _passes(s, store, fake, 0, 5 * 60)
+    texts = [c["text"] for c in fake.calls]
+    assert "approve #7?" in texts and texts.index("approve #7?") >= 2  # it kept its place for the first retry
+    assert store.outbox_counts()["sent"] == 1
+
+
+def test_a_send_that_works_again_releases_the_chat_at_once(fake):
+    """Review: after an outage, nothing went out until the oldest record's next backoff time."""
+    store, s = Store(), _s()
+    down = {"v": True}
+    fake.ok = lambda target, text: not down["v"]
+    N.enqueue(s, store, audience="family", target=FAMILY, text="old", now=0)
+    _passes(s, store, fake, 0, 2 * 3600)
+    assert store.outbox_pending()[0]["attempts"] >= 3  # in a long backoff now
+    down["v"] = False
+    N.enqueue(s, store, audience="family", target=FAMILY, text="new", now=2 * 3600 + 300)
+    N.flush(s, store, now=2 * 3600 + 300)
+    N.flush(s, store, now=2 * 3600 + 360)
+    assert store.outbox_counts()["sent"] == 2 and store.outbox_counts()["pending"] == 0
+
+
+def test_a_retry_time_far_ahead_means_the_clock_changed_and_is_due(fake):
+    store, s = Store(), _s()
+    fake.ok = False
+    N.enqueue(s, store, audience="family", target=FAMILY, text="x", now=10 * 86400)
+    N.flush(s, store, now=10 * 86400)  # fails: retry at 10 days + 60 s
+    fake.ok = True
+    N.flush(s, store, now=100.0)  # the watcher's clock went back (another printer, the simulator)
+    assert store.outbox_counts()["sent"] == 1
+
+
+def test_starting_one_job_closes_only_its_own_approval_wait():
+    """Review: approving one start closed the open approve_start moments of every job."""
+    store = Store()
+    store.upsert_job(7, name="vase.gcode.3mf", requester="Mum", state="queued")
+    store.upsert_job(8, name="clip.gcode.3mf", requester="Dad", state="queued")
+    store.add_human_needed("approve_start", "start:7 waits", job_name="vase.gcode.3mf", source="agent")
+    store.add_human_needed("approve_start", "start:8 waits", job_name="clip.gcode.3mf", source="agent")
+    store.resolve_approval_requests("start", 7, "started")
+    assert [m["job_name"] for m in store.open_human_needed()] == ["clip.gcode.3mf"]

@@ -1224,8 +1224,13 @@ class _Pass:
         done = [d.to_dict() for d in mine]
         for r in results:
             r["deliveries"] = done
-        if report.surfaced_text and not str(self.s.owner_target or "").strip():
-            self._surfaced = report.surfaced_text  # no owner chat: the cron output carries it
+        owner_t = str(self.s.owner_target or "").strip()
+        lost_report = [r for r in report.gave_up if notify.FAILURE_KIND in (r.get("kinds") or [])]
+        if report.surfaced_text and (not owner_t or any(str(r.get("target") or "") == owner_t
+                                                        for r in report.gave_up)):
+            self._surfaced = report.surfaced_text  # no owner chat, or it is the chat that fails: the cron output
+        elif lost_report:  # the notice about failures could not reach the owner either: the cron output carries it
+            self._surfaced = str(lost_report[-1].get("text") or "")
 
     def prune_media(self) -> None:
         if not self.default_media or not self.out_dir.is_dir():
@@ -1445,6 +1450,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     except OSError:
         pass
     out = stdout_text(results, verbose=args.verbose)
+    lost = [r["owner_text"] for r in results  # notices given up that could not reach the owner's chat either
+            if r.get("event_id") is None and r.get("kind") == notify.FAILURE_KIND and r.get("owner_text")]
     if out and (args.verbose or not settings.owner_target):
         print(out)
+    elif lost:
+        print("\n".join(lost))  # the cron output is then the only way the owner hears of it
     return 0

@@ -1498,3 +1498,34 @@ def test_dl_a_resumed_print_closes_its_filament_swap_moment(rig):
     assert rig.store.open_human_needed() == []
     (m,) = rig.store.human_needed(kind="filament_swap")
     assert m["resolved"] == 1 and m["resolved_by"] == "the print resumed"
+
+
+def test_dl_no_started_notice_when_the_watcher_first_sees_a_running_job():
+    """A watcher started (or restarted) mid-print does not tell the requester the print 'started' again."""
+    rig = Rig(language="en", family_target="whatsapp:<family-group>")
+    rig.store.upsert_job(7, name="vase.gcode.3mf", requester="Mum", state="queued")
+    rig.b.items = [QueueItem(id=7, status="printing", name="vase.gcode.3mf")]
+    rig.status(RUNNING, job_name="vase", progress=40, layer=4, total_layers=10, bed_temp=60, remaining_min=30)
+    out = rig.run()
+    assert not [r for r in out if r["kind"] == "started"]
+    assert not [r for r in rig.store.outbox() if "started" in (r["kinds"] or [])]
+
+
+def test_dl_a_give_up_on_the_owner_chat_reaches_the_cron_output(rig, monkeypatch, capsys):
+    """Review: when the owner's chat is the one failing, the 'could not be delivered' notice was never seen."""
+    owner = "whatsapp:<owner-chat>"
+    monkeypatch.setattr(notify, "send", lambda s, t, x, m=None, *, audience="", dry_run=False, **kw:
+                        notify.Delivery(target=t, ok=dry_run, dry_run=dry_run, audience=audience,
+                                        error="" if dry_run else "adapter not connected",
+                                        status=notify.DRY_RUN if dry_run else notify.FAILED))
+    rig.s.owner_target = owner
+    notify.enqueue(rig.s, rig.store, audience="owner", target=owner, text="approve #7?",
+                   now=rig.t - notify.MAX_AGE_S - 60)
+    out = rig.run(1)
+    lost = [r for r in out if r["kind"] == notify.FAILURE_KIND]
+    assert lost and "approve #7?" in lost[0]["owner_text"]
+    monkeypatch.setattr(watcher, "run_once", lambda *a, **kw: out)
+    monkeypatch.setattr(watcher, "load_settings", lambda: rig.s)
+    monkeypatch.setattr(watcher, "make_backend", lambda s: rig.b)
+    assert watcher.main([]) == 0
+    assert "approve #7?" in capsys.readouterr().out  # owner_target is set, yet the cron output carries it

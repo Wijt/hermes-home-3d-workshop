@@ -445,13 +445,18 @@ def _h_status(rt, a: dict, kw: dict) -> dict:
     err = store.kv_get("watcher_error")
     if err:
         out["watcher"]["error"] = str(err)[:200]
-    from .notify import outbox_summary  # delivery state of notices, parts waiting, people still needed
-    out["notices"] = outbox_summary(store, failures=3)
-    out["done_box"] = [{k: p.get(k) for k in ("id", "job_name", "title", "requester", "group_name", "left_plate")}
-                       for p in store.done_box(collected=False, limit=5)]
-    out["waiting_on_people"] = [{k: m.get(k) for k in ("id", "kind", "job_name", "detail")}
-                                for m in store.open_human_needed(limit=5)]
-    me, _ = _who(rt, kw)
+    from .notify import outbox_counts_public, outbox_summary  # notices, parts waiting, people still needed
+    me, sender = _who(rt, kw)
+    if _is_owner(rt, sender):  # targets, texts and names: the owner only (any group member may call status)
+        out["notices"] = outbox_summary(store, failures=3)
+        out["done_box"] = [{k: p.get(k) for k in ("id", "job_name", "title", "requester", "group_name",
+                                                  "left_plate")} for p in store.done_box(collected=False, limit=5)]
+        out["waiting_on_people"] = [{k: m.get(k) for k in ("id", "kind", "job_name", "detail")}
+                                    for m in store.open_human_needed(limit=5)]
+    else:
+        out["notices"] = outbox_counts_public(store)
+        out["done_box"] = {"waiting": len(store.done_box(collected=False, limit=50))}
+        out["waiting_on_people"] = {"open": len(store.open_human_needed(limit=50))}
     if me:
         out["speaking"] = me
     return out
