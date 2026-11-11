@@ -403,6 +403,8 @@ def test_check_params_formats_minus_d_values():
     ({"x": "two\nlines"}, "control character"), ({"x": {"y": 1}}, "must be a number"),
     ({"x": ["a", "b"]}, "list"), ({"x": list(range(17))}, "list"), ({"x": None}, "must be a number"),
     ({f"p{i}": i for i in range(65)}, "at most 64"),
+    ({"x": "/" + "a" * 4096}, "longer than 4096"), ({"x": "a" * 4096}, "longer than 200"),
+    ({f"p{i}": "/" + "a" * 4000 for i in range(9)}, "together"),
 ])
 def test_check_params_refuses(params, why):
     with pytest.raises(design.DesignError) as e:
@@ -747,6 +749,24 @@ def test_a_file_read_outside_the_folder_fails_closed(fake, data_dir, tmp_path):
     assert meta["ok"] is False and meta["code"] == "refused" and meta["echo"] == []
     assert len(fake.renders()) == 1 and [c for c in fake.calls() if c not in fake.renders()] == []  # no previews
     assert design.latest_ok_version("leak") is None
+
+
+def test_a_long_file_path_param_reaches_the_dependency_guard(fake, data_dir, tmp_path):
+    """A legitimate file path can be longer than a text label (a deep temporary directory): its length must not be
+    what refuses it. A path outside the folder is still refused, by the dependency list; one inside is used."""
+    deep = tmp_path.joinpath(*["a-rather-long-directory-name"] * 12)
+    secret = deep / "secret.dxf"
+    assert len(str(secret)) > design.MAX_PARAM_STR
+    assert design.check_params({"outline": str(secret)}) == ["-D", f'outline="{secret}"']
+    res = design.render("longleak", f"// FAKE: dep {secret}\ncube(1);", params={"outline": str(secret)}, views=[])
+    assert res.ok is False and res.code == "refused" and "outside its folder" in res.error and str(secret) in res.error
+    folder = data_dir / "designs" / "longpath"
+    inside = folder.joinpath(*["a-rather-long-directory-name"] * 8) / "part.stl"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("solid x\nendsolid x\n")
+    assert len(str(inside)) > design.MAX_PARAM_STR
+    res = design.render("longpath", f"// FAKE: dep {inside}\ncube(1);", params={"part": str(inside)}, views=[])
+    assert res.ok, res.error
 
 
 def test_a_render_without_a_dependency_list_is_not_used(fake, data_dir):
