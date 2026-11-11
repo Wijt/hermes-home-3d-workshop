@@ -11,6 +11,8 @@ import type {
   Group,
   ModelRefs,
   Notice,
+  NoticeStatus,
+  Outcome,
   Overview,
   Person,
   Printer,
@@ -38,6 +40,8 @@ const refOrNull = (v: unknown): string | null => (typeof v === 'string' && v ? v
 const STATES: PrinterState[] = ['idle', 'printing', 'paused', 'finished', 'failed', 'offline']
 const ACTIONS: WaitingAction[] = ['start', 'clear', 'resume']
 const CHECKS: CheckStatus[] = ['ok', 'warn', 'missing', 'error']
+const OUTCOMES: Outcome[] = ['pushed', 'on_plate', 'taken_off', 'unknown']
+const NOTICE_STATUSES: NoticeStatus[] = ['sent', 'pending', 'failed', 'no_target', 'dry_run']
 
 function person(v: unknown): Person {
   const o = obj(v)
@@ -148,26 +152,42 @@ export function normalize(raw: unknown): Overview {
     }),
     done_box: arr(o.done_box).map(v => {
       const d = obj(v)
-      const outcome = d.outcome === 'pushed' || d.outcome === 'failed' ? d.outcome : 'on_plate'
+      const outcome = OUTCOMES.includes(d.outcome as Outcome) ? (d.outcome as Outcome) : 'unknown'
+      const id = int(d.id)
       return {
-        job_id: int(d.job_id),
+        id,
+        job_id: num(d.job_id),
         name: str(d.name),
         for: person(d.for),
         finished_ts: num(d.finished_ts),
         outcome,
         photo: refOrNull(d.photo),
         collected: bool(d.collected),
+        collected_by: str(d.collected_by),
         detail: str(d.detail),
-        command: str(d.command)
+        command: str(d.command) || `home3d collected ${id}`
       }
     }),
     notices: {
       pending: int(notices.pending),
+      sent: int(notices.sent),
       failed: int(notices.failed),
+      no_target: int(notices.no_target),
+      dry_run: int(notices.dry_run),
       recent: arr(notices.recent).map(v => {
         const r = obj(v)
-        const status = ['sent', 'pending', 'failed', 'no_target'].includes(r.status as string) ? (r.status as Notice['status']) : 'pending'
-        return { ts: num(r.ts), to: str(r.to), kind: str(r.kind), status, error: str(r.error), text: str(r.text) }
+        const status = NOTICE_STATUSES.includes(r.status as NoticeStatus) ? (r.status as NoticeStatus) : 'pending'
+        return {
+          ts: num(r.ts),
+          to: str(r.to),
+          group: str(r.group),
+          kind: str(r.kind),
+          job: str(r.job),
+          status,
+          attempts: int(r.attempts),
+          error: str(r.error),
+          text: str(r.text)
+        }
       })
     },
     filament: {
@@ -186,7 +206,16 @@ export function normalize(raw: unknown): Overview {
     },
     needs_human: arr(o.needs_human).map(v => {
       const h = obj(v)
-      return { id: int(h.id), kind: str(h.kind), text: str(h.text), ts: num(h.ts), open: bool(h.open, true), job: str(h.job), who: str(h.who) }
+      return {
+        id: int(h.id),
+        kind: str(h.kind),
+        text: str(h.text),
+        ts: num(h.ts),
+        open: bool(h.open, true),
+        job: str(h.job),
+        who: str(h.who),
+        resolved_by: str(h.resolved_by)
+      }
     }),
     upgrades: arr(o.upgrades).map(v => {
       const u = obj(v)
@@ -213,6 +242,8 @@ export function normalize(raw: unknown): Overview {
       }
     }),
     setup: {
+      checked_ts: num(obj(o.setup).checked_ts),
+      pending: bool(obj(o.setup).pending),
       checks: arr(obj(o.setup).checks).map(v => {
         const c = obj(v)
         const status = CHECKS.includes(c.status as CheckStatus) ? (c.status as CheckStatus) : 'warn'
@@ -225,7 +256,9 @@ export function normalize(raw: unknown): Overview {
       interval: str(watcher.interval),
       model_calls: num(watcher.model_calls)
     },
-    groups: arr(o.groups).map(v => ({ name: str(obj(v).name), tone: str(obj(v).tone, 'family') })).filter(g => g.name),
+    groups: arr(o.groups)
+      .map(v => ({ name: str(obj(v).name), tone: str(obj(v).tone, 'family'), language: str(obj(v).language), members: int(obj(v).members) }))
+      .filter(g => g.name),
     viewer: { is_owner: bool(viewer.is_owner, true), reason: str(viewer.reason) }
   }
 }
@@ -376,9 +409,11 @@ export function ejectLabel(planned: boolean | null): string {
 }
 
 export function outcomeLabel(d: DoneItem): { text: string; tone: Tone } {
-  if (d.outcome === 'failed') return { text: 'Failed', tone: 'bad' }
+  if (d.collected) return { text: d.collected_by ? `Collected by ${d.collected_by}` : 'Collected', tone: 'neutral' }
   if (d.outcome === 'pushed') return { text: 'In the done box', tone: 'good' }
-  return { text: 'Still on the plate', tone: 'warn' }
+  if (d.outcome === 'taken_off') return { text: 'Taken off the plate', tone: 'good' }
+  if (d.outcome === 'on_plate') return { text: 'Still on the plate', tone: 'warn' }
+  return { text: 'Finished', tone: 'neutral' }
 }
 
 /** "#rrggbb" or null: accepts "rrggbb", "#rgb" and "#rrggbbaa" (Bambu reports RRGGBBAA). */
@@ -416,11 +451,29 @@ export function isReady(w: Waiting): boolean {
   return w.ready ?? w.checklist.every(c => c.ok)
 }
 
-/** The line a notice shows: its kind, else the start of its text (emoji and the command tail trimmed). */
+const KIND_WORDS: Record<string, string> = {
+  started: 'Print started',
+  finished: 'Print finished',
+  finished_ejected: 'Finished and pushed off',
+  failed: 'Print failed',
+  stopped: 'Print stopped',
+  paused: 'Print paused',
+  approval_request: 'Asked you to approve',
+  plate_clear: 'Plate is clear',
+  plate_not_clear: 'Plate is not clear',
+  ready_next: 'Ready for the next job',
+  delivery_failed: 'Some messages were not delivered'
+}
+
+/** The line a notice shows: the start of its text (emoji trimmed), else its kind in words (a viewer who is not
+ * the owner gets no text). */
 export function noticeLine(n: Notice): string {
-  if (n.kind) return n.kind
   const t = n.text.replace(/^[^\p{L}\p{N}"“]+/u, '').trim()
-  return t.length > 90 ? `${t.slice(0, 88).trimEnd()}…` : t || 'Message'
+  if (t) return t.length > 90 ? `${t.slice(0, 88).trimEnd()}…` : t
+  const kinds = n.kind.split(',').filter(Boolean)
+  const words = kinds.map(k => KIND_WORDS[k] ?? k.replace(/_/g, ' ')).join(', ')
+  const line = words ? words[0].toUpperCase() + words.slice(1) : 'Message'
+  return n.job ? `${line}: ${n.job}` : line
 }
 
 export function noticeSummary(n: Overview['notices']): { text: string; tone: Tone } {
@@ -428,11 +481,18 @@ export function noticeSummary(n: Overview['notices']): { text: string; tone: Ton
   if (n.pending) return { text: `${n.pending} waiting to send`, tone: 'warn' }
   const nowhere = n.recent.filter(r => r.status === 'no_target').length
   if (nowhere) return { text: `${nowhere} of the last ${n.recent.length} had no chat to go to`, tone: 'warn' }
+  if (n.recent.length && n.recent.every(r => r.status === 'dry_run'))
+    return { text: 'Simulated: messages are written, not sent', tone: 'neutral' }
   return { text: n.recent.length ? 'Everyone was told' : 'Nothing to tell yet', tone: n.recent.length ? 'good' : 'neutral' }
 }
 
 export function noticeStatusLabel(s: Notice['status']): string {
-  return { sent: 'Sent', pending: 'Waiting', failed: 'Failed', no_target: 'No chat to send to' }[s]
+  return { sent: 'Sent', pending: 'Waiting', failed: 'Failed', no_target: 'No chat to send to', dry_run: 'Simulated, not sent' }[s]
+}
+
+/** The colour of a notice's status: a simulated notice is neutral, not a failure. */
+export function noticeTone(s: Notice['status']): Tone {
+  return s === 'sent' ? 'good' : s === 'failed' ? 'bad' : s === 'dry_run' ? 'neutral' : 'warn'
 }
 
 export function setupSummary(checks: SetupCheck[]): { text: string; tone: Tone } {

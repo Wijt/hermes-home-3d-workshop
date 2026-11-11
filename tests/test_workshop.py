@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from home3d_ws.home3d import design, upgrades, watcher, workshop
+from home3d_ws.home3d import checks, design, upgrades, watcher, workshop
 from home3d_ws.home3d.backends.simulator import SimulatorBackend, render_plate_png, write_box_stl
 from home3d_ws.home3d.commands import make_command
 from home3d_ws.home3d.config import Settings
@@ -57,8 +57,9 @@ class Shop:
     def __init__(self):
         self.settings = Settings(
             backend="simulator", language="en", persona_name="Mıstık", owner_name="Sam", owner_ids=[OWNER],
-            household=[{"id": MUM, "name": "Mum", "group": "Family"},
-                       {"id": ENGINEER, "name": "Engineer", "group": "R&D", "tone": "team"}],
+            household=[{"id": MUM, "name": "Mum"}, {"id": ENGINEER, "name": "Engineer"}],
+            groups=[{"name": "Family", "target": "telegram:<family-group>", "tone": "family", "members": [MUM]},
+                    {"name": "R&D", "target": "telegram:<lab-group>", "tone": "team", "members": [ENGINEER]}],
             owner_target="telegram:<owner-chat>", family_target="telegram:<family-group>")
         self.be = SimulatorBackend()
         self.store = Store()
@@ -171,15 +172,20 @@ def test_fresh_simulator_overview_has_every_section_and_nothing_made_up(shop):
     assert ov["printer"]["state"] == "idle" and ov["printer"]["errors"] == []
     assert ov["now"] is None and ov["waiting"] == [] and ov["queue"] == [] and ov["done_box"] == []
     assert ov["needs_human"] == [] and ov["upgrades"] == [] and ov["designs"] == []
-    assert ov["notices"] == {"pending": 0, "failed": 0, "recent": []}
+    assert ov["notices"] == {"pending": 0, "sent": 0, "failed": 0, "no_target": 0, "dry_run": 0, "recent": []}
     assert [s["slot"] for s in ov["filament"]["slots"]] == [0, 1, 2, 3]
     assert ov["filament"]["slots"][0]["label"] == "Slot 1"
     assert ov["watcher"]["fresh"] is True and ov["watcher"]["model_calls"] == 0
     assert ov["camera"]["available"] is True and ov["camera"]["frame"] is None
-    assert {g["name"]: g["tone"] for g in ov["groups"]} == {"Family": "family", "R&D": "team"}
+    assert ov["groups"] == [{"name": "Family", "tone": "family", "language": "en", "members": 1},
+                            {"name": "R&D", "tone": "team", "language": "en", "members": 1}]
+    assert "target" not in json.dumps(ov["groups"])
     assert ov["viewer"] == {"is_owner": True, "reason": ""}
-    ids = {c["id"]: c for c in ov["setup"]["checks"]}
-    assert ids["backend"]["status"] == "warn" and ids["watcher"]["status"] == "ok"
+    setup = ov["setup"]
+    assert setup["checked_ts"] and setup["pending"] is False  # the first overview waited for the run
+    ids = {c["id"]: c for c in setup["checks"]}
+    assert list(ids) == list(checks.CHECK_IDS)
+    assert ids["printer"]["status"] == "ok" and ids["camera"]["status"] == "ok"
     assert all(c["status"] in ("ok", "warn", "missing", "error") for c in ids.values())
     assert ov["problems"] == []
 
@@ -215,12 +221,13 @@ def test_a_designed_part_waiting_for_the_owners_approval(shop):
     d = ov["designs"]
     assert d[0]["slug"] == "rail-bracket" and d[0]["versions"][0]["stl"] == w["model"]["stl"]
     assert d[0]["versions"][0]["facts"]["ok"] is True
-    assert ov["notices"]["pending"] == 1  # the watcher has not told the owner yet
+    assert ov["notices"]["recent"] == []  # the watcher has not told the owner yet
 
-    shop.watch()  # the watcher tells the owner once: still waiting for the click
+    shop.watch()  # the watcher tells the owner once (outbox only in this test): still waiting for the click
     ov = shop.overview()
-    assert ov["notices"]["pending"] == 0 and [w["id"] for w in ov["waiting"]] == [req["id"]]
-    assert ov["notices"]["recent"][0]["to"] == "owner" and ov["notices"]["recent"][0]["status"] == "no_target"
+    assert [w["id"] for w in ov["waiting"]] == [req["id"]]
+    n = ov["notices"]["recent"][0]
+    assert n["to"] == "owner chat" and n["status"] == "dry_run" and n["text"] and "target" not in n
 
 
 def test_the_owners_own_queued_job_also_waits_and_a_job_ahead_blocks_the_turn(shop):
@@ -250,6 +257,7 @@ def test_printing_for_mum_shows_who_progress_and_the_queue(shop):
     assert p["state"] == "printing" and p["job_name"] == "Flower gift box"
     assert 0 < p["progress"] < 100 and p["remaining_min"] > 0 and p["layer"] and p["total_layers"]
     assert ov["now"]["queue_item_id"] == qid and ov["now"]["for"] == {"name": "Mum", "group": "Family"}
+    assert reply.endswith("[home3d:ok]") and "\"Flower gift box\"" in reply, reply
     assert ov["now"]["eject_planned"] is True and ov["now"]["model"] is None  # a MakerWorld model: no local STL
     assert [(i["id"], i["status"]) for i in ov["queue"]] == [(qid, "printing")]
     assert ov["waiting"] == []
@@ -262,13 +270,14 @@ def test_after_a_finish_the_part_is_in_the_done_box_with_its_photo(shop):
     ov = shop.overview()
     assert ov["printer"]["state"] == "finished"
     box = ov["done_box"]
-    assert len(box) == 1 and box[0]["job_id"] == qid and box[0]["outcome"] == "pushed"
-    assert box[0]["for"]["name"] == "Mum" and box[0]["collected"] is False
+    part = shop.store.done_box()[0]
+    assert len(box) == 1 and box[0]["job_id"] == qid and box[0]["id"] == part["id"] and box[0]["outcome"] == "pushed"
+    assert box[0]["for"] == {"name": "Mum", "group": "Family"} and box[0]["collected"] is False
     assert ov["generated_ts"] - 3600 < box[0]["finished_ts"] <= ov["generated_ts"] + 1  # wall time, not sim time
-    assert box[0]["command"] == f"home3d collected {qid}"
+    assert box[0]["command"] == f"home3d collected {part['id']}"
     assert box[0]["photo"] and workshop.resolve_file(shop.rt, box[0]["photo"]).is_file()
     assert ov["camera"]["frame"] and ov["camera"]["taken_ts"]
-    assert any(n["to"] == "family" for n in ov["notices"]["recent"])
+    assert any(n["to"] == "Family" for n in ov["notices"]["recent"])
     assert ov["now"]["queue_item_id"] == qid  # the finished job is still what the printer shows
 
 
@@ -283,8 +292,9 @@ def test_after_a_failure_the_plate_check_blocks_the_next_start_and_a_human_momen
     shop.call("home3d_start", {"queue_item_id": qid2}, "s-eng")
     ov = shop.overview()
     assert ov["printer"]["state"] == "failed"
-    assert ov["done_box"][0]["outcome"] == "failed" and ov["done_box"][0]["job_id"] == qid
+    assert all(d["job_id"] != qid for d in ov["done_box"])  # a failed print leaves no part to collect
     assert any(h["kind"] == "failure_check" and h["open"] for h in ov["needs_human"])
+    assert ov["needs_human"][0]["open"]  # open moments come first
     w = next(w for w in ov["waiting"] if w["queue_item_id"] == qid2)
     plate = next(c for c in w["checklist"] if c["id"] == "plate")
     assert plate["ok"] is False and "failed" in plate["detail"] and w["ready"] is False
@@ -345,17 +355,55 @@ def test_the_overview_never_takes_a_photo_checks_the_plate_or_writes_to_the_prin
     assert ov["waiting"] and ov["problems"] == []
 
 
-def test_collected_and_groups_use_newer_code_when_it_exists(shop, monkeypatch):
+def test_collected_through_the_command_and_the_groups_setting(shop):
     qid = shop.request("s-mum", MUM, COASTER, "a coaster")
     shop.slash(f"approve start {qid}")
     shop.run_until({"finished_ejected"})
-    assert shop.overview()["done_box"][0]["collected"] is False
-    shop.store.kv_set(f"collected:{qid}", {"by": "Mum"})
-    assert shop.overview()["done_box"][0]["collected"] is True
-    monkeypatch.setattr(Store, "is_collected", lambda self, job_id: False, raising=False)
-    assert shop.overview()["done_box"][0]["collected"] is False
-    shop.settings.groups = [{"name": "Lab", "tone": "team"}]
-    assert shop.overview()["groups"][0] == {"name": "Lab", "tone": "team"}
+    d = shop.overview()["done_box"][0]
+    assert d["collected"] is False and d["job_id"] == qid
+    reply = shop.slash(d["command"].removeprefix("home3d "))
+    assert reply.endswith("[home3d:ok]") and "coaster" in reply.lower(), reply
+    d = shop.overview()["done_box"][0]
+    assert d["collected"] is True and d["collected_by"] == "Sam" and d["collected_ts"]
+    shop.settings.groups = [{"name": "Lab", "tone": "team", "target": "telegram:<lab>"}]
+    assert shop.overview()["groups"] == [{"name": "Lab", "tone": "team", "language": "en", "members": 0}]
+
+
+def test_notices_show_dry_run_neutrally_and_hide_texts_from_a_non_owner(shop):
+    shop.store.outbox_add(audience="family", target="telegram:<family-group>", text="Your coaster is ready",
+                          group="Family", status="dry_run", job_name="coaster.gcode.3mf")
+    shop.store.outbox_add(audience="owner", target="telegram:<owner-chat>", text="Coaster done", status="pending")
+    ov = shop.overview()
+    n = ov["notices"]
+    assert n["dry_run"] == 1 and n["failed"] == 0 and n["pending"] == 1
+    dry = next(r for r in n["recent"] if r["status"] == "dry_run")
+    assert dry["to"] == "Family" and dry["text"] == "Your coaster is ready" and dry["job"] == "coaster"
+    assert "<family-group>" not in json.dumps(n) and "<owner-chat>" not in json.dumps(n)
+    shop.settings.local_is_owner = False
+    n = shop.overview()["notices"]
+    assert all(r["text"] == "" and r["error"] == "" for r in n["recent"]) and n["dry_run"] == 1
+    assert "coaster is ready" not in json.dumps(n).lower()
+    assert all(c["detail"] == "" for c in shop.overview()["setup"]["checks"])
+
+
+def test_setup_checks_are_cached_and_never_hold_up_the_overview(shop, monkeypatch):
+    shop.overview()  # first run, cached
+    calls = []
+    monkeypatch.setattr(checks, "run_checks", lambda *a, **k: calls.append(1) or [])
+    shop.overview()
+    assert calls == []  # reused
+    monkeypatch.setattr(workshop, "SETUP_MAX_AGE_S", 0.0)
+    import threading
+    gate = threading.Event()
+
+    def slow(*a, **k):
+        gate.wait(10)
+        return [{"id": "printer", "label": "Printer", "status": "ok", "detail": "", "fix": ""}]
+
+    monkeypatch.setattr(checks, "run_checks", slow)
+    ov = shop.overview()  # stale: the old rows come back at once, a run goes on in the background
+    assert ov["setup"]["pending"] is True and ov["setup"]["checks"]
+    gate.set()
 
 
 def test_design_versions_list_failed_ones_with_their_error(shop):
@@ -454,6 +502,7 @@ def build_showcase(shop: Shop, *, real_render: bool = False) -> dict:
     shop.be.human_clears_plate()
     shop.kinds.clear()
     shop.run_until({"plate_clear", "ready_next"})
+    shop.slash(f"collected {shop.store.done_box()[-1]['id']}")  # Mum picked up her coaster
     # now: Mum's flower box printing
     q3 = shop.request("s-mum", MUM, FLOWER_BOX, "a small box for flowers")
     shop.watch()
@@ -476,7 +525,7 @@ def test_showcase_fills_every_section(shop):
     assert ov["printer"]["state"] == "printing" and ov["now"]["for"]["name"] == "Mum"
     assert [w["asked_by"]["name"] for w in ov["waiting"]] == ["Engineer"] and ov["waiting"][0]["model"]["stl"]
     assert len(ov["done_box"]) == 2
-    assert {d["outcome"] for d in ov["done_box"]} == {"pushed", "on_plate"}
+    assert {d["outcome"] for d in ov["done_box"]} == {"pushed", "taken_off"}
     assert any(d["collected"] for d in ov["done_box"])
     assert ov["needs_human"] and ov["upgrades"] and ov["designs"] and ov["notices"]["recent"]
     assert ov["camera"]["frame"] and ov["filament"]["slots"] and ov["groups"]
@@ -504,9 +553,9 @@ def test_fixture_matches_the_contract(shop):
                 "model"} <= set(w)
         assert w["action"] in ("start", "clear", "resume") and not w["command"].startswith("/")
     for d in ov["done_box"]:
-        assert d["outcome"] in ("pushed", "on_plate", "failed")
+        assert d["outcome"] in ("pushed", "on_plate", "taken_off", "unknown") and d["command"] == f"home3d collected {d['id']}"
     for n in ov["notices"]["recent"]:
-        assert n["status"] in ("sent", "pending", "failed", "no_target")
+        assert n["status"] in ("sent", "pending", "failed", "no_target", "dry_run") and "target" not in n
     for c in ov["setup"]["checks"]:
         assert c["status"] in ("ok", "warn", "missing", "error")
     assert ov["now"] and ov["waiting"] and len(ov["done_box"]) >= 2 and ov["needs_human"] and ov["upgrades"]

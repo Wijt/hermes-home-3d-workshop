@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { cleanCommand, replyLooksRefused, resetWorkshopSession, runCommand, WORKSHOP_SESSION_TITLE } from '../../src/actions.ts'
+import { cleanCommand, readReply, replyLooksRefused, resetWorkshopSession, runCommand, WORKSHOP_SESSION_TITLE } from '../../src/actions.ts'
 import { callFacts, findVersion, isLeadPicture, readDesignCall } from '../../src/design-result.ts'
 import { createViewSlot } from '../../src/slot.ts'
 
@@ -151,4 +151,21 @@ test('the card finds the version STL in the overview', () => {
   assert.equal(findVersion(designs, 'Rail-Bracket', 2).stl, 'b.stl')
   assert.equal(findVersion(designs, 'rail-bracket', 3), null)
   assert.equal(findVersion(designs, 'other', 1), null)
+})
+
+test('the reply marker decides success or refusal and is not shown', async () => {
+  const ok = await runCommand(fakeHost({ session: 's1', reply: { output: '⏸️ Paused "Key tag" (Owner (local)). Resume: /home3d approve resume\n[home3d:ok]' } }), 'home3d pause')
+  assert.deepEqual(ok, { kind: 'ran', ok: true, text: '⏸️ Paused "Key tag" (Owner (local)). Resume: /home3d approve resume' })
+  const no = await runCommand(fakeHost({ session: 's1', reply: { output: 'Started? no: the gate said the plate is unknown.\n[home3d:not_done:gate]' } }), 'home3d approve start 3')
+  assert.equal(no.ok, false)
+  assert.equal(no.text, 'Started? no: the gate said the plate is unknown.')
+  assert.deepEqual(readReply('📦 "a coaster" marked collected (Mum).\n[home3d:ok]'), { ok: true, code: 'ok', text: '📦 "a coaster" marked collected (Mum).', marked: true })
+  assert.deepEqual(readReply('Only the owner and the people in the household list can mark a part collected.\n[home3d:not_done:collected_unknown]'),
+    { ok: false, code: 'collected_unknown', text: 'Only the owner and the people in the household list can mark a part collected.', marked: true })
+  // the marker wins over wording that looks like the other answer
+  assert.equal(readReply('Cannot believe it: started.\n[home3d:ok]').ok, true)
+  assert.equal(readReply('Nothing is printing, so no command was sent.\n[home3d:not_done:nothing_printing]').code, 'nothing_printing')
+  // an older plugin without the marker: the wording decides
+  assert.equal(readReply('Nothing is printing, so no command was sent.').ok, false)
+  assert.equal(readReply('Started #5 "Key tag".').marked, false)
 })

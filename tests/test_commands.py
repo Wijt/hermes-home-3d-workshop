@@ -6,6 +6,7 @@ import argparse
 import inspect
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -470,3 +471,61 @@ def test_r3_owner_ids_are_not_matched_across_platforms_with_chosen_ids(pkg):
     out = commands.make_command(rt)("approve start 1", source={"platform": "irc", "user_id": "U02ABCDEF"},
                                     session_id="irc-chan")
     assert not out.startswith("▶️")
+
+
+# ---- /home3d collected and the result marker ---------------------------------------------------------------------
+def test_collected_marks_a_done_box_part_for_the_owner_and_known_people_only(rig):
+    pid = rig.store.record_done_part(7, job_name="coaster", title="a coaster", requester="Mum",
+                                     left_plate="pushed_off")
+    stranger = rig(f"collected {pid}", "stranger@s.whatsapp.net")
+    assert stranger.endswith("[home3d:not_done:collected_unknown]") and not rig.store.get_done_part(pid)["collected"]
+    assert rig(f"collected {pid + 5}", MUM).endswith("[home3d:not_done:no_part]")
+    assert rig("collected", MUM).endswith("[home3d:not_done:usage]")
+    reply = rig(f"collected {pid}", MUM)
+    assert reply.startswith("📦") and '"a coaster"' in reply and "(Mum)" in reply and reply.endswith("[home3d:ok]")
+    part = rig.store.get_done_part(pid)
+    assert part["collected"] == 1 and part["collected_by"] == "Mum"
+    assert "already" in rig(f"collected #{pid}") and rig.store.get_done_part(pid)["collected_by"] == "Mum"
+    assert rig.store.events(kind="part_collected")
+
+
+def test_collected_is_in_the_help_and_the_argument_hint(rig):
+    from home3d_ws.home3d.plugin import COMMAND_ARGS_HINT
+
+    assert "/home3d collected <part id>" in rig("help") and "collected <part id>" in COMMAND_ARGS_HINT
+
+
+def test_every_action_reply_ends_with_one_result_marker(rig):
+    qid = rig.queue_job()
+    marker = re.compile(r"\n\[home3d:(ok|not_done:[a-z0-9_]+)\]$")
+    replies = {
+        "refused start": rig(f"approve start {qid}", MUM),
+        "usage": rig("approve start"),
+        "nothing to stop": rig("stop"),
+        "start": rig(f"approve start {qid}"),
+        "pause": rig("pause"),
+        "resume": rig("approve resume"),
+        "stop": rig("stop", MUM),
+        "clear": rig("approve clear"),
+    }
+    for what, reply in replies.items():
+        assert marker.search(reply), (what, reply)
+        assert reply.count("[home3d:") == 1, (what, reply)
+    assert replies["refused start"].endswith("[home3d:not_done:not_owner]")
+    assert replies["nothing to stop"].endswith("[home3d:not_done:nothing_printing]")
+    for ok in ("start", "pause", "resume", "stop"):
+        assert replies[ok].endswith("[home3d:ok]"), (ok, replies[ok])
+    assert "[home3d:" not in rig("status") and "[home3d:" not in rig("whoami")
+
+
+def test_the_started_reply_names_a_design_by_its_readable_title(rig, monkeypatch):
+    qid = rig.queue_job()
+    real = rig.cmd.command.tool
+
+    def tool(name, args, session_id=""):
+        res = real(name, args, session_id)
+        return {**res, "name": "mum-key-tag_v1.gcode.3mf"} if name == "home3d_start" else res
+
+    monkeypatch.setattr(rig.cmd.command, "tool", tool)
+    reply = rig(f"approve start {qid}")
+    assert '"Mum key tag v1"' in reply and "mum-key-tag_v1" not in reply, reply

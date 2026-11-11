@@ -3,7 +3,7 @@
   "label": "Workshop",
   "description": "Read-only backend for the Workshop screen in Hermes Desktop: printer, approvals, queue, done box, designs.",
   "icon": "Package",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": { "path": "/home-3d-workshop", "hidden": true },
   "entry": "dist/index.js",
   "api": "plugin_api.py"

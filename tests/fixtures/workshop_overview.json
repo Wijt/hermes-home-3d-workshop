@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "generated_ts": 1794360034.9105072,
+ "generated_ts": 1794366160.1487808,
  "backend": "simulator",
  "persona": "Mıstık",
  "owner": "Sam",
@@ -28,13 +28,13 @@
   },
   "ours": true,
   "eject_planned": true,
-  "started_ts": 1794360031.0,
+  "started_ts": 1794366158.0,
   "model": null
  },
  "camera": {
   "available": true,
   "frame": "media/watcher/sim-snapshot-0006.png",
-  "taken_ts": 1794360030.9199426,
+  "taken_ts": 1794366157.5330563,
   "note": "Latest stored photo; this screen never switches the chamber light on."
  },
  "waiting": [
@@ -44,12 +44,12 @@
    "action": "start",
    "source": "request",
    "queue_item_id": 4,
-   "name": "rail-bracket v2",
+   "name": "Rail bracket v2",
    "asked_by": {
     "name": "Engineer",
     "group": "R&D"
    },
-   "asked_ts": 1794360034.4582856,
+   "asked_ts": 1794366159.9303608,
    "request_text": "a bracket for the lab rail, 4 mm thick",
    "facts": {
     "print_time_min": 30,
@@ -136,7 +136,7 @@
   },
   {
    "id": 4,
-   "name": "rail-bracket v2",
+   "name": "Rail bracket v2",
    "for": {
     "name": "Engineer",
     "group": "R&D"
@@ -157,107 +157,172 @@
  ],
  "done_box": [
   {
+   "id": 2,
    "job_id": 2,
-   "name": "Cable clip",
+   "name": "cable clip",
    "for": {
     "name": "Sam",
     "group": ""
    },
-   "finished_ts": 1794356015,
-   "outcome": "on_plate",
-   "detail": "left on the plate; a person took it off",
+   "finished_ts": 1794366157.0,
+   "outcome": "taken_off",
+   "detail": "a person took it off the plate",
    "photo": "media/watcher/sim-snapshot-0004.png",
-   "collected": true,
+   "collected": false,
+   "collected_by": "",
+   "collected_ts": null,
    "command": "home3d collected 2"
   },
   {
+   "id": 1,
    "job_id": 1,
-   "name": "Coaster",
+   "name": "a coaster for the living room",
    "for": {
     "name": "Mum",
     "group": "Family"
    },
-   "finished_ts": 1794354815,
+   "finished_ts": 1794366156.0,
    "outcome": "pushed",
    "detail": "pushed off into the done box",
    "photo": "media/watcher/sim-snapshot-0001.png",
-   "collected": false,
+   "collected": true,
+   "collected_by": "Sam",
+   "collected_ts": 1794366157.0,
    "command": "home3d collected 1"
   }
  ],
  "notices": {
   "pending": 0,
+  "sent": 0,
   "failed": 0,
+  "no_target": 0,
+  "dry_run": 9,
   "recent": [
    {
-    "ts": 1794360034.7813148,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 9,
+    "ts": 1794366160.0504038,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "approval_request",
+    "job": "Rail bracket v2",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "🙋 Engineer asks to start #4 \"rail-bracket v2\" (30 min, 14 g). To start it: /home3d approve start 4",
     "photo": null
    },
    {
-    "ts": 1794360031.0012825,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 8,
+    "ts": 1794366157.9860346,
+    "to": "Family",
+    "group": "Family",
+    "audience": "family",
+    "kind": "started",
+    "job": "Flower gift box",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
+    "text": "🖨️ Mum, \"a small box for flowers\" has started printing, about 1 hour 23 minutes to go.",
+    "photo": null
+   },
+   {
+    "id": 7,
+    "ts": 1794366157.56569,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "ready_next",
+    "job": "Flower gift box",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "▶️ The camera thinks the plate is empty (diff 1.8%). Next workshop job ready: \"Flower gift box\" (#3) · for Mum Check the photo, then start it: /home3d approve s",
     "photo": "media/watcher/sim-snapshot-0006.png"
    },
    {
-    "ts": 1794360030.1092212,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 6,
+    "ts": 1794366157.0492516,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "plate_clear",
+    "job": "Cable clip",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "✅ The camera thinks the plate is empty (diff 1.8%); \"Cable clip\" (#2) looks taken off. Check the photo: the camera can miss thin parts.",
     "photo": "media/watcher/sim-snapshot-0005.png"
    },
    {
-    "ts": 1794360029.8325343,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 5,
+    "ts": 1794366156.8389387,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "finished,upgrade_proposed",
+    "job": "Cable clip",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "✅ Finished: \"Cable clip\" (#2) · layer 60/60 · 15 min · bed 55 °C, nozzle 101 °C · for Sam No auto-eject: take the part off, then /home3d approve clear. 💡 Upgrad",
     "photo": "media/watcher/sim-snapshot-0004.png"
    },
    {
-    "ts": 1794360028.5274923,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 4,
+    "ts": 1794366156.1308472,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "ready_next",
+    "job": "Cable clip",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "▶️ The camera thinks the plate is empty (diff 1.8%). Next workshop job ready: \"Cable clip\" (#2) · for Sam Check the photo, then start it: /home3d approve start ",
     "photo": "media/watcher/sim-snapshot-0003.png"
    },
    {
-    "ts": 1794360027.6583762,
-    "to": "family",
-    "target": "telegram:<family-group>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 3,
+    "ts": 1794366155.6870103,
+    "to": "Family",
+    "group": "Family",
+    "audience": "family",
+    "kind": "finished_ejected",
+    "job": "Coaster",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "✅ Mum, \"a coaster for the living room\" is done. It dropped off by itself, you can take it from the box.",
     "photo": "media/watcher/sim-snapshot-0001.png"
    },
    {
-    "ts": 1794360027.6574547,
-    "to": "owner",
-    "target": "telegram:<owner-chat>",
-    "kind": "",
-    "status": "no_target",
-    "error": "dry run: kept in the outbox, not sent",
+    "id": 2,
+    "ts": 1794366155.6684453,
+    "to": "owner chat",
+    "group": "",
+    "audience": "owner",
+    "kind": "finished,finished_ejected",
+    "job": "Coaster",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
     "text": "✅ Finished: \"Coaster\" (#1) · layer 20/20 · 1 h 5 min · bed 26 °C, nozzle 25 °C · for Mum ✅ \"Coaster\" (#1) was pushed off; the camera thinks the plate is empty (",
     "photo": "media/watcher/sim-snapshot-0002.png"
+   },
+   {
+    "id": 1,
+    "ts": 1794366155.0358186,
+    "to": "Family",
+    "group": "Family",
+    "audience": "family",
+    "kind": "started",
+    "job": "Coaster",
+    "status": "dry_run",
+    "attempts": 0,
+    "error": "",
+    "text": "🖨️ Mum, \"a coaster for the living room\" has started printing, about 43 minutes to go.",
+    "photo": null
    }
   ]
  },
@@ -305,42 +370,46 @@
   {
    "id": 4,
    "kind": "approve_start",
-   "text": "Wait for the owner to approve a start: home3d_start start:4 waited for the owner's approval",
-   "ts": 1794360034.630611,
+   "text": "Wait for the owner to approve a start",
+   "ts": 1794366159.9835212,
    "open": true,
-   "job": "",
+   "job": "Rail bracket v2",
    "who": "Engineer",
-   "source": "agent"
+   "source": "agent",
+   "resolved_by": ""
   },
   {
    "id": 3,
    "kind": "remove_part",
    "text": "Take a finished part off the plate: no auto-eject planned",
-   "ts": 1794360029.6193812,
-   "open": true,
+   "ts": 1794366156.6704664,
+   "open": false,
    "job": "Cable clip",
    "who": "",
-   "source": "watcher"
+   "source": "watcher",
+   "resolved_by": "the camera saw the plate empty"
   },
   {
    "id": 2,
    "kind": "remove_part",
    "text": "Take a finished part off the plate: part left on the plate",
-   "ts": 1794360024.5843236,
-   "open": true,
+   "ts": 1794366154.3715355,
+   "open": false,
    "job": "Pen holder",
    "who": "",
-   "source": "watcher"
+   "source": "watcher",
+   "resolved_by": "the camera saw the plate empty"
   },
   {
    "id": 1,
    "kind": "remove_part",
    "text": "Take a finished part off the plate: part left on the plate",
-   "ts": 1794360024.4927998,
-   "open": true,
+   "ts": 1794366154.3502364,
+   "open": false,
    "job": "Pen holder",
    "who": "",
-   "source": "watcher"
+   "source": "watcher",
+   "resolved_by": "the camera saw the plate empty"
   }
  ],
  "upgrades": [
@@ -352,7 +421,7 @@
    "count": 3,
    "status": "proposed",
    "model_ref": "https://makerworld.com/en/models/2335000",
-   "updated_ts": 1794360029.6823967
+   "updated_ts": 1794366156.7357674
   }
  ],
  "designs": [
@@ -360,7 +429,7 @@
    "slug": "rail-bracket",
    "title": "Rail bracket",
    "latest_ok": 2,
-   "updated": "2026-11-11 04:20",
+   "updated": "2026-11-11 06:02",
    "versions": [
     {
      "version": 1,
@@ -382,8 +451,8 @@
       "triangles": 284,
       "fits_build_volume": true,
       "simple": true,
-      "render_s": 0.17,
-      "created": 1794360032.0673559,
+      "render_s": 0.15,
+      "created": 1794366158.0752156,
       "warnings": 0
      },
      "note": ""
@@ -412,7 +481,7 @@
       "library_file_ids": [
        7
       ],
-      "created": 1794360032.860839,
+      "created": 1794366158.8027215,
       "warnings": 0
      },
      "note": ""
@@ -424,72 +493,88 @@
   "checks": [
    {
     "id": "backend",
-    "label": "Printer backend",
-    "status": "warn",
-    "detail": "simulated printer: nothing real prints",
-    "fix": "set backend to bambuddy and bambuddy_url in the plugin settings"
+    "label": "Printer manager",
+    "status": "ok",
+    "detail": "simulator (a simulated printer: no hardware, nothing is printed)",
+    "fix": ""
    },
    {
     "id": "printer",
-    "label": "Printer reachable",
+    "label": "Printer",
     "status": "ok",
-    "detail": "state: printing",
+    "detail": "RUNNING · Flower gift box · Simulated A1 · 2 active item(s)",
     "fix": ""
    },
    {
-    "id": "owner",
-    "label": "Owner identity",
+    "id": "slicing",
+    "label": "Slicing",
     "status": "ok",
-    "detail": "1 owner id(s)",
+    "detail": "simulated slicer",
     "fix": ""
    },
    {
-    "id": "household",
-    "label": "Household",
+    "id": "models",
+    "label": "Model search and import",
     "status": "ok",
-    "detail": "2 person(s)",
+    "detail": "simulated MakerWorld catalog",
     "fix": ""
    },
    {
-    "id": "owner_target",
-    "label": "Owner notices",
+    "id": "camera",
+    "label": "Camera",
     "status": "ok",
-    "detail": "telegram:<owner-chat>",
+    "detail": "simulated camera and plate check",
     "fix": ""
    },
    {
-    "id": "family_target",
-    "label": "Family notices",
-    "status": "ok",
-    "detail": "telegram:<family-group>",
-    "fix": ""
-   },
-   {
-    "id": "watcher",
-    "label": "Watcher",
-    "status": "ok",
-    "detail": "last pass 0 s ago",
-    "fix": ""
-   },
-   {
-    "id": "autoeject",
+    "id": "auto_eject",
     "label": "Auto-eject preset",
     "status": "ok",
-    "detail": "simulator preset",
+    "detail": "auto-eject preset: sim-autoeject (built into the simulator)",
+    "fix": ""
+   },
+   {
+    "id": "plate_clear_setting",
+    "label": "Require plate clear (Bambuddy)",
+    "status": "ok",
+    "detail": "require plate clear: on: queued jobs wait until the plate is marked clear",
     "fix": ""
    },
    {
     "id": "openscad",
-    "label": "OpenSCAD (design)",
+    "label": "OpenSCAD and previews",
     "status": "ok",
-    "detail": "/usr/bin/openscad",
+    "detail": "2021.01 · /usr/bin/openscad · previews on (xvfb-run)",
+    "fix": ""
+   },
+   {
+    "id": "watcher",
+    "label": "Watcher job",
+    "status": "ok",
+    "detail": "cron job: unknown (no hermes binary); cron script: not installed; watcher: last pass 0 min ago",
+    "fix": ""
+   },
+   {
+    "id": "delivery",
+    "label": "Delivery targets",
+    "status": "missing",
+    "detail": "hermes binary not found: notices stay in the outbox; owner_target: telegram:<owner-chat>; family_target: telegram:<family-group>",
+    "fix": "Run inside Hermes, or put the hermes command on PATH"
+   },
+   {
+    "id": "owner_ids",
+    "label": "Owner ids",
+    "status": "ok",
+    "detail": "owner_ids: 1 id(s), compared exactly (check with /home3d whoami)",
     "fix": ""
    }
-  ]
+  ],
+  "checked_ts": 1794366160.1961951,
+  "pending": false
  },
  "watcher": {
   "fresh": true,
-  "last_pass_ts": 1794360034.8540335,
+  "last_pass_ts": 1794366160.1164951,
   "interval": "2m",
   "model_calls": 0,
   "installed": false,
@@ -499,11 +584,15 @@
  "groups": [
   {
    "name": "Family",
-   "tone": "family"
+   "tone": "family",
+   "language": "en",
+   "members": 1
   },
   {
    "name": "R&D",
-   "tone": "team"
+   "tone": "team",
+   "language": "en",
+   "members": 1
   }
  ],
  "viewer": {

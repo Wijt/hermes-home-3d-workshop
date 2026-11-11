@@ -35,9 +35,23 @@ export function cleanCommand(command: string): string {
   return c
 }
 
-/** A reply reads as a refusal when it starts with the plugin's "Not done" / "Refused" wording. */
+/**
+ * The plugin ends the reply of every action subcommand (approve start|clear|resume, stop, pause, collected)
+ * with one line: `[home3d:ok]` or `[home3d:not_done:<code>]` (home3d/commands.py, `result_marker`).
+ * `readReply` splits it off; a reply without it (an older plugin) falls back to the wording.
+ */
+const MARKER = /(?:^|\n)[ \t]*\[home3d:(ok|not_done)(?::([a-z0-9_]+))?\][ \t]*$/
+
+export function readReply(text: string): { ok: boolean; code: string; text: string; marked: boolean } {
+  const m = MARKER.exec(text)
+  if (!m) return { ok: !replyLooksRefused(text), code: '', text: text.trim(), marked: false }
+  const ok = m[1] === 'ok'
+  return { ok, code: ok ? 'ok' : m[2] || 'not_done', text: text.slice(0, m.index).trim(), marked: true }
+}
+
+/** Fallback for a reply without the marker: it reads as a refusal when it starts with refusal wording. */
 export function replyLooksRefused(text: string): boolean {
-  return /^\s*(?:\S+\s+)?(not done|refused|cannot|can't|error|failed|no such|unknown)/i.test(text)
+  return /^\s*(?:\S+\s+)?(not done|refused|cannot|can't|error|failed|no such|unknown|only the owner|nothing is printing|usage)/i.test(text)
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e ?? 'unknown error'))
@@ -45,9 +59,10 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e ?? 'u
 type SlashReply = { output?: string; warning?: string } | null
 
 function ranOutcome(r: SlashReply): ActionOutcome {
-  const text = [r?.output, r?.warning].filter(s => typeof s === 'string' && s.trim()).join('\n').trim()
-  const shown = text || 'Done. The command sent no reply.'
-  return { kind: 'ran', ok: !replyLooksRefused(shown), text: shown }
+  const raw = [r?.output, r?.warning].filter(s => typeof s === 'string' && s.trim()).join('\n').trim()
+  if (!raw) return { kind: 'ran', ok: true, text: 'Done. The command sent no reply.' }
+  const reply = readReply(raw)
+  return { kind: 'ran', ok: reply.ok, text: reply.text || (reply.ok ? 'Done.' : 'Not done.') }
 }
 
 /** Title of the screen's own hidden session (the gateway resolves a title to the same session every time). */

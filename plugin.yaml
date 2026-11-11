@@ -1,18 +1,21 @@
 name: home-3d-workshop
-version: 0.1.0
+version: 0.2.0
 description: >-
-  A household 3D-printing workshop with a character. Family members ask in plain language (text or
-  voice note); the agent finds or customises a model, or designs a new part in OpenSCAD (render, look at
-  the previews, iterate), slices it, queues it, watches the print with a zero-token watcher, tells the
-  owner and the family (in different tones), checks the plate with the camera for the next job, and
-  turns every "a human had to step in" moment into an upgrade proposal.
-  Works with a Bambu Lab printer managed by Bambuddy, or with the built-in simulated printer.
+  Ask. It's in the box. A 3D printer as a member of the group chat: people ask in plain words (text or
+  voice note); the agent finds or customises a model, or designs a part in OpenSCAD, slices it and
+  queues it; the owner approves the start (typed, never by voice); a zero-token watcher follows the
+  print; the part is pushed off into a done box and the person who asked is told, with a photo, in the
+  chat the request came from, through a saved outbox with retries. Serves a family or a team (groups),
+  gives the owner one "Workshop" screen in Hermes Desktop (read-only routes; its buttons run /home3d),
+  and turns every "a human had to
+  step in" moment into an upgrade proposal. Works with a Bambu Lab printer managed by Bambuddy, or with
+  the built-in simulated printer.
 author: Wijt
 kind: standalone
 license: MIT
 homepage: https://github.com/Wijt/hermes-home-3d-workshop
 requires_hermes: ">=0.22.5"
-tags: [3d-printing, bambu, bambuddy, household, family, makerworld, openscad, automation]
+tags: [3d-printing, bambu, bambuddy, household, family, team, group-chat, makerworld, openscad, automation, desktop]
 provides_tools:
   - home3d_status
   - home3d_camera

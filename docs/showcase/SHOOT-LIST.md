@@ -27,15 +27,15 @@ and focus locked, room light on. No vertical video. Shoot each clip longer than 
 
 | File in `media/footage/` | Beat | Used | Shoot | Camera | What happens |
 |---|---|---|---|---|---|
-| `01_hook_drop.mp4` | 1 The drop | 5 s | 20 s | Tripod at bed height, printer and box in frame, nobody visible | The cooled part is pushed and slides into the box. Start recording before the push. This can be a second angle of clip 05. |
-| `02_mum_voice_note.mp4` | 2 The ask | 14 s | 30 s | Over her shoulder, phone screen readable, then hold on the chat | She records a voice note to the family group asking for the object. Mıstık answers with the picture. She answers yes. **Keep the sound**: her voice is the heart of the film. |
-| `03_screen_start.mp4` | 3 The back room | 14 s | 30 s | Screen recording, 1920x1080, Hermes Desktop on the Workshop page | The approval card is visible. Turn the 3D preview once with the mouse. Press Start. Wait for the reply. |
-| `04_printing_timelapse.mp4` | 4 The watch | 12 s | whole print | Tripod, timelapse mode, or the printer's own timelapse | The object grows on the bed. |
+| `01_hook_drop.mp4` | 1 Hook | 5.5 s | 20 s | Tripod at bed height, printer and box in frame, nobody visible | The cooled part is pushed and slides into the box. Start recording before the push. This can be a second angle of clip 05. |
+| `02_mum_voice_note.mp4` | 2 The ask | 13 s | 30 s | Over her shoulder, phone screen readable, then hold on the chat | She records a voice note to the family group asking for the object (in the film she asks for a rose box). Mıstık answers with the picture. She answers yes. **Keep the sound**: her voice is the heart of the film. |
+| `03_screen_start.mp4` | 3 The back room | 11 s | 30 s | Screen recording, 1920x1080, Hermes Desktop on the Workshop page | The approval card is visible. Turn the 3D preview once with the mouse. Press Start. Wait for the reply. |
+| `04_printing_timelapse.mp4` | 4 The watch | 8 s | whole print | Tripod, timelapse mode, or the printer's own timelapse | The object grows on the bed. |
 | `05_push_into_box.mp4` | 5 The delivery | 7 s | 30 s | Tripod, side view so the fall is visible | Bed cooled, nozzle pushes, part lands in the box. Real time. |
 | `06_mum_gets_message.mp4` | 5 The delivery | 6 s | 20 s | Close on her phone on a table, then her hand at the box | The message with the photo arrives. She takes the part out of the box. |
-| `07_tilted_base.mp4` | 6 The twist | 12 s | 30 s | Slow hand-held pan, close | Along the tilted base under the printer, ending on the box. |
-| `08_lab_chat.mp4` | 7 Another group | 10 s | 20 s | Screen recording of the lab group chat | The engineer's request and the agent's plan and preview. Only if it really happened and the lab agrees. Otherwise skip it. |
-| `09_objects.mp4` | 8 Close | 8 s | 20 s | Slow pan over a table | The things this printer made for the family: the rose boxes, the phone dock, the small figure that sits on the printer. |
+| `07_tilted_base.mp4` | 6 The twist | 9 s | 30 s | Slow hand-held pan, close | Along the tilted base under the printer, ending on the box. |
+| `08_lab_chat.mp4` | 7 A second group | 10 s | 20 s | Screen recording of the lab group chat | The engineer's request and the agent's plan and preview. Only if it really happened and the lab agrees. Otherwise skip it. |
+| `09_objects.mp4` | 8 Close | 2.5 s | 20 s | Slow pan over a table | The things this printer made for the family: the rose boxes, the phone dock, the small figure that sits on the printer. |
 
 ## If the words change
 

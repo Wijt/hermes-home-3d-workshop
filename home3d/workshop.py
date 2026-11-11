@@ -10,15 +10,17 @@ What it never does:
   Bambuddy; the simulator advances its virtual clock on any read, as it does for every other reader);
 - switch the chamber light or take a photo (on a real A1 that is a light cycle and up to 12 s): the camera section
   shows the newest photo already stored under ``<data dir>/media``;
-- run OpenSCAD, ``hermes`` or any other subprocess, or call a model ("model calls: 0" is the watcher's design);
-- keep state between calls: settings, data dir, store and backend are resolved per call through ``rt``.
+- run OpenSCAD or any other subprocess in the request, or call a model ("model calls: 0" is the watcher's design);
+- wait for the setup checks: ``home3d.checks`` runs in a background thread and its rows are cached for
+  ``SETUP_MAX_AGE_S`` (``setup_checks``); apart from that cache, settings, data dir, store and backend are resolved
+  per call through ``rt``.
 
 Every section is built on its own: a section that fails comes back empty and its error is listed in
 ``problems`` (the screen stays usable when, say, the printer manager is down).
 
-Fields the current code cannot fill yet come from small functions marked ``INTEGRATION POINT`` below. Each one
-uses newer code when it exists at run time (a store method, a settings field, ``home3d.checks``) and otherwise
-returns a sensible empty or derived value.
+People and groups come from the ``groups`` setting and ``notify.route_for``; notices from the store's outbox; the
+done box from ``Store.done_box``; open human-needed moments from ``Store.open_human_needed``; the setup list from
+``home3d.checks``.
 
 A file reference is the file's path relative to the plugin data dir (``designs/<slug>/<slug>_v2.stl``,
 ``media/watcher/sim-snapshot-0003.png``). It is opaque to the front end, which only passes it back to
@@ -29,11 +31,10 @@ A file reference is the file's path relative to the plugin data dir (``designs/<
 from __future__ import annotations
 
 import base64
-import importlib
 import json
 import os
 import re
-import shutil
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
@@ -55,13 +56,11 @@ NEEDS_HUMAN_LIMIT = 20
 DESIGN_LIMIT = 12
 DESIGN_VERSION_LIMIT = 12
 NOTICE_RECENT = 12
-NOTICE_FAILED_WINDOW_S = 7 * 86400
 PHOTO_MATCH_S = 180  # an outbox photo sent this long after a job's end event (and naming it) is that job's photo
 
 _STATE = {IDLE: "idle", "PREPARE": "printing", "RUNNING": "printing", PAUSE: "paused", FINISH: "finished",
           FAILED: "failed", OFFLINE: "offline"}
 _ACTION = {"start": "start", "clear_plate": "clear", "resume": "resume"}
-_DONE_STATES = ("finished", "cleared", "failed")
 _END_EVENTS = ("finished_ejected", "finished", "failed", "stopped", "plate_not_clear", "eject_unverified",
                "plate_clear")  # photo preference order
 _JOB_SUFFIXES = (".gcode.3mf", ".3mf", ".gcode", ".stl")
@@ -76,14 +75,6 @@ class FileRefError(Exception):
 
 
 # ---- small helpers ------------------------------------------------------------------------------------------------
-def _pkg(name: str) -> Optional[Any]:
-    """``home3d.<name>`` when that module exists in this build (it may arrive with a later merge), else None."""
-    try:
-        return importlib.import_module(f"{__package__}.{name}")
-    except ImportError:
-        return None
-
-
 def _int(v: Any) -> Optional[int]:
     if v is None or isinstance(v, bool):
         return None
@@ -152,205 +143,133 @@ def _settings(rt) -> Any:
     return rt.settings
 
 
-# ---- INTEGRATION POINTS ---------------------------------------------------------------------------------------------
-def person_group(settings: Any, name: str) -> str:
-    """INTEGRATION POINT: the group a person belongs to ("Family", "R&D", ...).
-
-    Today a household entry may carry an optional ``"group"`` key (``{"id", "name", "group"}``); nothing writes one
-    yet, so this is usually "". After the groups work merges, a ``Settings.group_for(name)`` method wins."""
-    fn = getattr(settings, "group_for", None)
-    if callable(fn):
+# ---- merged code: groups, outbox, done box, setup checks -----------------------------------------------------------
+def _origin(store: Any, job: Optional[dict]) -> dict:
+    """Where a job's request came from (``platform``, ``chat_id``, ``sender_id``), as the watcher routes it."""
+    req: dict = {}
+    if job and job.get("request_id"):
         try:
-            return str(fn(name) or "")
+            req = store.get_request(int(job["request_id"])) or {}
         except Exception:
-            return ""
-    want = str(name or "").strip().casefold()
-    for raw in getattr(settings, "household", None) or []:
-        if isinstance(raw, dict) and str(raw.get("name") or "").strip().casefold() == want:
-            return str(raw.get("group") or "")
-    return ""
+            req = {}
+    return req if (req.get("chat_id") or req.get("sender_id")) else (job or {})
+
+
+def person_group(settings: Any, name: str, origin: Optional[dict] = None) -> str:
+    """The configured group (``groups`` setting) a request belongs to, by ``notify.route_for``: the group whose chat
+    it came from, else the group listing its sender. "" for the owner, a household member outside every group
+    (``family_target``) and anyone not announced."""
+    from . import notify
+
+    o = origin or {}
+    route = notify.route_for(settings, requester=str(name or ""), platform=str(o.get("platform") or ""),
+                             chat_id=str(o.get("chat_id") or ""), sender_id=str(o.get("sender_id") or ""))
+    return route.group if route.announce else ""
 
 
 def groups(settings: Any) -> list[dict]:
-    """INTEGRATION POINT: the chat groups the workshop serves, ``[{"name", "tone": "family"|"team"}]``.
+    """The chat groups the workshop serves (``Settings.group_list``): ``[{"name", "tone", "language", "members"}]``
+    with ``members`` a count. No target and no member id: the screen only names them."""
+    return [{"name": g.name, "tone": g.tone, "language": settings.group_language(g), "members": len(g.members or [])}
+            for g in settings.group_list()]
 
-    Uses ``Settings.groups`` when a later build has it (a list of dicts or names); otherwise the distinct
-    ``group`` keys of household entries (tone ``family``); otherwise ``[]``."""
-    out: list[dict] = []
-    seen: set[str] = set()
 
-    def add(name: Any, tone: Any = "family") -> None:
-        n = str(name or "").strip()
-        if n and n.casefold() not in seen:
-            seen.add(n.casefold())
-            t = str(tone or "family").strip().lower()
-            out.append({"name": n, "tone": t if t in ("family", "team") else "family"})
+NOTICE_STATUSES = ("pending", "sent", "failed", "no_target", "dry_run")
 
-    for g in getattr(settings, "groups", None) or []:
-        if isinstance(g, dict):
-            add(g.get("name"), g.get("tone"))
-        else:
-            add(g)
-    for raw in getattr(settings, "household", None) or []:
-        if isinstance(raw, dict) and raw.get("group"):
-            add(raw.get("group"), raw.get("tone") or "family")
+
+def notices(rt, store: Any, *, owner: bool = True) -> dict:
+    """Did everyone get told? From the store's outbox (``notify.outbox_summary`` counts and the newest records).
+
+    ``{"pending", "failed", "dry_run", "no_target", "sent", "recent": [{"id", "ts", "to", "group", "audience",
+    "kind", "job", "status", "attempts", "error", "text", "photo"}]}``. ``dry_run`` is a simulated notice (nothing was
+    sent on purpose), not a failure. A target is never included; ``text`` and ``error`` only when the viewer is the
+    owner (``owner``), otherwise the screen gets counts and who each notice was for."""
+    from . import notify
+
+    summary = notify.outbox_summary(store)
+    if summary.get("error"):
+        raise RuntimeError(summary["error"])
+    counts = summary.get("counts") or {}
+    out: dict = {s: int(counts.get(s) or 0) for s in NOTICE_STATUSES}
+    recent = []
+    for r in store.outbox(limit=NOTICE_RECENT):
+        status = str(r.get("status") or "pending")
+        status = status if status in NOTICE_STATUSES else "pending"
+        text = " ".join(str(r.get("text") or "").split())
+        err = str(r.get("last_error") or "")[:200]
+        if status == "no_target":
+            err = err or "no chat to send to: kept in the outbox"
+        recent.append({"id": _int(r.get("id")), "ts": float(r.get("ts") or 0), "to": notify._to_label(r),
+                       "group": str(r.get("group_name") or ""), "audience": str(r.get("audience") or ""),
+                       "kind": ",".join(r.get("kinds") or []), "job": pretty_name(r.get("job_name")),
+                       "status": status, "attempts": int(r.get("attempts") or 0),
+                       "error": err if owner else "", "text": text[:160] if owner else "",
+                       "photo": file_ref(r.get("media")) if owner else None})
+    out["recent"] = recent
     return out
 
 
-def is_collected(store: Any, job: dict) -> bool:
-    """INTEGRATION POINT: someone took this part out of the done box (``/home3d collected <job id>``).
-
-    Uses ``Store.is_collected(job_id)`` or a ``collected_ts`` column once they exist, else a
-    ``collected:<job id>`` kv record. A part a person already took off the plate by hand (job ``cleared``
-    with outcome ``removed``) counts as collected."""
-    qid = _int(job.get("queue_item_id"))
-    fn = getattr(store, "is_collected", None)
-    if callable(fn) and qid is not None:
-        try:
-            return bool(fn(qid))
-        except Exception:
-            pass
-    if job.get("collected_ts"):
-        return True
-    if qid is not None:
-        try:
-            if store.kv_get(f"collected:{qid}"):
-                return True
-        except Exception:
-            pass
-    return job.get("state") == "cleared" and str(job.get("outcome") or "") == "removed"
+SETUP_MAX_AGE_S = 300.0  # a setup check result is reused this long
+SETUP_WAIT_S = 2.0  # the first overview waits at most this long for a check run; later ones never wait
+SETUP_RUN_TIMEOUT_S = 15.0  # one background run of home3d.checks (each backend request: 5 s)
+_setup_lock = threading.Lock()
+_setup_cache: dict = {}  # key -> (wall ts, rows)
+_setup_running: dict = {}  # key -> threading.Event (set when the run ends)
 
 
-def notices(rt, store: Any) -> dict:
-    """INTEGRATION POINT: did everyone get told? ``{"pending", "failed", "recent": [...]}``.
+def _setup_key(settings: Any) -> tuple:
+    return (str(data_dir()), settings.backend, settings.bambuddy_url, settings.printer_id,
+            settings.autoeject_printer_preset, settings.owner_target, settings.family_target,
+            tuple(sorted(json.dumps(g, sort_keys=True, default=str) for g in settings.groups or [])),
+            tuple(settings.owner_ids or []))
 
-    A later store outbox (``Store.notice_summary()`` returning this shape) wins. Today: ``recent`` and ``failed``
-    come from ``notify``'s ``outbox.jsonl`` (every message the watcher sent or would have sent), and ``pending``
-    counts the family approval requests the watcher has not told the owner about yet."""
-    fn = getattr(store, "notice_summary", None)
-    if callable(fn):
-        got = fn()
-        if isinstance(got, dict):
-            return {"pending": int(got.get("pending") or 0), "failed": int(got.get("failed") or 0),
-                    "recent": list(got.get("recent") or [])[:NOTICE_RECENT]}
-    from . import notify
 
-    rows = notify.read_outbox(limit=200)
+def setup_checks(rt, settings: Any) -> dict:
+    """The setup list from ``home3d.checks.run_checks`` (the same rows as ``hermes home3d doctor --json``), cached.
+
+    The checks probe the printer manager and run ``hermes cron list``: up to 15 s. The overview never waits for that:
+    the rows are kept for ``SETUP_MAX_AGE_S`` per profile and settings; an older or missing result starts one
+    background run, and the overview returns the last rows at once (or waits up to ``SETUP_WAIT_S`` the very first
+    time). ``{"checks": [...], "checked_ts": wall ts or None, "pending": a run is going on}``. The checks only read
+    (no photo, so no chamber light)."""
+    from . import checks as checks_mod
+
+    key = _setup_key(settings)
     now = time.time()
-    failed = sum(1 for r in rows if r.get("ok") is False and not r.get("dry_run")
-                 and now - float(r.get("ts") or 0) < NOTICE_FAILED_WINDOW_S)
-    recent = []
-    for r in reversed(rows[-NOTICE_RECENT:]):
-        target = str(r.get("target") or "")
-        if not target:
-            status, err = "no_target", "no target set: kept in the outbox"
-        elif r.get("dry_run"):
-            status, err = "no_target", "dry run: kept in the outbox, not sent"
-        elif r.get("ok"):
-            status, err = "sent", ""
-        else:
-            status, err = "failed", str(r.get("error") or "")[:200]
-        text = " ".join(str(r.get("text") or "").split())
-        recent.append({"ts": float(r.get("ts") or 0), "to": str(r.get("audience") or ""), "target": target,
-                       "kind": "", "status": status, "error": err, "text": text[:160],
-                       "photo": file_ref(r.get("media"))})
-    try:
-        pending = len(store.pending_approval_requests())
-    except Exception:
-        pending = 0
-    return {"pending": pending, "failed": failed, "recent": recent}
+    with _setup_lock:
+        hit = _setup_cache.get(key)
+        running = _setup_running.get(key)
+        if (hit is None or now - hit[0] >= SETUP_MAX_AGE_S) and running is None:
+            running = threading.Event()
+            _setup_running[key] = running
 
+            def work(ev: threading.Event = running) -> None:
+                try:
+                    rows = checks_mod.run_checks(rt, timeout_s=SETUP_RUN_TIMEOUT_S)
+                    with _setup_lock:
+                        _setup_cache[key] = (time.time(), [_check_row(r) for r in rows if isinstance(r, dict)])
+                except Exception:
+                    pass
+                finally:
+                    with _setup_lock:
+                        _setup_running.pop(key, None)
+                    ev.set()
 
-def setup_checks(rt, settings: Any, printer: dict, watcher: dict) -> list[dict]:
-    """INTEGRATION POINT: the setup list, ``[{"id", "label", "status": ok|warn|missing|error, "detail", "fix"}]``.
-
-    ``home3d.checks`` wins when it exists (``run(rt)`` / ``run_checks(rt)`` / ``checks(rt)``, rows normalised).
-    Otherwise a cheap built-in list from the settings and what this overview already read: no network beyond the
-    printer status, no subprocess (OpenSCAD is only looked up on PATH)."""
-    mod = _pkg("checks")
-    if mod is not None:
-        for fname in ("run", "run_checks", "checks"):
-            fn = getattr(mod, fname, None)
-            if callable(fn):
-                rows = fn(rt)
-                return [_check_row(r) for r in rows or [] if isinstance(r, dict)]
-    rows: list[dict] = []
-
-    def add(cid: str, label: str, status: str, detail: str = "", fix: str = "") -> None:
-        rows.append({"id": cid, "label": label, "status": status, "detail": detail, "fix": fix})
-
-    if settings.backend == "simulator":
-        add("backend", "Printer backend", "warn", "simulated printer: nothing real prints",
-            "set backend to bambuddy and bambuddy_url in the plugin settings")
-    elif not str(settings.bambuddy_url or "").strip():
-        add("backend", "Printer backend", "missing", "bambuddy is chosen but bambuddy_url is empty",
-            "set bambuddy_url, e.g. http://192.168.1.50:8000")
-    else:
-        add("backend", "Printer backend", "ok", f"Bambuddy at {settings.bambuddy_url}, printer {settings.printer_id}")
-    if printer.get("state") == "offline":
-        err = "; ".join(e.get("text", "") for e in printer.get("errors") or [] if e.get("text"))
-        add("printer", "Printer reachable", "error", err or "the printer manager did not answer",
-            "check that Bambuddy runs and the printer is on and connected")
-    else:
-        add("printer", "Printer reachable", "ok", f"state: {printer.get('state')}")
-    local = bool(getattr(settings, "local_is_owner", True))
-    if settings.owner_ids:
-        add("owner", "Owner identity", "ok", f"{len(settings.owner_ids)} owner id(s)")
-    elif local:
-        add("owner", "Owner identity", "warn", "no owner_ids: only this computer can approve",
-            "add your messaging id to owner_ids (check it with /home3d whoami)")
-    else:
-        add("owner", "Owner identity", "error", "no owner_ids and local_is_owner is off: nobody can approve",
-            "add your messaging id to owner_ids")
-    add("household", "Household", "ok" if settings.household else "warn",
-        f"{len(settings.household)} person(s)" if settings.household else "nobody is recognised by name",
-        "" if settings.household else 'add {"id", "name"} entries to household')
-    add("owner_target", "Owner notices", "ok" if settings.owner_target else "missing",
-        settings.owner_target or "no target: owner notices stay in the outbox",
-        "" if settings.owner_target else "set owner_target, e.g. telegram:<chat id>")
-    add("family_target", "Family notices", "ok" if settings.family_target else "warn",
-        settings.family_target or "no target: family notices stay in the outbox",
-        "" if settings.family_target else "set family_target to the family group")
-    if watcher.get("fresh"):
-        add("watcher", "Watcher", "ok", f"last pass {_ago(watcher.get('last_pass_ts'))}")
-    elif watcher.get("last_pass_ts"):
-        add("watcher", "Watcher", "error", f"last pass {_ago(watcher.get('last_pass_ts'))}",
-            "start `hermes gateway` (check `hermes cron status`)")
-    elif watcher.get("installed"):
-        add("watcher", "Watcher", "error", "installed but no pass has run", "start `hermes gateway`")
-    else:
-        add("watcher", "Watcher", "missing", "not set up: no notices, no plate checks", "run `hermes home3d setup`")
-    auto = str(settings.autoeject_printer_preset or "").strip()
-    if auto or settings.backend == "simulator":
-        add("autoeject", "Auto-eject preset", "ok", auto or "simulator preset")
-    else:
-        add("autoeject", "Auto-eject preset", "warn", "none: every part waits on the plate for a person",
-            "set autoeject_printer_preset to your push-off printer preset id")
-    exe = shutil.which("openscad")
-    add("openscad", "OpenSCAD (design)", "ok" if exe else "warn", exe or "not found: the agent cannot design parts",
-        "" if exe else "install openscad (and xvfb for previews)")
-    return rows
+            threading.Thread(target=work, name="home3d-workshop-setup", daemon=True).start()
+    if hit is None and running is not None:
+        running.wait(SETUP_WAIT_S)
+        with _setup_lock:
+            hit = _setup_cache.get(key)
+    with _setup_lock:
+        pending = key in _setup_running
+    return {"checks": list(hit[1]) if hit else [], "checked_ts": hit[0] if hit else None, "pending": pending}
 
 
 def _check_row(r: dict) -> dict:
-    st = str(r.get("status") or r.get("level") or "").strip().lower()
-    st = {"fail": "error", "failed": "error", "warning": "warn"}.get(st, st)
-    if st not in ("ok", "warn", "missing", "error"):
-        st = "warn"
-    return {"id": str(r.get("id") or r.get("label") or ""), "label": str(r.get("label") or r.get("id") or ""),
-            "status": st, "detail": str(r.get("detail") or ""), "fix": str(r.get("fix") or "")}
-
-
-def _ago(ts: Any) -> str:
-    try:
-        s = max(0.0, time.time() - float(ts))
-    except (TypeError, ValueError):
-        return "never"
-    if s < 90:
-        return f"{round(s)} s ago"
-    if s < 5400:
-        return f"{round(s / 60)} min ago"
-    return f"{round(s / 3600, 1):g} h ago"
+    st = str(r.get("status") or "").strip().lower()
+    return {"id": str(r.get("id") or ""), "label": str(r.get("label") or r.get("id") or ""),
+            "status": st if st in ("ok", "warn", "missing", "error") else "error",
+            "detail": str(r.get("detail") or ""), "fix": str(r.get("fix") or "")}
 
 
 # ---- sections -------------------------------------------------------------------------------------------------------
@@ -393,10 +312,15 @@ def _printer(status: Any, err: str) -> dict:
             "awaiting_plate_clear": bool(status.awaiting_plate_clear)}
 
 
-def _who(settings: Any, requester: Any) -> dict:
-    """``{"name", "group"}``; an empty requester is the owner (the store's convention)."""
+def _who(settings: Any, requester: Any, origin: Optional[dict] = None) -> dict:
+    """``{"name", "group"}``; an empty requester is the owner (the store's convention). ``origin``: where the request
+    came from (``_origin``), so the group is the one the watcher announces the job in."""
     name = str(requester or "").strip() or str(settings.owner_name or "Owner")
-    return {"name": name, "group": person_group(settings, name)}
+    try:
+        group = person_group(settings, str(requester or "").strip(), origin)
+    except Exception:
+        group = ""
+    return {"name": name, "group": group}
 
 
 def _slice_meta(store: Any, sliced_file_id: Any) -> dict:
@@ -598,7 +522,8 @@ def _waiting_entry(rt, settings: Any, status: Any, queue: list, trays: list, *, 
             req = None
     asked_name = who or (job or {}).get("requester") or ""
     return {"id": rid, "key": f"req-{rid}" if rid is not None else f"{action}-{qid}", "action": action,
-            "source": source, "queue_item_id": qid, "name": name, "asked_by": _who(settings, asked_name),
+            "source": source, "queue_item_id": qid, "name": name,
+            "asked_by": _who(settings, asked_name, _origin(store, job) if job else None),
             "asked_ts": float(asked_ts or 0), "request_text": str((req or {}).get("text") or ""),
             "facts": facts, "checklist": checklist, "ready": bool(gate is not None and gate.ok),
             "command": command, "alt": alt, "model": _model_for(store, job, meta) if job else None}
@@ -656,8 +581,8 @@ def _queue(rt, settings: Any, queue: Optional[list]) -> list[dict]:
         ours = q.id in active
         job = store.get_job(q.id) if ours else None
         meta = _slice_meta(store, (job or {}).get("sliced_file_id"))
-        out.append({"id": q.id, "name": pretty_name(q.name), "for": _who(settings, job.get("requester"))
-                    if job else {"name": "", "group": ""},
+        out.append({"id": q.id, "name": pretty_name(q.name),
+                    "for": _who(settings, job.get("requester"), _origin(store, job)) if job else {"name": "", "group": ""},
                     "status": str(q.status or ""), "position": q.position, "manual_start": bool(q.manual_start),
                     "ours": ours, "print_time_min": round(q.print_time_s / 60) if q.print_time_s else
                     _int(meta.get("print_time_min")),
@@ -680,7 +605,7 @@ def _now(rt, settings: Any, status: Any, queue: Optional[list]) -> Optional[dict
         job = store.job_by_name(status.job_name)
     qid = _int((job or {}).get("queue_item_id")) if job else (printing.id if printing is not None else None)
     return {"queue_item_id": qid, "name": pretty_name(status.job_name),
-            "for": _who(settings, job.get("requester")) if job else None,
+            "for": _who(settings, job.get("requester"), _origin(store, job)) if job else None,
             "ours": job is not None, "eject_planned": bool(job.get("eject_planned")) if job else None,
             "started_ts": _num((job or {}).get("started_ts"), 0),
             "model": _model_for(store, job) if job else None}
@@ -752,57 +677,42 @@ def _photo_for(store: Any, watcher_kv: dict, job: dict, events: list, outbox: li
     return None
 
 
-def _clock_offset(be: Any) -> float:
-    """Seconds the backend's clock runs ahead of the wall clock. The watcher stamps job start/finish times with the
-    backend's clock (the simulator's virtual time); the screen shows wall time. 0 for a real printer manager."""
-    fn = getattr(be, "now", None)
-    if not callable(fn):
-        return 0.0
-    try:
-        return float(fn()) - time.time()
-    except Exception:
-        return 0.0
+_LEFT_PLATE = {"pushed_off": ("pushed", "pushed off into the done box"),
+               "on_plate": ("on_plate", "waiting on the plate for a person"),
+               "taken_off": ("taken_off", "a person took it off the plate"),
+               "unknown": ("unknown", "finished; how it left the plate is not known")}
 
 
-def _wall(ts: Any, offset: float) -> Optional[float]:
-    v = _num(ts, 0)
-    return None if v is None else round(v - offset)
-
-
-def _done_box(rt, settings: Any, offset: float = 0.0) -> list[dict]:
-    """Finished, cleared and failed workshop jobs, newest first. ``finished_ts`` is the watcher's (backend clock)
-    stamp moved to wall time with ``offset`` (``_clock_offset``)."""
+def _done_box(rt, settings: Any) -> list[dict]:
+    """The delivered parts (``Store.done_box``), newest first: ``id`` is the part id ``/home3d collected <id>`` takes,
+    ``job_id`` the queue item it was printed as. ``finished_ts`` is wall time (the watcher records it so). The photo
+    is the one recorded with the part, else the one that went out with the job's end notice."""
     store = rt.store
-    rows = [j for j in store.jobs(limit=100) if j.get("state") in _DONE_STATES]
-    rows.sort(key=lambda j: float(j.get("finished_ts") or j.get("updated") or 0), reverse=True)
-    rows = rows[:DONE_BOX_LIMIT]
+    rows = store.done_box(limit=DONE_BOX_LIMIT)
     if not rows:
         return []
     w = store.kv_get("watcher") or {}
     w = w if isinstance(w, dict) else {}
-    events = store.events(limit=300)
-    try:
-        from . import notify
-
-        outbox = notify.read_outbox(limit=300)
-    except Exception:
-        outbox = []
+    events = outbox = None
     out = []
-    for j in rows:
-        state, outcome = j.get("state"), str(j.get("outcome") or "")
-        if state == "failed":
-            kind, detail = "failed", outcome if outcome and outcome != "failed" else "the print failed"
-        elif state == "cleared" and outcome == "ejected":
-            kind, detail = "pushed", "pushed off into the done box"
-        elif state == "cleared":
-            kind, detail = "on_plate", "left on the plate; a person took it off"
-        else:
-            kind, detail = "on_plate", ("finished; the push-off is not confirmed yet" if j.get("eject_planned")
-                                        else "finished; still on the plate")
-        out.append({"job_id": _int(j.get("queue_item_id")), "name": pretty_name(j.get("name")),
-                    "for": _who(settings, j.get("requester")), "finished_ts": _wall(j.get("finished_ts"), offset),
-                    "outcome": kind, "detail": detail, "photo": _photo_for(store, w, j, events, outbox),
-                    "collected": is_collected(store, j), "command": f"home3d collected {j.get('queue_item_id')}"})
+    for r in rows:
+        qid = _int(r.get("queue_item_id"))
+        kind, detail = _LEFT_PLATE.get(str(r.get("left_plate") or ""), _LEFT_PLATE["unknown"])
+        photo = file_ref(r.get("photo"))
+        if photo is None:
+            job = (store.get_job(qid) if qid is not None else None) or {"name": r.get("job_name") or ""}
+            if events is None:
+                events, outbox = store.events(limit=300), store.outbox(limit=300)
+            photo = _photo_for(store, w, job, events, outbox)
+        name = str(r.get("title") or "").strip() or pretty_name(r.get("job_name"))
+        requester = str(r.get("requester") or "").strip()
+        part_id = _int(r.get("id"))
+        out.append({"id": part_id, "job_id": qid, "name": name,
+                    "for": {"name": requester or str(settings.owner_name or "Owner"),
+                            "group": str(r.get("group_name") or "")},
+                    "finished_ts": _num(r.get("ts"), 0), "outcome": kind, "detail": detail, "photo": photo,
+                    "collected": bool(r.get("collected")), "collected_by": str(r.get("collected_by") or ""),
+                    "collected_ts": _num(r.get("collected_ts"), 0), "command": f"home3d collected {part_id}"})
     return out
 
 
@@ -815,10 +725,16 @@ def _filament(status: Any) -> dict:
 
 
 def _needs_human(store: Any) -> list[dict]:
+    """The moments still waiting for a person (``Store.open_human_needed``) first, then the resolved ones of the
+    last ``NEEDS_HUMAN_DAYS`` days, newest first within each."""
     from . import upgrades
 
+    open_rows = store.open_human_needed(limit=NEEDS_HUMAN_LIMIT)
+    seen = {r.get("id") for r in open_rows}
+    closed = [r for r in store.human_needed(since_days=NEEDS_HUMAN_DAYS, limit=NEEDS_HUMAN_LIMIT)
+              if r.get("id") not in seen and r.get("resolved")]
     out = []
-    for r in store.human_needed(since_days=NEEDS_HUMAN_DAYS, limit=NEEDS_HUMAN_LIMIT):
+    for r in (open_rows + closed)[:NEEDS_HUMAN_LIMIT]:
         kind = str(r.get("kind") or "other")
         label = upgrades.text_for(kind, "en")["label"]
         detail = upgrades.detail_text(r.get("detail"), "en")
@@ -827,7 +743,8 @@ def _needs_human(store: Any) -> list[dict]:
         text = label[:1].upper() + label[1:] + (f": {detail}" if detail else "")
         out.append({"id": _int(r.get("id")), "kind": kind, "text": text, "ts": float(r.get("ts") or 0),
                     "open": not r.get("resolved"), "job": pretty_name(r.get("job_name")),
-                    "who": str(r.get("who") or ""), "source": str(r.get("source") or "")})
+                    "who": str(r.get("who") or ""), "source": str(r.get("source") or ""),
+                    "resolved_by": str(r.get("resolved_by") or "")})
     return out
 
 
@@ -876,13 +793,12 @@ def _watcher(rt, settings: Any) -> dict:
     updated = w.get("updated") if isinstance(w, dict) else None
     if not isinstance(updated, (int, float)):
         updated = store.kv_updated("watcher")
-    stale_s = 600.0
-    hooks = _pkg("hooks")
-    if hooks is not None and callable(getattr(hooks, "watcher_stale_s", None)):
-        try:
-            stale_s = float(hooks.watcher_stale_s(settings))
-        except Exception:
-            pass
+    from . import hooks
+
+    try:
+        stale_s = float(hooks.watcher_stale_s(settings))
+    except Exception:
+        stale_s = 600.0
     fresh = isinstance(updated, (int, float)) and 0 <= time.time() - float(updated) < stale_s
     try:
         installed = watch_script_path().is_file()
@@ -918,6 +834,7 @@ def build_overview(rt) -> dict:
     if q_err:
         problems.append(f"queue: {q_err}"[:300])
     printer = _printer(status, s_err)
+    viewer = _viewer(settings)
     watcher = section("watcher", lambda: _watcher(rt, settings),
                       {"fresh": False, "last_pass_ts": None, "interval": "", "model_calls": 0})
     out = {
@@ -933,17 +850,21 @@ def build_overview(rt) -> dict:
                                                               "note": ""}),
         "waiting": section("waiting", lambda: _waiting(rt, settings, status, queue), []),
         "queue": section("queue", lambda: _queue(rt, settings, queue), []),
-        "done_box": section("done_box", lambda: _done_box(rt, settings, _clock_offset(rt.backend)), []),
-        "notices": section("notices", lambda: notices(rt, rt.store), {"pending": 0, "failed": 0, "recent": []}),
+        "done_box": section("done_box", lambda: _done_box(rt, settings), []),
+        "notices": section("notices", lambda: notices(rt, rt.store, owner=viewer["is_owner"]),
+                           {**{s: 0 for s in NOTICE_STATUSES}, "recent": []}),
         "filament": section("filament", lambda: _filament(status), {"slots": []}),
         "needs_human": section("needs_human", lambda: _needs_human(rt.store), []),
         "upgrades": section("upgrades", lambda: _upgrades(rt.store), []),
         "designs": section("designs", _designs, []),
-        "setup": {"checks": section("setup", lambda: setup_checks(rt, settings, printer, watcher), [])},
+        "setup": section("setup", lambda: setup_checks(rt, settings), {"checks": [], "checked_ts": None,
+                                                                         "pending": False}),
         "watcher": watcher,
         "groups": section("groups", lambda: groups(settings), []),
-        "viewer": _viewer(settings),
+        "viewer": viewer,
     }
+    if not viewer["is_owner"]:  # setup details name chat targets and URLs: only the owner reads them
+        out["setup"]["checks"] = [{**c, "detail": ""} for c in out["setup"].get("checks") or []]
     out["problems"] = problems
     return out
 
@@ -1007,4 +928,4 @@ def dumps(overview: dict) -> str:
 
 
 __all__ = ["SCHEMA_VERSION", "FileRefError", "build_overview", "health", "resolve_file", "file_payload", "file_ref",
-           "pretty_name", "groups", "person_group", "is_collected", "notices", "setup_checks", "dumps"]
+           "pretty_name", "groups", "person_group", "notices", "setup_checks", "dumps"]

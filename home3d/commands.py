@@ -6,6 +6,7 @@
                                         after a failed print)
   /home3d approve resume [ack]          owner: resume a paused print (``ack`` = resume despite a printer error)
   /home3d stop [reason] | pause [reason]  the owner and known people (``stop_policy``): stop / pause the print now
+  /home3d collected <part id>           the owner and known people: a done-box part was picked up
   /home3d whoami                        the sender id / household person this chat maps to
   /home3d upgrades | moments            upgrade proposals / human-needed moments (last 30 days)
   /home3d help                          one line per subcommand, in the household language (``help_text``)
@@ -26,6 +27,14 @@ the local owner). In this order it refuses a run nobody is present for (``Runtim
 worker, ``chat -q``, ``-z``, ``--source tool``; even for the owner), a sender the rule does not allow
 (``gates.approval_refusal`` / ``gates.stop_refusal``, the same rules as the agent path), a start / resume / plate
 clear that arrived as a voice message, then runs the safety gate and the action.
+
+Result marker: the reply of every action subcommand (``approve start|clear|resume``, ``stop``, ``pause``,
+``collected``) ends with one line a program can read without guessing from the wording (``result_marker``)::
+
+    [home3d:ok]                    the action was done
+    [home3d:not_done:<code>]       it was not, with ``perform``'s ``code`` (not_owner, gate, nothing_printing, ...)
+
+The Workshop screen in Hermes Desktop runs these commands and reads this line; people see it as a short tag.
 """
 
 from __future__ import annotations
@@ -57,6 +66,8 @@ HELP_LINES = (
      "sahibi ve tanınan kişiler: süren baskıyı hemen durdur"),
     ("pause [reason]", "the owner and known people: pause the running print (resume needs the owner)",
      "sahibi ve tanınan kişiler: süren baskıyı duraklat (devam için sahibi gerekir)"),
+    ("collected <part id>", "the owner and known people: a part from the done box was picked up",
+     "sahibi ve tanınan kişiler: bitmiş parça kutudan alındı"),
     ("whoami", "which household person this chat is (and whether it is the owner)",
      "bu sohbet evden kim (sahibi mi)"),
     ("upgrades", "upgrade proposals from repeated hands-on moments",
@@ -99,6 +110,12 @@ _T = {
                "Devam: /home3d approve resume"),
     "already_paused": ("⏸️ The print is already paused.", "⏸️ Baskı zaten duraklatılmış."),
     "nothing_printing": ("Nothing is printing, so no command was sent.", "Şu an baskı yok, komut gönderilmedi."),
+    "usage_collected": ("Usage: /home3d collected <part id>", "Kullanım: /home3d collected <parça no>"),
+    "collected": ("📦 \"{name}\" marked collected ({by}).", "📦 \"{name}\" alındı olarak işaretlendi ({by})."),
+    "already_collected": ("📦 \"{name}\" was already marked collected.", "📦 \"{name}\" zaten alındı olarak işaretli."),
+    "no_part": ("No part #{pid} in the done box.", "Bitmiş parçalar arasında #{pid} yok."),
+    "collected_unknown": ("Only the owner and the people in the household list can mark a part collected.",
+                          "Parçayı alındı olarak sadece sahibi ve ev listesindeki kişiler işaretleyebilir."),
     "not_done": ("Not done: {why} Nothing was kept: send the command again when ready.",
                  "Yapılamadı: {why} Onay saklanmadı, hazır olunca komutu tekrar gönder."),
     "unknown": ("Unknown subcommand '{sub}'.", "Bilinmeyen alt komut: '{sub}'."),
@@ -274,7 +291,12 @@ class _Command:
             return self.approve(rest, source, session_id, platform, lang)
         if sub in ("stop", "dur", "durdur", "pause", "duraklat"):
             action = "stop" if sub in ("stop", "dur", "durdur") else "pause"
-            return self.act(action, source, session_id, platform, reason=" ".join(rest)[:200])["message"]
+            return _marked(self.act(action, source, session_id, platform, reason=" ".join(rest)[:200]))
+        if sub in ("collected", "collect", "alındı", "alindi"):
+            pid = _parse_id(rest[0]) if rest else None
+            if pid is None:
+                return _marked(_result(False, "usage", _t("usage_collected", lang)))
+            return _marked(self.act("collected", source, session_id, platform, part_id=pid))
         if sub == "whoami":
             return self.whoami(source, session_id, platform, lang)
         if sub in ("upgrades", "upgrade"):
@@ -290,15 +312,15 @@ class _Command:
         if what in ("start", "başlat", "baslat"):
             qid = _parse_id(rest[1]) if len(rest) > 1 else None
             if qid is None:
-                return _t("usage_start", lang)
-            return self.act("start", source, session_id, platform, qid=qid,
-                            jump=bool(flags & {"jump", "--jump", "atla"}))["message"]
+                return _marked(_result(False, "usage", _t("usage_start", lang)))
+            return _marked(self.act("start", source, session_id, platform, qid=qid,
+                                    jump=bool(flags & {"jump", "--jump", "atla"})))
         if what in ("clear", "plate", "temizle", "tabla"):
-            return self.act("clear", source, session_id, platform)["message"]
+            return _marked(self.act("clear", source, session_id, platform))
         if what in ("resume", "devam"):
-            return self.act("resume", source, session_id, platform,
-                            ack=bool(flags & {"ack", "--ack", "onay", "tamam"}))["message"]
-        return _t("usage_approve", lang)
+            return _marked(self.act("resume", source, session_id, platform,
+                                    ack=bool(flags & {"ack", "--ack", "onay", "tamam"})))
+        return _marked(_result(False, "usage", _t("usage_approve", lang)))
 
     def act(self, action: str, source: Any, session_id: str, platform: str, **kw: Any) -> dict:
         """``perform`` for whoever sent this command (``identify``). A command whose sender's newest message at
@@ -407,6 +429,27 @@ def _upgrade_title(row: dict, tr: bool) -> str:
     return str(info.get("title_tr") or title) if info and title == info.get("title") else title
 
 
+def result_marker(result: dict) -> str:
+    """``[home3d:ok]`` or ``[home3d:not_done:<code>]`` for a ``perform`` result (see the module doc)."""
+    if result.get("ok"):
+        return "[home3d:ok]"
+    code = re.sub(r"[^a-z0-9_]", "_", str(result.get("code") or "failed").lower())[:40] or "failed"
+    return f"[home3d:not_done:{code}]"
+
+
+def _marked(result: dict) -> str:
+    """The reply text of an action subcommand: ``perform``'s message, then the result marker on its own line."""
+    return f"{str(result.get('message') or '').rstrip()}\n{result_marker(result)}"
+
+
+def _title(name: Any) -> str:
+    """A job or file name as people say it (``mum-key-tag_v1.gcode.3mf`` -> ``Mum key tag v1``), as the Workshop
+    screen shows it."""
+    from .workshop import pretty_name
+
+    return pretty_name(name)
+
+
 def _sentence(text: Any) -> str:
     t = str(text or "").strip()
     return t if t.endswith((".", "!", "?")) else t + "."
@@ -417,7 +460,7 @@ def _parse_id(value: str) -> Optional[int]:
     return int(v) if v.isdigit() and int(v) > 0 else None
 
 
-ACTIONS = ("start", "clear", "resume", "stop", "pause")
+ACTIONS = ("start", "clear", "resume", "stop", "pause", "collected")
 _APPROVAL = {"start": "start", "clear": "clear_plate", "resume": "resume"}
 
 
@@ -427,17 +470,18 @@ def _result(ok: bool, code: str, message: str, **extra: Any) -> dict:
 
 def perform(rt, action: str, *, sender: str, label: str = "", platform: str = "", session_id: str = "",
             qid: Optional[int] = None, jump: bool = False, ack: bool = False, reason: str = "", spoken: bool = False,
-            tool: Optional[Callable[[str, dict, str], dict]] = None) -> dict:
+            tool: Optional[Callable[[str, dict, str], dict]] = None, part_id: Optional[int] = None) -> dict:
     """Do one printer action for an actor and say how it went: ``{"ok": bool, "code": str, "message": str}``.
 
     ``action``: ``start`` (``qid``, ``jump``), ``clear`` (mark the plate clear / confirm it), ``resume`` (``ack``:
-    despite a printer error), ``stop``, ``pause`` (``reason``). ``sender``: the id as the store records it
+    despite a printer error), ``stop``, ``pause`` (``reason``), ``collected`` (``part_id``: a done-box part was
+    picked up; the owner and known people, no printer call). ``sender``: the id as the store records it
     (``identify``; ``config.LOCAL_SENDER`` = the local owner while ``local_is_owner``). ``spoken``: the ask came in
     as a voice message. ``tool``: how to call a ``home3d_*`` handler (tests and ``/home3d`` reuse their cache).
 
     ``code`` is ``ok`` or why not: ``usage``, ``unattended``, ``no_identity`` / ``local_off`` / ``not_owner``,
     ``voice_message``, ``stop_unknown`` / ``stop_owner_only`` / ``stop_unattended``, ``bad_request``,
-    ``printer_unreachable``, ``gate``, ``nothing_printing``, ``failed``. ``message`` is in the household language.
+    ``printer_unreachable``, ``gate``, ``nothing_printing``, ``failed``, ``collected_unknown``, ``no_part``. ``message`` is in the household language.
     Never raises for a refusal; nothing is stored that could authorise a later action."""
     s = rt.settings
     lang = s.language
@@ -447,6 +491,8 @@ def perform(rt, action: str, *, sender: str, label: str = "", platform: str = ""
     if tool is None:
         tool = _Command(rt).tool
     sender = str(sender or "")
+    if action == "collected":
+        return _collected(rt, sender, part_id, lang)
     if action in ("stop", "pause"):
         cmd = f"/home3d {action}"
         actor = rt.actor_for(sender, VOICE if spoken else TYPED)
@@ -512,7 +558,7 @@ def perform(rt, action: str, *, sender: str, label: str = "", platform: str = ""
                     {"action": gated, "target": ev.target, "approver": approver, "tool": tool_name})
     if gated == "start":
         who = f" ({res['requester']})" if res.get("requester") else ""
-        out = _t("started", lang, qid=qid, name=_pretty(str(res.get("name") or f"#{qid}")), who=who)
+        out = _t("started", lang, qid=qid, name=_title(res.get("name")) or f"#{qid}", who=who)
         out = out if watcher_fresh(store, s) else out + "\n" + _t("no_watcher", lang)
     elif gated == "clear_plate":
         plate = res.get("plate") or {}
@@ -520,9 +566,9 @@ def perform(rt, action: str, *, sender: str, label: str = "", platform: str = ""
         out = _t("cleared", lang, extra=f" ({diff:g}%)" if isinstance(diff, (int, float)) else "")
         nxt = res.get("next_job") if isinstance(res.get("next_job"), dict) else None
         if nxt and nxt.get("id"):
-            out += "\n" + _t("next_job", lang, qid=nxt["id"], name=_pretty(str(nxt.get("name") or "")))
+            out += "\n" + _t("next_job", lang, qid=nxt["id"], name=_title(nxt.get("name")))
     else:
-        out = _t("resumed", lang, name=_pretty(str(res.get("job") or "")))
+        out = _t("resumed", lang, name=_title(res.get("job")))
     return _result(True, "ok", out, result=res)
 
 
@@ -544,11 +590,35 @@ def _run(rt, tool_name: str, args: dict, sender: str, platform: str, tool: Calla
             return _result(False, code, _t("nothing_printing", lang), result=res)
         return _result(False, code, str(res.get("message") or "") or
                        _t("not_done", lang, why=_sentence(res.get("error") or "?")), result=res)
-    name = _pretty(str(res.get("job") or ""))
+    name = _title(res.get("job"))
     if action == "pause" and res.get("note") == "already paused":
         return _result(True, "ok", _t("already_paused", lang), result=res)
     return _result(True, "ok", _t("stopped" if action == "stop" else "paused", lang, name=name,
                                   by=str(res.get("by") or "?")), result=res)
+
+
+def _collected(rt, sender: str, part_id: Optional[int], lang: str) -> dict:
+    """Mark a done-box part collected (``Store.set_collected``) for the owner or a known person; anyone else, and a
+    run nobody is present for, is refused."""
+    if part_id is None:
+        return _result(False, "usage", _t("usage_collected", lang))
+    actor = rt.actor_for(sender, TYPED)
+    if not actor.present:
+        return _result(False, "unattended", refusal("unattended", lang, cmd=f"/home3d collected {part_id}"))
+    if not actor.known:
+        return _result(False, "collected_unknown", _t("collected_unknown", lang))
+    store = rt.store
+    part = store.get_done_part(int(part_id))
+    if part is None:
+        return _result(False, "no_part", _t("no_part", lang, pid=part_id))
+    name = str(part.get("title") or "").strip() or _title(part.get("job_name")) or f"#{part_id}"
+    if part.get("collected"):
+        return _result(True, "ok", _t("already_collected", lang, name=name), part_id=int(part_id))
+    by = actor.name or rt.settings.owner_name or ""
+    store.set_collected(int(part_id), True, by=by)
+    store.add_event("part_collected", str(part.get("job_name") or ""), {"part_id": int(part_id), "by": by,
+                                                                        "sender": sender})
+    return _result(True, "ok", _t("collected", lang, name=name, by=by), part_id=int(part_id))
 
 
 def make_command(rt) -> Callable[..., str]:
@@ -562,4 +632,4 @@ def make_command(rt) -> Callable[..., str]:
     return home3d
 
 
-__all__ = ["make_command", "perform", "ACTIONS", "authorize", "authorize_sender", "identify", "format_status", "help_text", "HELP_LINES"]
+__all__ = ["make_command", "perform", "result_marker", "ACTIONS", "authorize", "authorize_sender", "identify", "format_status", "help_text", "HELP_LINES"]

@@ -174,7 +174,9 @@ def notify(settings: Settings, *, owner_text: str|None, family_text: str|None,
            media: Path|None = None, owner_media_only: bool = True) -> list[Delivery]
 ```
 Uses `hermes [-p <send_profile>] send -t <target> --json "<text>\nMEDIA:<abs path>"` via `subprocess.run`
-(timeout 60 s), parses `{"success": true}`, retries once. Hermes binary: `shutil.which("hermes")`, else
+(timeout `send_timeout_s`, default 20 s), parses `{"success": true}`. Since 0.2.0 the watcher sends through a
+saved outbox (`Store.outbox_*`, `notify.flush`): a failed send is retried on later passes with a backoff, within
+`send_budget_s` per pass, and the owner is told once about a notice that was given up. Hermes binary: `shutil.which("hermes")`, else
 `Path(sys.executable).parent / "hermes"`. Every message is also appended to `data_dir()/outbox.jsonl`
 (ts, audience, target, text, media, ok) — the simulator/demo shows it. Empty target → dry_run=True (outbox only).
 Family messages get no photo unless the event is `finished*` (a photo of the finished part is nice).
@@ -248,7 +250,7 @@ Descriptions: first sentence ≤ 60 chars and searchable (Tool Search defers plu
 | home3d_slice | library_file_id:int, quality?:draft/standard/fine, material?:str, colour?:str, eject?:auto/on/off, request_id?:int | slice with the right preset, inspect G-code, eject assessment, time/grams/preview link/warnings |
 | home3d_queue | action: add/list/remove, sliced_file_id?, ams_slot?:int, request_id?, requester?, queue_item_id? | add always manual_start; records job + eject plan |
 | home3d_start | queue_item_id:int, allow_jump?:bool | gated start (see hooks); re-checks start_gate in the handler |
-| home3d_stop | action: stop/pause/resume, reason:str | stop/pause allowed for anyone ("dur" = stop now); resume gated |
+| home3d_stop | action: stop/pause/resume, reason:str | stop/pause under `stop_policy` (known / anyone / owner; "dur" = stop now); resume gated |
 | home3d_clear_plate | action: check/confirm | check = camera + plate check + temps; confirm = clear_plate_gate then mark_plate_cleared |
 | home3d_household | action: who/history/remember/note, person?:str, text?:str | memory of who asked what |
 | home3d_human_needed | action: log/list, kind?, detail?, who? | log a moment a person had to act |
@@ -256,7 +258,7 @@ Descriptions: first sentence ≤ 60 chars and searchable (Tool Search defers plu
 
 ### Hooks — `home3d/hooks.py`
 ```python
-def make_hooks(rt: Runtime) -> dict[str, Callable]   # {"pre_tool_call": f, "post_tool_call": g, "pre_llm_call": h}
+def make_hooks(rt: Runtime) -> dict[str, Callable]   # {"pre_tool_call", "post_tool_call", "pre_llm_call", "pre_gateway_dispatch"}
 ```
 - `pre_tool_call(tool_name, args, task_id="", session_id="", **kw)`: only for `home3d_start`,
   `home3d_clear_plate` (action confirm) and `home3d_stop` (action resume):
@@ -279,7 +281,8 @@ def make_hooks(rt: Runtime) -> dict[str, Callable]   # {"pre_tool_call": f, "pos
 ```python
 def make_command(rt: Runtime) -> Callable   # handler(raw_args: str, source=None, session_id=None, platform=None) -> str
 ```
-`/home3d` subcommands: `status`, `approve start <queue_id>`, `approve clear`, `whoami`, `upgrades`,
+`/home3d` subcommands: `status`, `approve start <queue_id>`, `approve clear`, `approve resume [ack]`, `stop`,
+`pause`, `collected <part id>`, `whoami`, `upgrades`,
 `moments`, `help`. `approve` only works when `source.user_id` (or `source.chat_id` fallback is NOT
 accepted) is an owner id, or when there is no source (local CLI/TUI owner session). Grants a 15-minute
 single-use approval in the store.
@@ -301,7 +304,7 @@ and the outbox — the judge path).
 def register_all(ctx) -> None
 ```
 Creates `Runtime(ctx)`, registers every tool (`ctx.register_tool(name=..., toolset=TOOLSET, schema=...,
-handler=..., emoji="🧰")`), the three hooks, `/home3d`, the `home3d` CLI command, and the bundled skill
+handler=..., emoji="🧰")`), the four hooks, `/home3d`, the `home3d` CLI command, and the bundled skill
 (`ctx.register_skill("household-printing", <dir>/skills/household-printing/SKILL.md, description=...)`).
 No network or threads in register().
 
@@ -399,7 +402,7 @@ the demo hid too much. These decisions supersede the "approval" paragraphs above
   over). On approve the hook issues a single-use **handler pass** bound to (tool, target, session); the handler
   consumes it first and refuses without one, so `ctx.dispatch_tool` (which skips hooks) cannot bypass the check.
   `Store.consume_pass` is atomic across processes (`BEGIN IMMEDIATE` + `UPDATE ... WHERE used=0`). Stop and pause
-  are never gated. `/home3d approve start <id> [jump] | clear | resume [ack]` (owner only) runs the same
+  pass no safety gate; since 0.2.0 who may use them is `stop_policy` (`gates.stop_refusal`). `/home3d approve start <id> [jump] | clear | resume [ack]` (owner only) runs the same
   `hooks.evaluate()` and, on success, issues a pass for its own one-off session and calls the handler directly;
   on any failure nothing is kept and the owner sends the command again. No stored approval authorises a later
   call any more. Resume with a blocking HMS needs the owner's acknowledgement (`resume ack` / `ack_hms=true` from

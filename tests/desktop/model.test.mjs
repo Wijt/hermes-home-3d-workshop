@@ -17,7 +17,10 @@ import {
   isReady,
   normalize,
   noticeLine,
+  noticeStatusLabel,
   noticeSummary,
+  noticeTone,
+  outcomeLabel,
   partColor,
   personLabel,
   progressPct,
@@ -170,7 +173,37 @@ test('notices: failures first, then pending, then messages with nowhere to go', 
   assert.equal(noticeSummary({ pending: 0, failed: 0, recent: [nowhere] }).tone, 'warn')
   assert.equal(noticeSummary({ pending: 0, failed: 0, recent: [{ ...nowhere, status: 'sent' }] }).text, 'Everyone was told')
   assert.equal(noticeLine(nowhere), 'Finished: "Coaster" (#1)')
-  assert.equal(noticeLine({ ...nowhere, kind: 'Print started' }), 'Print started')
+  // a viewer who is not the owner gets no text: the kind in words and the job
+  assert.equal(noticeLine({ ...nowhere, text: '', kind: 'started', job: 'Coaster' }), 'Print started: Coaster')
+  assert.equal(noticeLine({ ...nowhere, text: '', kind: 'some_new_kind', job: '' }), 'Some new kind')
+  // dry_run: simulated, not sent; neutral, never counted as a failure
+  const dry = { ...nowhere, status: 'dry_run' }
+  assert.equal(noticeStatusLabel('dry_run'), 'Simulated, not sent')
+  assert.equal(noticeTone('dry_run'), 'neutral')
+  assert.equal(noticeTone('failed'), 'bad')
+  assert.deepEqual(noticeSummary({ pending: 0, failed: 0, dry_run: 1, recent: [dry] }), { text: 'Simulated: messages are written, not sent', tone: 'neutral' })
+})
+
+test('done box: real part ids, the collected flag and how the part left the plate', () => {
+  const ov = normalize({ done_box: [
+    { id: 4, job_id: 9, name: 'a coaster', outcome: 'taken_off', collected: false },
+    { id: 3, job_id: 7, name: 'key tag', outcome: 'pushed', collected: true, collected_by: 'Mum' },
+    { id: 2, job_id: null, name: 'clip', outcome: 'something_new' }
+  ] })
+  const [a, b, c] = ov.done_box
+  assert.equal(a.command, 'home3d collected 4')
+  assert.equal(a.job_id, 9)
+  assert.deepEqual(outcomeLabel(a), { text: 'Taken off the plate', tone: 'good' })
+  assert.deepEqual(outcomeLabel(b), { text: 'Collected by Mum', tone: 'neutral' })
+  assert.equal(c.outcome, 'unknown')
+  assert.equal(c.job_id, null)
+})
+
+test('groups and setup state come through normalize', () => {
+  const ov = normalize({ groups: [{ name: 'Lab', tone: 'team', language: 'en', members: 2 }, { tone: 'x' }], setup: { checks: [], pending: true, checked_ts: null } })
+  assert.deepEqual(ov.groups, [{ name: 'Lab', tone: 'team', language: 'en', members: 2 }])
+  assert.equal(ov.setup.pending, true)
+  assert.equal(ov.setup.checked_ts, null)
 })
 
 test('health: worst checks first, watcher line, model calls', () => {

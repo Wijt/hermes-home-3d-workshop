@@ -1,6 +1,6 @@
 {
   "name": "hermes-home-3d-workshop-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Workshop screen for Hermes Desktop: the printer owner's back room (now printing, approvals, queue, done box, filament, notices, health, design versions) with a three.js part viewer.",
   "license": "MIT",

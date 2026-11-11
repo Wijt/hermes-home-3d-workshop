@@ -1,7 +1,7 @@
 ---
 name: household-printing
 description: "Use when someone at home asks for a 3D print."
-version: 0.1.0
+version: 0.2.0
 author: Wijt, Hermes Agent
 license: MIT
 metadata:

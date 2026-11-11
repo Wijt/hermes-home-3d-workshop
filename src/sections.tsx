@@ -12,6 +12,7 @@ import {
   noticeLine,
   noticeStatusLabel,
   noticeSummary,
+  noticeTone,
   outcomeLabel,
   setupSummary,
   sortChecks,
@@ -91,9 +92,9 @@ export function DoneBox({ ov, rest, nowSec }: P) {
         <ul className="w-rows">
           {ov.done_box.map(d => {
             const out = outcomeLabel(d)
-            const cmd = d.command || `home3d collected ${d.job_id}`
+            const cmd = d.command || `home3d collected ${d.id}`
             return (
-              <li key={d.job_id} className="w-row">
+              <li key={d.id} className="w-row" data-workshop-part={d.id}>
                 <span className="w-thumb" style={{ width: 64, height: 48 }}>
                   {d.photo ? (
                     <RefImage rest={rest} fileRef={d.photo} alt={`Photo of ${d.name} after printing`} fallback={<Icon name="camera" />} />
@@ -104,7 +105,7 @@ export function DoneBox({ ov, rest, nowSec }: P) {
                 <div className="main">
                   <span className="title">
                     <span className="ellipsis">{d.name || 'A print'}</span>
-                    <Tag tone={d.collected ? 'neutral' : out.tone}>{d.collected ? 'Collected' : out.text}</Tag>
+                    <Tag tone={out.tone}>{out.text}</Tag>
                   </span>
                   <span className="sub">
                     <span>
@@ -115,7 +116,7 @@ export function DoneBox({ ov, rest, nowSec }: P) {
                   </span>
                 </div>
                 <div className="end">
-                  {!d.collected && d.outcome !== 'failed' ? (
+                  {!d.collected ? (
                     <button
                       type="button"
                       className="w-btn sm"
@@ -217,7 +218,7 @@ export function Notices({ ov, nowSec }: P) {
       {recent.length ? (
         <ul className="w-rows">
           {recent.map((r, i) => {
-            const tone = r.status === 'sent' ? 'good' : r.status === 'failed' ? 'bad' : 'warn'
+            const tone = noticeTone(r.status)
             return (
               <li key={`${r.ts}-${i}`} className="w-row" style={{ alignItems: 'flex-start', padding: '8px 2px' }}>
                 <span className={`w-dot t-${tone}`} aria-hidden />
@@ -251,7 +252,10 @@ export function Notices({ ov, nowSec }: P) {
 
 export function Improve({ ov, nowSec }: P) {
   const open = ov.needs_human.filter(h => h.open)
-  const closed = ov.needs_human.length - open.length
+  const handled = ov.needs_human.filter(h => !h.open)
+  const closed = handled.length
+  // the open moments first; the space left shows the latest handled ones (what the upgrade proposals count)
+  const shown = [...open.slice(0, 5), ...handled.slice(0, Math.max(0, 4 - open.length))]
   return (
     <Section
       id="improve"
@@ -260,16 +264,18 @@ export function Improve({ ov, nowSec }: P) {
       count={open.length || null}
       question="Moments it asked a human, and what it proposes to do better."
     >
-      {open.length ? (
+      {open.length ? null : <Empty>Nothing needs a person right now{closed ? ` (${closed} handled before)` : ''}.</Empty>}
+      {shown.length ? (
         <ul className="w-rows">
-          {open.slice(0, 5).map(h => (
-            <li key={h.id} className="w-row" style={{ alignItems: 'flex-start' }}>
-              <span style={{ color: 'var(--w-yellow)', marginTop: 2 }}>
+          {shown.map(h => (
+            <li key={h.id} className="w-row" style={{ alignItems: 'flex-start' }} data-workshop-moment={h.open ? 'open' : 'handled'}>
+              <span style={{ color: h.open ? 'var(--w-yellow)' : 'var(--w-fg3)', marginTop: 2 }}>
                 <Icon name="hand" />
               </span>
               <div className="main">
-                <span>{h.text}</span>
+                <span className={h.open ? undefined : 'muted'}>{h.text}</span>
                 <span className="sub">
+                  {h.open ? null : <Tag tone="neutral">handled</Tag>}
                   {h.job ? <span>{h.job}</span> : null}
                   {h.who ? <span>for {h.who}</span> : null}
                   <span>{fmtAgo(h.ts, nowSec)}</span>
@@ -278,9 +284,7 @@ export function Improve({ ov, nowSec }: P) {
             </li>
           ))}
         </ul>
-      ) : (
-        <Empty>Nothing needs a person right now{closed ? ` (${closed} handled before)` : ''}.</Empty>
-      )}
+      ) : null}
       <div style={{ marginTop: 10 }}>
         <div className="faint" style={{ fontSize: 11.5, fontWeight: 650, textTransform: 'uppercase', letterSpacing: '.06em', padding: '6px 0' }}>
           Proposed upgrades
@@ -427,6 +431,13 @@ export function Setup({ ov, nowSec }: P) {
             model calls: <b style={{ color: calls === 0 ? undefined : 'var(--w-yellow)' }}>{calls}</b>
           </span>
         ) : null}
+        {ov.setup.pending ? (
+          <span className="faint" data-workshop-setup="checking">
+            checking the setup now…
+          </span>
+        ) : fmtAgo(ov.setup.checked_ts, nowSec) ? (
+          <span className="faint">setup checked {fmtAgo(ov.setup.checked_ts, nowSec)}</span>
+        ) : null}
       </div>
       {bad.length ? (
         <ul className="w-rows">
@@ -469,7 +480,9 @@ export function Setup({ ov, nowSec }: P) {
           </ul>
         </details>
       ) : null}
-      {!checks.length ? <Empty icon="wrench">The workshop has not run its setup check yet.</Empty> : null}
+      {!checks.length ? (
+        <Empty icon="wrench">{ov.setup.pending ? 'The setup check is running; its results show here in a moment.' : 'The workshop has not run its setup check yet.'}</Empty>
+      ) : null}
     </Section>
   )
 }

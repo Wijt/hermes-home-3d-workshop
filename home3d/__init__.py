@@ -17,4 +17,4 @@ Layout (see docs/DESIGN.md):
 
 PLUGIN_NAME = "home-3d-workshop"
 TOOLSET = "home_3d_workshop"
-__version__ = "0.1.0"
+__version__ = "0.2.0"

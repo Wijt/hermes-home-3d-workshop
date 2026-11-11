@@ -86,7 +86,7 @@ each command adds about 10 s. Render stills while working.
 
 ## Real footage (final.tsx)
 
-`final.tsx` is the same 88 s film as `fallback.tsx`. For each beat, a clip with the agreed name in `media/footage/`
+`final.tsx` is the same 86 s film as `fallback.tsx`. For each beat, a clip with the agreed name in `media/footage/`
 replaces the fallback picture, with the same words and captions on top. A beat with no clip keeps its fallback.
 No code edits are needed:
 
@@ -111,3 +111,16 @@ built-in simulated printer" because `LABEL_CLIP_03_AS_SIMULATED` in `final.tsx` 
 if clip 03 was recorded on the real printer. Clip 08 must have names and group titles covered, and if it is a
 re-creation, add the re-created label. Do not caption a real-printer clip as the plugin driving it unless the
 plugin did.
+
+## Sound for X
+
+`fallback.tsx` has no audio track, so its file can be posted as it is. `final.tsx` keeps the sound of clip
+02 (the voice note). raea writes that sound as Opus, and X expects AAC, so convert once (this needs
+`ffmpeg`, which is not installed on this machine):
+
+```sh
+ffmpeg -i out/final.mp4 -c:v copy -c:a aac -b:a 128k -movflags +faststart out/final-x.mp4
+```
+
+See also [SHOWCASE-TIMELINE.md](SHOWCASE-TIMELINE.md) for the film second by second and
+[SHOOT-LIST.md](SHOOT-LIST.md) for the nine clips to shoot.

@@ -103,34 +103,49 @@ export interface QueueItem {
   model: ModelRefs | null
 }
 
-export type Outcome = 'pushed' | 'on_plate' | 'failed'
+/** How the part left the plate (Store.done_box `left_plate`): pushed off, waiting on it, taken off by a person. */
+export type Outcome = 'pushed' | 'on_plate' | 'taken_off' | 'unknown'
 
 export interface DoneItem {
-  job_id: number
+  /** The part id `/home3d collected <id>` takes. */
+  id: number
+  /** The queue item it was printed as. */
+  job_id: number | null
   name: string
   for: Person
   finished_ts: number | null
   outcome: Outcome
   photo: FileRef | null
   collected: boolean
+  collected_by: string
   detail: string
   command: string
 }
 
-export type NoticeStatus = 'sent' | 'pending' | 'failed' | 'no_target'
+/** The outbox states. `dry_run`: simulated, nothing was sent on purpose (not a failure). */
+export type NoticeStatus = 'sent' | 'pending' | 'failed' | 'no_target' | 'dry_run'
 
 export interface Notice {
   ts: number | null
+  /** Who it was for, in words: a group's name, "owner chat", "family chat". */
   to: string
+  group: string
   kind: string
+  job: string
   status: NoticeStatus
+  attempts: number
+  /** Empty for a viewer who is not the owner. */
   error: string
+  /** Empty for a viewer who is not the owner. */
   text: string
 }
 
 export interface Notices {
   pending: number
+  sent: number
   failed: number
+  no_target: number
+  dry_run: number
   recent: Notice[]
 }
 
@@ -150,9 +165,12 @@ export interface NeedsHuman {
   kind: string
   text: string
   ts: number | null
+  /** False once the event that resolves it happened (the plate was cleared, the start approved, ...). */
   open: boolean
   job: string
   who: string
+  /** What resolved it, for a handled moment. */
+  resolved_by: string
 }
 
 export interface Upgrade {
@@ -199,6 +217,9 @@ export interface Watcher {
 export interface Group {
   name: string
   tone: 'family' | 'team' | string
+  language: string
+  /** How many sender ids the group lists. */
+  members: number
 }
 
 export interface Overview {
@@ -218,7 +239,8 @@ export interface Overview {
   needs_human: NeedsHuman[]
   upgrades: Upgrade[]
   designs: Design[]
-  setup: { checks: SetupCheck[] }
+  /** `pending`: a check run is going on in the background; `checked_ts`: when the shown rows were made. */
+  setup: { checks: SetupCheck[]; checked_ts: number | null; pending: boolean }
   watcher: Watcher
   groups: Group[]
   viewer: { is_owner: boolean; reason: string }
