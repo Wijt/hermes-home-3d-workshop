@@ -49,7 +49,7 @@ src = open(src_path, encoding="utf-8").read()
 log = os.environ.get("FAKE_OPENSCAD_LOG")
 entry = {"argv": args, "cwd": os.getcwd(), "rlimit_as": RLIMIT, "rlimit_cpu": RLIMIT_CPU,
          "rlimit_fsize": RLIMIT_FSIZE, "openscadpath": os.environ.get("OPENSCADPATH"), "pid": os.getpid(),
-         "sid": os.getsid(0) if hasattr(os, "getsid") else None, "t0": time.time()}
+         "sid": os.getsid(0) if hasattr(os, "getsid") else None, "t0": time.time(), "env": dict(os.environ)}
 directives = [d.strip() for d in re.findall(r"//\s*FAKE:\s*(.*)", src)]
 if "-d" in args and not any(d.split(" ")[0] in ("error", "nodeps") for d in directives):
     # like OpenSCAD: every file it read, in make syntax (not after a parse error)
@@ -196,6 +196,9 @@ os.dup2(1, 2)  # like xvfb-run: the command's stderr arrives on stdout
 os.execvp(args[0], args)
 '''
 
+FAKE_SWITCHES = ("FAKE_OPENSCAD_LOG", "FAKE_XVFB_LOG", "FAKE_OPENSCAD_NOPNG", "FAKE_OPENSCAD_DEADX",
+                 "FAKE_CHILD_PIDFILE")
+
 SCAD = ("// FAKE: echo \"size\", 40\n// FAKE: warn x was assigned on line 3 but was overwritten on line 7\n"
         "cube([40, 20, 10]);\n")
 
@@ -220,6 +223,8 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.delenv("FAKE_OPENSCAD_NOPNG", raising=False)
     monkeypatch.delenv("FAKE_OPENSCAD_DEADX", raising=False)
     monkeypatch.delenv("FAKE_UNDER_XVFB", raising=False)
+    # OpenSCAD gets a short, explicit environment: the fakes' own switches have to be on that list to reach them
+    monkeypatch.setattr(customize, "_ENV_KEEP", customize._ENV_KEEP + FAKE_SWITCHES)
     monkeypatch.setattr(design.sys, "platform", "linux")
     monkeypatch.setattr(design, "_display_broken", False)
     design._version_cache.clear()
@@ -806,6 +811,55 @@ def test_render_limits_cpu_and_file_size_and_drops_openscadpath(fake, monkeypatc
     if os.name == "posix":
         assert c["rlimit_cpu"] == [35, 40]  # time limit + 5 s, hard + 5 s more: an orphaned render still stops
         assert c["rlimit_fsize"] == design.MAX_STL_BYTES
+
+
+SECRETS = {"OPENAI_API_KEY": "sk-test", "ANTHROPIC_API_KEY": "sk-ant-test", "OPENROUTER_API_KEY": "or-test",
+           "HERMES_HOME": "/somewhere/.hermes", "AWS_SECRET_ACCESS_KEY": "aws-test", "OPENSCADPATH": "/"}
+
+
+def _only_the_short_list(env: dict) -> bool:
+    """Every variable the fake OpenSCAD saw is on the list (or one the fakes or Python set themselves)."""
+    allowed = set(customize._ENV_KEEP) | {"FAKE_UNDER_XVFB"}
+    return all(k in allowed or k.startswith(("LC_", "__")) for k in env)
+
+
+def test_openscad_and_xvfb_run_get_a_short_environment_without_secrets(fake, monkeypatch):
+    for k, v in SECRETS.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("LANG", "tr_TR.UTF-8")
+    monkeypatch.setenv("LC_NUMERIC", "C")
+    monkeypatch.setenv("XAUTHORITY", "/tmp/some.xauth")
+    design.render("env", SCAD, views=["iso"])  # no DISPLAY: the preview goes through xvfb-run
+    calls = fake.calls()
+    assert len(calls) == 2 and len(fake.xvfb_calls()) == 1
+    for c in calls:
+        env = c["env"]
+        assert not set(SECRETS) & set(env), sorted(env)
+        assert _only_the_short_list(env), sorted(env)
+        assert env["PATH"] == os.environ["PATH"] and env["LANG"] == "tr_TR.UTF-8" and env["LC_NUMERIC"] == "C"
+        assert "DISPLAY" not in env and "XAUTHORITY" not in env  # xvfb-run brings its own display
+    monkeypatch.setenv("DISPLAY", ":0")  # a real display: the preview runs on it, without xvfb-run
+    design.render("env", SCAD, views=["top"])
+    stl, png = fake.calls()[-2:]
+    assert "DISPLAY" not in stl["env"] and "XAUTHORITY" not in stl["env"]  # the STL render draws nothing
+    assert png["env"]["DISPLAY"] == ":0" and png["env"]["XAUTHORITY"] == "/tmp/some.xauth"
+    for c in (stl, png):
+        assert not set(SECRETS) & set(c["env"]) and _only_the_short_list({k: v for k, v in c["env"].items()
+                                                                           if k not in ("DISPLAY", "XAUTHORITY")})
+
+
+def test_the_version_check_gets_the_short_environment_too(fake, monkeypatch):
+    seen = {}
+    real_run = design.subprocess.run
+
+    def spy(cmd, **kw):
+        seen.update(env=kw.get("env"))
+        return real_run(cmd, **kw)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(design.subprocess, "run", spy)
+    assert design.openscad_status()["version"] == "2021.01"
+    assert seen["env"] is not None and "OPENAI_API_KEY" not in seen["env"] and "PATH" in seen["env"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="signals are POSIX")

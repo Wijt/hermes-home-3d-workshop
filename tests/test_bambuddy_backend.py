@@ -678,6 +678,57 @@ def test_resolve_model_fragment_is_instance_id(http, backend):
     assert card.instances[0].profile_id == 222532999 and card.url == url
 
 
+@pytest.mark.parametrize("given, sent", [
+    ("1085771", "https://makerworld.com/en/models/1085771"),
+    ("  1085771 ", "https://makerworld.com/en/models/1085771"),
+    ("https://makerworld.com/en/models/1085771-rose#profileId-1078600",
+     "https://makerworld.com/en/models/1085771-rose#profileId-1078600"),
+    ("https://www.makerworld.com/en/models/5?from=search", "https://www.makerworld.com/en/models/5?from=search"),
+    ("https://makerworld.com:443/en/models/5", "https://makerworld.com:443/en/models/5"),
+    ("HTTPS://MakerWorld.com/en/models/5", "HTTPS://MakerWorld.com/en/models/5"),
+    ("makerworld.com/en/models/5", "https://makerworld.com/en/models/5"),
+    ("www.makerworld.com/en/models/5", "https://www.makerworld.com/en/models/5"),
+])
+def test_makerworld_url_accepts_ids_and_makerworld_links(given, sent):
+    assert bb.makerworld_url(given) == sent
+
+
+@pytest.mark.parametrize("given", [
+    "http://makerworld.com/en/models/5",  # not https
+    "ftp://makerworld.com/en/models/5",
+    "file:///etc/passwd",
+    "http://169.254.169.254/latest/meta-data/",
+    "https://localhost:8000/api/v1/settings",
+    "https://example.com/makerworld.com/en/models/5",
+    "https://makerworld.com.example.com/en/models/5",
+    "https://notmakerworld.com/en/models/5",
+    "https://makerworld.com@example.com/en/models/5",
+    "https://example.com\\@makerworld.com/en/models/5",
+    "https://user:pw@makerworld.com/en/models/5",
+    "https://makerworld.com:8443/en/models/5",
+    "https://makerworld.com:x/en/models/5",
+    "https://makerworld.com/en/models/5\nHost: example.com",
+    "https://makerworld.com /en/models/5",
+    "makerworld.example.com/en/models/5",
+    "www.makerworld.com.cn/zh/models/5",
+    "javascript:alert(1)",
+    "//makerworld.com/en/models/5",
+    "a rose vase",
+    "\u0661\u0662\u0663",  # digits, but not ASCII ones
+])
+def test_makerworld_url_refuses_everything_else(given, http, backend):
+    with pytest.raises(BackendError, match="not a MakerWorld link"):
+        bb.makerworld_url(given)
+    with pytest.raises(BackendError, match="not a MakerWorld link"):
+        backend.resolve_model(given)
+    assert http.calls == []  # refused here: Bambuddy is never asked to fetch it
+
+
+def test_makerworld_url_needs_something():
+    with pytest.raises(BackendError, match="no MakerWorld link"):
+        bb.makerworld_url("  ")
+
+
 def test_import_model_checks_download_status(http, backend):
     http.add("GET", "/makerworld/status", {"has_cloud_token": False, "can_download": False,
                                            "sign_in_expired": True})

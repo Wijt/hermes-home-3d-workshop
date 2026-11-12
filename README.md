@@ -580,6 +580,8 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
 - **Network.** The plugin talks only to the Bambuddy URL you set, over HTTP on your LAN. If you set
   `HOME3D_BAMBUDDY_API_KEY`, it goes in the `X-API-Key` header, unencrypted over plain HTTP. MakerWorld
   lookups and downloads go through Bambuddy; Bambuddy contacts makerworld.com, the plugin does not. The
+  plugin gives Bambuddy only a numeric model id or an `https://makerworld.com/...` link (a subdomain of
+  makerworld.com is fine); any other text is refused before the request. The
   setup check (`hermes home3d doctor`, the status tool's `capabilities`, the Workshop screen's Health
   section) makes read-only requests, among them `GET /api/v1/updates/version`,
   `GET /api/v1/makerworld/status` and `GET /api/v1/printers/<id>/camera/status`; it never takes a photo.
@@ -643,9 +645,11 @@ All settings live under `plugins.entries.home-3d-workshop.settings`.
   `send_timeout_s`), `hermes cron create`, `hermes cron list` and `hermes cron remove` (setup, teardown,
   and `hermes cron list` also for the setup check), `openscad` (the templates and the agent's designs,
   when installed: one render at a time, with a wall-clock and a CPU-time limit, a memory cap and a
-  file-size cap, without `OPENSCADPATH`; `openscad --version` for the setup check) and `xvfb-run` (the
-  design preview pictures on a machine without a display; its X cookie file lives in the design folder and
-  is deleted afterwards).
+  file-size cap; `openscad --version` for the setup check) and `xvfb-run` (the design preview pictures on
+  a machine without a display; its X cookie file lives in the design folder and is deleted afterwards).
+  Both get a short, explicit environment and nothing else from Hermes' own: `PATH`, `HOME`, `LANG`, `LC_*`,
+  `TMPDIR` and `XDG_DATA_HOME`, plus `DISPLAY` and `XAUTHORITY` only when a preview is drawn on a real
+  display. No provider key reaches OpenSCAD, and neither does `OPENSCADPATH`.
 - **Background job.** One cron job, every 2 minutes by default (720 runs a day). `hermes home3d setup`
   creates it, and `hermes home3d teardown` removes it with its script. Run teardown before you remove
   the plugin; after removal, use `hermes cron remove` and delete the script yourself. While the plugin

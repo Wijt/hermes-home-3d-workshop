@@ -78,7 +78,9 @@ loop in about 10 seconds and sends nothing.
 
 - **Network.** Only the Bambuddy URL the user sets, over HTTP on the LAN. When set,
   `HOME3D_BAMBUDDY_API_KEY` is sent as `X-API-Key`, unencrypted over plain HTTP. MakerWorld lookups and
-  downloads go through Bambuddy; the plugin makes no other network calls. The setup check (`hermes
+  downloads go through Bambuddy; the plugin makes no other network calls. Bambuddy is given only a
+  numeric model id or an `https://makerworld.com/...` link (or a subdomain of it); any other text is
+  refused before the request. The setup check (`hermes
   home3d doctor`, the status tool's `capabilities`, the Workshop screen) makes read-only requests,
   including `GET /api/v1/updates/version`, `GET /api/v1/makerworld/status` and
   `GET /api/v1/printers/<id>/camera/status`; it never takes a photo.
@@ -164,7 +166,9 @@ loop in about 10 seconds and sends nothing.
   `openscad` (the templates and the agent's designs; `openscad --version` for the setup check) and
   `xvfb-run` (design preview pictures without a display), only when installed. Renders run one at a time,
   with a 180 s default time limit (at most 600 s) that stops the process group, a CPU-time limit (an
-  orphaned OpenSCAD still stops), a memory cap and an STL size cap, without `OPENSCADPATH`. A design may
+  orphaned OpenSCAD still stops), a memory cap and an STL size cap. `openscad` and `xvfb-run` get an
+  explicit short environment (`PATH`, `HOME`, `LANG`, `LC_*`, `TMPDIR`, `XDG_DATA_HOME`; `DISPLAY` and
+  `XAUTHORITY` only for a preview on a real display), so no provider key and no `OPENSCADPATH`. A design may
   read files only from its own folder and OpenSCAD's own libraries: the source is checked before the
   render, and OpenSCAD's `-d` list of the files it read is checked after it (a version that read anything
   else is refused: no STL, no pictures, no echo).

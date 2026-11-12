@@ -288,7 +288,7 @@ def _openscad_version(exe: str) -> str:
         return _version_cache[exe]
     try:
         p = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20, errors="replace",
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, env=_child_env())
         m = re.search(r"version\s+(\S+)", (p.stderr or "") + "\n" + (p.stdout or ""), re.I)
         v = m.group(1) if m else ""
     except (OSError, subprocess.SubprocessError):
@@ -727,17 +727,17 @@ def _kill_group(proc: subprocess.Popen, grace_s: float = 2.0) -> None:
         pass
 
 
-def _child_env() -> dict:
-    """The parent's environment without OPENSCADPATH: library lookups stay in OpenSCAD's own library folders."""
-    env = dict(os.environ)
-    env.pop("OPENSCADPATH", None)
-    return env
+def _child_env(display: bool = False) -> dict:
+    """What OpenSCAD and xvfb-run get in place of the parent's environment: ``customize.openscad_env``, an
+    explicit short list. No provider keys reach model-written OpenSCAD, and without OPENSCADPATH library lookups
+    stay in OpenSCAD's own library folders. ``display`` adds DISPLAY and XAUTHORITY (a preview without xvfb-run)."""
+    return customize.openscad_env(display=display)
 
 
 def _run(cmd: list[str], cwd: Path, timeout: float, *, mem_limit: Optional[int] = None,
-         cpu_limit_s: Optional[float] = None, fsize_limit: Optional[int] = None) -> dict:
+         cpu_limit_s: Optional[float] = None, fsize_limit: Optional[int] = None, display: bool = False) -> dict:
     kwargs: dict = dict(cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, errors="replace", env=_child_env())
+                        text=True, errors="replace", env=_child_env(display))
     if os.name == "posix":
         kwargs["start_new_session"] = True
         fn = _limits(mem=mem_limit, cpu_s=cpu_limit_s, fsize=fsize_limit)
@@ -788,7 +788,9 @@ def _preview_once(exe: str, folder: Path, wrapper: Path, png: Path, view: str, t
         cmd = [_xvfb_exe() or "xvfb-run", "-a", "-f", str(auth), "-s", XVFB_SCREEN, *cmd]
     try:
         # llvmpipe may draw on several cores at once: a generous CPU limit, only there for an orphaned preview
-        return _run(cmd, folder, timeout, cpu_limit_s=4 * timeout + 10, fsize_limit=MAX_STL_BYTES)
+        # the real display is passed on only when OpenSCAD draws on it; xvfb-run brings its own
+        return _run(cmd, folder, timeout, cpu_limit_s=4 * timeout + 10, fsize_limit=MAX_STL_BYTES,
+                    display=not use_xvfb)
     finally:
         if auth is not None:
             for extra in ("", "-c", "-l", "-n"):

@@ -250,7 +250,7 @@ def _fake_openscad(tmp_path, monkeypatch, fail=False):
     bindir.mkdir()
     log = tmp_path / "args.txt"
     exe = bindir / "openscad"
-    body = ('#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(log) + '"\n'
+    body = ('#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(log) + '"\nenv > "' + str(tmp_path / "env.txt") + '"\n'
             + ('echo "ERROR: Parser error in file" >&2\nexit 1\n' if fail else
                'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then shift; OUT="$1"; fi; shift; done\n'
                'printf "solid t\\n facet normal 0 0 1\\n outer loop\\n vertex 0 0 0\\n vertex 80 0 0\\n'
@@ -269,6 +269,34 @@ def test_render_template_with_fake_openscad(tmp_path, monkeypatch):
     args = log.read_text().splitlines()
     assert args[0] == "-o" and args[-1].endswith("name_tag.scad")
     assert 'text="Sa\\"m\\\\"' in args and "width=90" in args and "thickness=3" in args
+
+
+def test_openscad_env_is_a_short_explicit_list(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("LC_")]:
+        monkeypatch.delenv(k)
+    for k, v in {"HOME": "/home/x", "LANG": "tr_TR.UTF-8", "LC_ALL": "C", "TMPDIR": "/tmp/t", "XDG_DATA_HOME": "/d",
+                 "DISPLAY": ":0", "XAUTHORITY": "/x", "OPENAI_API_KEY": "sk-test", "OPENSCADPATH": "/",
+                 "LD_PRELOAD": "/evil.so", "PYTHONPATH": "/p"}.items():
+        monkeypatch.setenv(k, v)
+    base = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "XDG_DATA_HOME"}
+    windows = set(customize._ENV_KEEP_WINDOWS) if os.name == "nt" else set()
+    env = customize.openscad_env()
+    assert base <= set(env) <= base | windows and env["PATH"] == os.environ["PATH"] and env["LC_ALL"] == "C"
+    shown = customize.openscad_env(display=True)
+    assert set(shown) - set(env) == {"DISPLAY", "XAUTHORITY"} and shown["DISPLAY"] == ":0"
+    monkeypatch.delenv("TMPDIR")
+    assert "TMPDIR" not in customize.openscad_env()  # a variable the parent does not have is not made up
+
+
+def test_render_template_keeps_the_parents_secrets_from_openscad(tmp_path, monkeypatch):
+    _fake_openscad(tmp_path, monkeypatch)
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENSCADPATH", "DISPLAY"):
+        monkeypatch.setenv(k, "x")
+    customize.render_template("name_tag", {"text": "Sam"}, tmp_path / "tag.stl")
+    names = {ln.split("=", 1)[0] for ln in (tmp_path / "env.txt").read_text().splitlines() if "=" in ln}
+    assert "PATH" in names and not {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENSCADPATH", "DISPLAY"} & names
+    shell_own = {"PWD", "OLDPWD", "SHLVL", "_"}  # what /bin/sh adds for itself
+    assert all(n in customize._ENV_KEEP or n in shell_own or n.startswith("LC_") for n in names), sorted(names)
 
 
 def test_render_template_reports_openscad_errors(tmp_path, monkeypatch):

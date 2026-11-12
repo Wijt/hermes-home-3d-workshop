@@ -417,14 +417,32 @@ def parse_model(d: dict, url: str = "") -> ModelCard:
     )
 
 
+MAKERWORLD_HOST = "makerworld.com"
+
+
 def makerworld_url(url_or_id: str) -> str:
+    """A MakerWorld model id or link as the link Bambuddy is asked to resolve: a numeric id, or
+    ``https://makerworld.com/...`` / ``https://<sub>.makerworld.com/...``. Anything else is refused here: the
+    value comes from a chat message, and Bambuddy fetches what it is given."""
     v = str(url_or_id or "").strip()
     if not v:
         raise BackendError("no MakerWorld link or model id given")
-    if v.isdigit():
+    if v.isascii() and v.isdigit():
         return MAKERWORLD_MODEL_URL.format(id=v)
     if "://" not in v and v.lower().startswith(("makerworld.", "www.makerworld.")):
-        return "https://" + v
+        v = "https://" + v  # a link pasted without its scheme; the host is checked below like any other
+    refused = BackendError("not a MakerWorld link: pass a model id or an https://makerworld.com/... link")
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7f or c == "\\" for c in v):
+        raise refused
+    try:
+        parts = urllib.parse.urlsplit(v)
+        host = (parts.hostname or "").lower().rstrip(".")
+        port = parts.port
+    except ValueError:
+        raise refused from None
+    if (parts.scheme != "https" or "@" in parts.netloc or port not in (None, 443)
+            or not (host == MAKERWORLD_HOST or host.endswith("." + MAKERWORLD_HOST))):
+        raise refused
     return v
 
 

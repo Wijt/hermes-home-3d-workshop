@@ -52,6 +52,8 @@ recipe of the system this plugin was distilled from)
   needs_calibration, message. Known false positives at 18–25 % on an empty plate → treat
   `difference_pct < 26 and not is_empty` as `is_empty=None` (uncertain), never as "empty".
 - resolve_model: `POST /makerworld/resolve {url}` (a bare id → `https://makerworld.com/en/models/<id>`).
+  `makerworld_url` sends only a numeric id or an `https://` link whose host is makerworld.com or a
+  subdomain of it; anything else (another host or scheme, userinfo, another port) is refused before the call.
   Map design.id/title/coverUrl/designCreator.name/license/likeCount/downloadCount/printCount/summary,
   instances[] → profileId/title/compatibility.devProductName/prediction(print time s)/weight,
   already_imported_library_ids. URL fragment `#profileId-NNN` is an *instance id*, not a profileId.
@@ -730,7 +732,9 @@ A security review, a skill review and a designer who built five household parts 
   then strings, then comments), checks positional extrude strings and `filename=`, demands exactly one
   string literal before `,` or `)`, and allows only `[\w./ +-]` in file names; and every render passes
   `-d .<slug>_vN.deps`, whose list of files OpenSCAD really read must stay inside the design folder or
-  OpenSCAD's own library folders (`OPENSCADPATH` is not passed on). Anything else, or a missing list after a
+  OpenSCAD's own library folders (`OPENSCADPATH` is not passed on: `customize.openscad_env` gives OpenSCAD
+  and xvfb-run only PATH, HOME, LANG, LC_*, TMPDIR and XDG_DATA_HOME, and DISPLAY and XAUTHORITY for a preview
+  without xvfb-run, so model-written OpenSCAD never sees a provider key). Anything else, or a missing list after a
   successful run, fails the version closed (`code: refused`; no STL, previews, echo, warnings or error
   text). This also catches a path that arrives only in a `-D` param, which no static check can see.
 - **Limits (M1, M2, L1).** `RLIMIT_CPU` = time limit + 5 s (hard + 5 more) stops an OpenSCAD whose parent

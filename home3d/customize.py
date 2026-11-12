@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
 import shutil
 import struct
@@ -567,6 +568,27 @@ def openscad_available() -> bool:
     return shutil.which("openscad") is not None
 
 
+# Everything OpenSCAD and xvfb-run get from the parent's environment. A design is text a model wrote and OpenSCAD
+# is a vendor binary, so neither runs with Hermes' provider keys (or anything else in os.environ) in reach.
+_ENV_KEEP = ("PATH", "HOME", "LANG", "TMPDIR", "XDG_DATA_HOME")
+_ENV_KEEP_PREFIX = "LC_"
+_ENV_DISPLAY = ("DISPLAY", "XAUTHORITY")  # only for a preview drawn on a real display, never under xvfb-run
+# Windows programs do not start without these; none of them holds a secret.
+_ENV_KEEP_WINDOWS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                     "PATHEXT", "COMSPEC")
+
+
+def openscad_env(display: bool = False) -> dict:
+    """The explicit, minimal environment for ``openscad`` and ``xvfb-run``: PATH, HOME, LANG, LC_*, TMPDIR and
+    XDG_DATA_HOME, plus DISPLAY and XAUTHORITY when ``display`` is true (a preview without xvfb-run, which sets
+    its own). Nothing else is passed on: no provider keys, no OPENSCADPATH."""
+    src = os.environ
+    keep = _ENV_KEEP + (_ENV_KEEP_WINDOWS if os.name == "nt" else ()) + (_ENV_DISPLAY if display else ())
+    env = {k: src[k] for k in keep if k in src}
+    env.update({k: v for k, v in src.items() if k.startswith(_ENV_KEEP_PREFIX)})
+    return env
+
+
 def _check_param(name: str, value, default):
     """Validated python value of one template parameter (str / bool / float)."""
     if isinstance(default, str):
@@ -628,7 +650,8 @@ def render_template(name: str, params: dict, out: Path) -> Path:
         cmd += ["-D", f"{k}={_scad_literal(v)}"]
     cmd.append(str(scad))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+                              env=openscad_env())
     except subprocess.TimeoutExpired:
         raise CustomizeError("OpenSCAD took longer than 5 minutes") from None
     except OSError as e:
@@ -641,5 +664,5 @@ def render_template(name: str, params: dict, out: Path) -> Path:
 
 
 __all__ = ["TEMPLATES", "BUILD_VOLUME_MM", "CustomizeError", "scale_model", "model_bbox", "model_bounds",
-           "openscad_available", "render_template", "template_values", "factor_for_size", "mechanism_words",
-           "fits_build_volume", "check_factor"]
+           "openscad_available", "openscad_env", "render_template", "template_values", "factor_for_size",
+           "mechanism_words", "fits_build_volume", "check_factor"]
